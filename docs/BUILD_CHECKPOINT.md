@@ -1,7 +1,11 @@
 # TrendPilot build checkpoint
 
 **Paused:** 2026-11-08, after Step 7. Step 8 has not been started.
-**Branch:** `feature/m1-m2-signal-intake`. Last commit `bb9af44` (M1 + M2 slice 1), which is pushed. Everything since is **uncommitted** (see §4).
+**Branch:** `feature/m1-m2-signal-intake`.
+- `bb9af44`: M1 + M2 slice 1. Pushed.
+- `3b81866`: M2 slices 2–4 (Steps 5–7) and this checkpoint. Pushed.
+- A follow-up commit updates this checkpoint. Pushed.
+- The working tree is clean (see §4).
 **Baseline:** `docs/TrendPilot_SRS.md`. Product context: `docs/TrendPilot_Auto_Trading_Platform_Requirements.md`.
 
 ## 1. Where we stopped
@@ -10,13 +14,14 @@
 | --- | --- | --- |
 | 1–3 | M1: domain, access, identity, admin, Trade Settings | Done, verified, committed (`bb9af44`) |
 | 4 | M2 slice 1: TradingView webhook intake, routing, durable jobs | Done, verified, committed (`bb9af44`) |
-| 5 | M2 slice 2: paper entries with the attached stop (EXE-01…04) | Done, verified, **uncommitted** |
-| 6 | M2 slice 3: paper exits — stop loss, fixed TP, signal close, manual close (EXT-01/02/05/06) | Done, verified, **uncommitted** |
-| 7 | M2 slice 4: split TP (EXT-03), trailing stop (EXT-04), close and reverse (STR-06) | Done, verified, **uncommitted** — **last completed and verified step** |
+| 5 | M2 slice 2: paper entries with the attached stop (EXE-01…04) | Done, verified, committed and pushed (`3b81866`) |
+| 6 | M2 slice 3: paper exits — stop loss, fixed TP, signal close, manual close (EXT-01/02/05/06) | Done, verified, committed and pushed (`3b81866`) |
+| 7 | M2 slice 4: split TP (EXT-03), trailing stop (EXT-04), close and reverse (STR-06) | Done, verified, committed and pushed (`3b81866`) — **last completed and verified step** |
 
 ### Step 7 verification (latest results, 2026-11-08)
 - `npm run lint`: clean.
 - `npm run typecheck`: clean (all workspaces).
+- Results below are from the last code change, before commit `3b81866`. No tests were rerun after the commit; the commit changed no code.
 - `npm test` (Vitest): **22 files, 341 tests passed**. Before Step 7 changed the worker, the Step 6 exit tests passed 47/47.
 - `npm run test:e2e` (Playwright, 6 specs): **38 passed** (8.0 min). The `npm error … start failed` lines in that output are the intentional worker-crash drills.
 - The manual close-and-reverse replay was run end to end against the **e2e** database on port 3101, including the web-server restart on the next bar. The output matched the README.
@@ -118,30 +123,28 @@ More detail: README sections "M2 slice 2", "M2 slice 3" and "M2 slice 4".
   - The e2e server's clock is fixed at `2026-11-08T09:30:03Z`.
 - **Port 3000:** a dev server started by hand outside these sessions may already be listening on 3000. It was left untouched; verification used ports 3100 and 3101.
 
-## 4. Uncommitted changes to review
+## 4. Commits and changes to review
 
-Nothing has been committed or pushed since `bb9af44`. Review everything below before the first commit for Steps 5–7. The working tree and local paper data are preserved as they are.
+Steps 5–7 are committed in **`3b81866`** ("Build M2 slices 2-4: paper entries, exits, split TP, trailing, reversal"): 72 files, pushed to `origin/feature/m1-m2-signal-intake`. They were committed as one commit because the steps share files such as `schema.ts` and `dispatch.ts`. The commit message describes each step.
 
+Before committing, the staged files were checked: no `.env` files, test output, logs or credentials.
+
+Nothing is uncommitted. The checkpoint update is its own follow-up commit.
+
+**Review when resuming** (contents of `3b81866`):
 - **Database:**
-  - Migrations `0006`–`0010` and their meta snapshots, plus `_journal.json`.
-  - Schema: order intents, positions (TP, trailing), `position_exits`, `position_targets`, `sim_*` tables, guard triggers.
-  - `packages/db/src/paper/`: accounts, market, simulator, entry, exits, reversal, read models.
-  - `signals/dispatch.ts` (entry, exit and reversal steps), `jobs.ts`, seed.
-  - CLIs: `demo-paper.ts` (profiles: entries, exits, split, reverse), `market-fixture.ts`, `market-tick.ts`.
-- **Domain:** `market.ts` (EMA, entry checks), `paperEntry.ts`, `exits.ts` (TP, trailing, signal exits, reversal reasons), split rule in `orderBlock.ts`, error codes.
-- **Web:**
-  - `/v1/me/{holdings,orders,positions,trades,ledger,commands}` routes, including manual close.
-  - My Trades and trade detail pages, `ClosePositionButton`, Signals page outcomes, `exitLabels.ts`, `api.ts`.
-  - `drizzle-orm` moved to dependencies.
-- **Worker:** new job kinds (`paper.submit`, `paper.close`, `paper.reverse`), `market.tick`, log lines, and the `PAPER_SIM_CRASH_AFTER_FILL` drill (refused in production).
-- **Tests:** `paper.test.ts`, `exits.test.ts`, `splitTrailing.test.ts`, `reversal.test.ts`, `paperReplay.ts` harness, domain `market`/`exits` tests, e2e specs 4–6, plus edits to `isolation`, `webhook` and e2e spec 3.
-- **Docs:** README (slices 2–4); this file.
-- **Local data:**
-  - Dev database `trendpilot`: holds the paper state from earlier sessions. Step 7 only applied the migration to it.
-  - E2E database `trendpilot_e2e`: holds the last e2e and manual-verification run.
-  - Neither was reset for this checkpoint.
+  - Migrations `0006`–`0010` and their snapshots.
+  - Paper engine in `packages/db/src/paper/`: simulator, entry, exits, reversal, read models.
+  - Dispatch entry, exit and reversal steps.
+  - Demo, fixture and tick CLIs.
+- **Domain:** EMA and entry checks, exit rules, the split TP rule.
+- **Web:** `/v1/me` holdings, orders, positions, trades, ledger and commands routes; My Trades and trade detail pages; the Signals page.
+- **Worker:** new job kinds and the crash drill.
+- **Tests:** API, domain and e2e specs 4–6.
 
-**Suggested commit split** (when asked): one commit each for Step 5 (paper entries), Step 6 (exits) and Step 7 (split / trailing / reverse). Or one commit for all of M2 slices 2–4 if splitting the shared files is not worth it.
+**Local data (not reset):**
+- Dev database `trendpilot`: holds the paper state from earlier sessions. Migrated through `0010`.
+- E2E database `trendpilot_e2e`: holds the last e2e and manual-verification run.
 
 ## 5. Next task: Step 8 (not started)
 
@@ -159,6 +162,7 @@ Nothing has been committed or pushed since `bb9af44`. Review everything below be
 - **Show the data source:** label it in the UI and API (fixture vs public MEXC), and surface feed health to admins.
 
 **First action when resuming:**
-1. Run `git status`.
+1. Run `git status`: the tree should be clean.
 2. Run `npm test` and `npm run test:e2e` to confirm the Step 7 baseline (341 / 38).
-3. Decide whether to commit Steps 5–7 before starting Step 8.
+3. Open the PR for `feature/m1-m2-signal-intake` → `main` once `gh auth login -h github.com` succeeds.
+4. Then start Step 8.
