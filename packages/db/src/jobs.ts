@@ -22,10 +22,17 @@ export async function enqueueJob(tx: Executor, j: { kind: string; dedupeKey: str
   return { id: existing!.id, created: false };
 }
 
-/** Claims the oldest runnable job (pending and due, or running with an expired lease). */
-export async function claimNextJob(db: Db, opts: { workerId: string; now: Date; leaseMs: number; kinds?: string[] }): Promise<JobRow | null> {
-  const now = opts.now.toISOString();
-  const leaseUntil = new Date(opts.now.getTime() + opts.leaseMs).toISOString();
+/**
+ * Claims the oldest runnable job (pending and due, or running with an expired lease).
+ * `now` is the signal clock (what run_after was stamped with at intake); `leaseNow` is real
+ * time for leases and retry backoff. They differ only when SIGNAL_TEST_CLOCK pins the signal
+ * clock; a job is due once either clock has reached its run_after.
+ */
+export async function claimNextJob(db: Db, opts: { workerId: string; now: Date; leaseMs: number; kinds?: string[]; leaseNow?: Date }): Promise<JobRow | null> {
+  const leaseNow = opts.leaseNow ?? opts.now;
+  const now = new Date(Math.max(opts.now.getTime(), leaseNow.getTime())).toISOString();
+  const leaseClock = leaseNow.toISOString();
+  const leaseUntil = new Date(leaseNow.getTime() + opts.leaseMs).toISOString();
   const kindFilter = opts.kinds?.length ? sql`AND kind IN (${sql.join(opts.kinds.map((k) => sql`${k}`), sql`, `)})` : sql``;
   const result = await db.execute<{ id: string }>(sql`
     UPDATE jobs SET
@@ -38,7 +45,7 @@ export async function claimNextJob(db: Db, opts: { workerId: string; now: Date; 
     WHERE id = (
       SELECT id FROM jobs
       WHERE ((status = 'PENDING' AND run_after <= ${now}::timestamptz)
-          OR (status = 'RUNNING' AND claim_expires_at < ${now}::timestamptz))
+          OR (status = 'RUNNING' AND claim_expires_at < ${leaseClock}::timestamptz))
         ${kindFilter}
       ORDER BY run_after, created_at
       FOR UPDATE SKIP LOCKED

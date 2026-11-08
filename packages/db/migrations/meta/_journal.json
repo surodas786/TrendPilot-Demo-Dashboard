@@ -43,6 +43,41 @@
       "when": 1794131316540,
       "tag": "0005_m2_signal_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794134222568,
+      "tag": "0006_m2_paper_entries",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794134227047,
+      "tag": "0007_m2_paper_guards",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794137143341,
+      "tag": "0008_m2_paper_exits",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794137147470,
+      "tag": "0009_m2_exit_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794139696085,
+      "tag": "0010_m2_split_trailing_reverse",
+      "breakpoints": true
     }
   ]
 }

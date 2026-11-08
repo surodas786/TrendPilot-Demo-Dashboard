@@ -174,7 +174,9 @@ describe('Investor A submits Investor B\'s record ID directly to the API', () =>
     const r = await call(block.GET, { path: `/v1/me/order-blocks/${bBlock.id}`, cookie: a, params: { id: bBlock.id } });
     expect(r.status).toBe(404);
     expect(r.body.code).toBe('NOT_FOUND');
-    expect(JSON.stringify(r.body)).not.toContain(bBlock.orderCostUsdt);
+    // Exactly the generic not-found shape; no field of B's block can be present.
+    expect(Object.keys(r.body).sort()).toEqual(['code', 'correlationId', 'message']);
+    expect(r.body.message).toBe('Not found.');
     expect(r.headers.get('etag')).toBeNull();
   });
 

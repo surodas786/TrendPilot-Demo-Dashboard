@@ -1,4 +1,5 @@
 import { FlaskConicalIcon, KeyRoundIcon, PlugZapIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
+import { getDb, getMyPaperAccount } from '@trendpilot/db';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { SecurityPanel } from '@/components/account/SecurityPanel';
 import { StatusPill } from '@/components/ui/StatusPill';
@@ -35,6 +36,7 @@ function Field({ label, value, testId }: { label: string; value: React.ReactNode
  */
 export default async function MyAccountPage() {
   const { user } = await requirePageRole('INVESTOR');
+  const paper = await getMyPaperAccount(getDb(), user.id);
   return (
     <PageContainer title="My Account" description="Your profile and account setup. Everything here belongs to the signed-in investor only." scope={`${user.name} · My Account`}>
       <div className="grid gap-4 lg:grid-cols-2">
@@ -54,7 +56,17 @@ export default async function MyAccountPage() {
         </Card>
 
         <Card icon={FlaskConicalIcon} title="Paper trading">
-          <p className="text-sm text-muted">Order blocks in Trade Settings use Paper mode. Paper execution starts in the next milestone; no orders are placed yet.</p>
+          {paper ? (
+            <dl className="grid gap-3 sm:grid-cols-2" data-testid="paper-account">
+              <Field label="Wallet balance" value={`${paper.walletBalanceUsdt} USDT`} />
+              <Field label="Available" value={`${paper.availableUsdt} USDT`} />
+              <Field label="Position margin" value={`${paper.positionMarginUsdt} USDT`} />
+              <Field label="Reserved for orders" value={`${paper.orderReserveUsdt} USDT`} />
+            </dl>
+          ) : (
+            <p className="text-sm text-muted">Your paper account opens with your first paper evaluation.</p>
+          )}
+          <p className="mt-3 text-xs text-subtle">Simulated balance with a fixture starting value. Positions and stops are in My Trades.</p>
         </Card>
 
         <Card icon={PlugZapIcon} title="Exchange connection">

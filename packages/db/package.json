@@ -11,7 +11,10 @@
     "generate": "drizzle-kit generate",
     "migrate": "tsx src/cli/migrate.ts",
     "seed": "tsx src/cli/seed.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "market-fixture": "tsx src/cli/market-fixture.ts",
+    "demo-paper": "tsx src/cli/demo-paper.ts",
+    "market-tick": "tsx src/cli/market-tick.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

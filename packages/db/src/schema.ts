@@ -260,7 +260,7 @@ export const routeKind = pgEnum('route_kind', ['ACTIONABLE', 'INFO_ONLY']);
 export const eventDisposition = pgEnum('event_disposition', ['DISPATCH', 'INFO_ONLY']);
 export const eventStatus = pgEnum('event_status', ['ACCEPTED', 'DISPATCHED']);
 export const jobStatus = pgEnum('job_status', ['PENDING', 'RUNNING', 'DONE', 'DEAD']);
-export const decisionStatus = pgEnum('decision_status', ['READY_FOR_EVALUATION', 'SKIPPED']);
+export const decisionStatus = pgEnum('decision_status', ['READY_FOR_EVALUATION', 'SKIPPED', 'ENTRY_APPROVED', 'EXIT_REQUESTED', 'HELD']);
 
 /** SIG-01: rotatable ingress. Only a SHA-256 verifier and a short lookup prefix are stored. */
 export const webhookIngress = pgTable(
@@ -423,4 +423,398 @@ export const signalDecisions = pgTable(
     createdAt: createdAt()
   },
   (t) => [uniqueIndex('signal_decisions_unique_step').on(t.eventId, t.orderBlockId, t.step), index('signal_decisions_owner_idx').on(t.ownerId, t.createdAt)]
+);
+
+/* ───────────────────────── M2 slice 2: market fixtures, paper execution (EXE-01..04, ARC-02) ───────────────────────── */
+
+export const intentState = pgEnum('intent_state', ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'UNKNOWN']);
+export const positionStatus = pgEnum('position_status', ['OPEN', 'CLOSED']);
+export const protectionStatus = pgEnum('protection_status', ['PENDING', 'PROTECTED', 'UNPROTECTED']);
+
+const money = (name: string) => numeric(name, { precision: 28, scale: 8 });
+const qty = (name: string) => numeric(name, { precision: 28, scale: 12 });
+const price = (name: string) => numeric(name, { precision: 32, scale: 12 });
+
+/** MKT-01 closed-candle cache. Fixture rows in this slice; the market data worker fills it later. */
+export const marketCandles = pgTable(
+  'market_candles',
+  {
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    interval: text('interval').notNull(),
+    openTime: timestamp('open_time', { withTimezone: true }).notNull(),
+    open: price('open').notNull(),
+    high: price('high').notNull(),
+    low: price('low').notNull(),
+    close: price('close').notNull(),
+    closed: boolean('closed').notNull(),
+    source: text('source').notNull(),
+    createdAt: createdAt()
+  },
+  (t) => [primaryKey({ columns: [t.instrumentId, t.interval, t.openTime] }), check('market_candles_interval_valid', sql`${t.interval} IN ('5', '15')`)]
+);
+
+/** MKT-01 top of book. The newest row per instrument is the current quote. */
+export const marketQuotes = pgTable(
+  'market_quotes',
+  {
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    asOf: timestamp('as_of', { withTimezone: true }).notNull(),
+    bid: price('bid').notNull(),
+    ask: price('ask').notNull(),
+    mark: price('mark').notNull(),
+    last: price('last').notNull(),
+    /** Fixture liquidity: a market order fills at most this many contracts (null = unlimited). */
+    liquidityContracts: qty('liquidity_contracts'),
+    source: text('source').notNull(),
+    createdAt: createdAt()
+  },
+  (t) => [primaryKey({ columns: [t.instrumentId, t.asOf] }), check('market_quotes_book', sql`${t.ask} >= ${t.bid} AND ${t.bid} > 0`)]
+);
+
+/** SCP-03 isolated paper balance per investor. available = wallet − positionMargin − orderReserve. */
+export const paperAccounts = pgTable(
+  'paper_accounts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    currency: text('currency').notNull().default('USDT'),
+    walletBalance: money('wallet_balance').notNull(),
+    positionMargin: money('position_margin').notNull().default('0'),
+    orderReserve: money('order_reserve').notNull().default('0'),
+    revision: integer('revision').notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('paper_accounts_owner_key').on(t.ownerId),
+    check('paper_accounts_nonnegative', sql`${t.walletBalance} >= 0 AND ${t.positionMargin} >= 0 AND ${t.orderReserve} >= 0`)
+  ]
+);
+
+/** EXE-04 durable order intent. Committed (with its margin reservation) before any submission. */
+export const orderIntents = pgTable(
+  'order_intents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    orderBlockId: uuid('order_block_id')
+      .notNull()
+      .references(() => orderBlocks.id),
+    /** Entries and signal-driven exits are linked to the decision that caused them. */
+    decisionId: uuid('decision_id').references(() => signalDecisions.id),
+    eventId: uuid('event_id').references(() => signalEvents.id),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    mode: tradingMode('mode').notNull(),
+    /** OPEN or CLOSE. */
+    kind: text('kind').notNull(),
+    /** CLOSE only: the managed position being reduced. */
+    positionId: uuid('position_id'),
+    exitReason: text('exit_reason'),
+    /** CLOSE for a take-profit target: the target's immutable level ID (EXT-03). */
+    targetLevelId: text('target_level_id'),
+    /** Manual closes: client-supplied Idempotency-Key, unique per owner. */
+    idempotencyKey: text('idempotency_key'),
+    requestedBy: uuid('requested_by'),
+    filledContracts: qty('filled_contracts').notNull().default('0'),
+    side: text('side').notNull(),
+    /** Stable client order ID: the same value is sent on every (re)submission. */
+    clientOrderId: text('client_order_id').notNull(),
+    state: intentState('state').notNull().default('INTENT'),
+    stateReason: text('state_reason'),
+    contracts: qty('contracts').notNull(),
+    quantity: qty('quantity').notNull(),
+    expectedPrice: price('expected_price').notNull(),
+    stopPrice: price('stop_price').notNull(),
+    stopBasis: text('stop_basis').notNull(),
+    leverage: integer('leverage').notNull(),
+    marginMode: marginMode('margin_mode').notNull(),
+    reservedUsdt: money('reserved_usdt').notNull(),
+    sizing: jsonb('sizing').notNull(),
+    /** Immutable copy of the block and pinned strategy version at decision time. */
+    settingsSnapshot: jsonb('settings_snapshot').notNull(),
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('order_intents_decision_key').on(t.decisionId),
+    uniqueIndex('order_intents_client_order_key').on(t.clientOrderId),
+    index('order_intents_owner_idx').on(t.ownerId, t.createdAt),
+    // ARC-02: at most one unresolved exposure-changing operation per scope.
+    uniqueIndex('order_intents_one_unresolved_per_scope')
+      .on(t.paperAccountId, t.instrumentId, t.mode)
+      .where(sql`${t.state} IN ('INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN')`),
+    uniqueIndex('order_intents_idempotency_key').on(t.ownerId, t.idempotencyKey).where(sql`${t.idempotencyKey} IS NOT NULL`),
+    index('order_intents_position_idx').on(t.positionId),
+    check('order_intents_side_valid', sql`${t.side} IN ('LONG', 'SHORT')`),
+    check('order_intents_kind_valid', sql`${t.kind} IN ('OPEN', 'CLOSE')`),
+    check('order_intents_positive', sql`${t.contracts} > 0 AND (${t.kind} <> 'OPEN' OR ${t.reservedUsdt} > 0)`),
+    check('order_intents_links', sql`(${t.kind} = 'OPEN' AND ${t.decisionId} IS NOT NULL) OR (${t.kind} = 'CLOSE' AND ${t.positionId} IS NOT NULL)`)
+  ]
+);
+
+/**
+ * Paper simulator state — the "exchange" side of paper trading. Written only by the simulator,
+ * in its own transaction, exactly like a remote venue would. Keyed by client order ID.
+ */
+export const simOrders = pgTable(
+  'sim_orders',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    clientOrderId: text('client_order_id').notNull(),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    kind: text('kind').notNull(),
+    side: text('side').notNull(),
+    contracts: qty('contracts').notNull(),
+    status: text('status').notNull(),
+    reduceOnly: boolean('reduce_only').notNull().default(false),
+    triggerPrice: price('trigger_price'),
+    triggerBasis: text('trigger_basis'),
+    parentOrderId: uuid('parent_order_id'),
+    rejectReason: text('reject_reason'),
+    createdAt: createdAt()
+  },
+  (t) => [uniqueIndex('sim_orders_client_key').on(t.clientOrderId), index('sim_orders_parent_idx').on(t.parentOrderId)]
+);
+
+export const simFills = pgTable(
+  'sim_fills',
+  {
+    id: text('id').primaryKey(),
+    orderId: uuid('order_id')
+      .notNull()
+      .references(() => simOrders.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    contracts: qty('contracts').notNull(),
+    price: price('price').notNull(),
+    fee: money('fee').notNull(),
+    filledAt: timestamp('filled_at', { withTimezone: true }).notNull()
+  },
+  (t) => [index('sim_fills_order_idx').on(t.orderId)]
+);
+
+/** Platform fill record. Deduplicated by exchange fill ID within the account (EXE-04). */
+export const fills = pgTable(
+  'fills',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    intentId: uuid('intent_id')
+      .notNull()
+      .references(() => orderIntents.id),
+    exchangeFillId: text('exchange_fill_id').notNull(),
+    side: text('side').notNull(),
+    contracts: qty('contracts').notNull(),
+    price: price('price').notNull(),
+    fee: money('fee').notNull(),
+    filledAt: timestamp('filled_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt()
+  },
+  (t) => [uniqueIndex('fills_account_fill_key').on(t.paperAccountId, t.exchangeFillId), index('fills_owner_idx').on(t.ownerId)]
+);
+
+/** Managed position. One open position per account, contract and mode (one-way, SCP-01). */
+export const positions = pgTable(
+  'positions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    orderBlockId: uuid('order_block_id')
+      .notNull()
+      .references(() => orderBlocks.id),
+    openIntentId: uuid('open_intent_id')
+      .notNull()
+      .references(() => orderIntents.id),
+    mode: tradingMode('mode').notNull(),
+    side: text('side').notNull(),
+    status: positionStatus('status').notNull().default('OPEN'),
+    contracts: qty('contracts').notNull(),
+    initialContracts: qty('initial_contracts').notNull(),
+    quantity: qty('quantity').notNull(),
+    avgEntryPrice: price('avg_entry_price').notNull(),
+    leverage: integer('leverage').notNull(),
+    marginMode: marginMode('margin_mode').notNull(),
+    marginUsdt: money('margin_usdt').notNull(),
+    liquidationEstimate: price('liquidation_estimate').notNull(),
+    stopPrice: price('stop_price').notNull(),
+    stopBasis: text('stop_basis').notNull(),
+    stopOrderRef: text('stop_order_ref'),
+    stopContracts: qty('stop_contracts'),
+    /** Strategy version saved at entry; closing signals match its lineage (SIG-04). */
+    strategyVersionId: uuid('strategy_version_id').references(() => strategyVersions.id),
+    /** Fixed TP target from the confirmed average entry (null = TP off). */
+    takeProfitPrice: price('take_profit_price'),
+    takeProfitBasis: text('take_profit_basis'),
+    /**
+     * EXT-04 trailing stop, persisted so it survives restarts: OFF, WAITING (not yet activated)
+     * or ACTIVE. Watermark = highest (Long) / lowest (Short) basis price since activation; the
+     * level only tightens. A software trigger: the original venue stop stays in place.
+     */
+    trailingStatus: text('trailing_status').notNull().default('OFF'),
+    trailingBasis: text('trailing_basis'),
+    trailingDistancePct: numeric('trailing_distance_pct', { precision: 10, scale: 4 }),
+    trailingActivationPrice: price('trailing_activation_price'),
+    trailingActivatedAt: timestamp('trailing_activated_at', { withTimezone: true }),
+    trailingWatermark: price('trailing_watermark'),
+    trailingStopPrice: price('trailing_stop_price'),
+    trailingUpdatedAt: timestamp('trailing_updated_at', { withTimezone: true }),
+    realizedPnlUsdt: money('realized_pnl_usdt').notNull().default('0'),
+    feesUsdt: money('fees_usdt').notNull().default('0'),
+    closeReason: text('close_reason'),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    protectionStatus: protectionStatus('protection_status').notNull().default('PENDING'),
+    protectionVerifiedAt: timestamp('protection_verified_at', { withTimezone: true }),
+    settingsSnapshot: jsonb('settings_snapshot').notNull(),
+    openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('positions_open_intent_key').on(t.openIntentId),
+    uniqueIndex('positions_one_open_per_scope').on(t.paperAccountId, t.instrumentId, t.mode).where(sql`${t.status} = 'OPEN'`),
+    index('positions_owner_idx').on(t.ownerId, t.openedAt),
+    check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE')`)
+  ]
+);
+
+/** Paper ledger. Append-only; one row per (account, kind, reference) so nothing books twice. */
+export const ledgerEntries = pgTable(
+  'ledger_entries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    kind: text('kind').notNull(),
+    /** Which balance the entry moves: WALLET, POSITION_MARGIN or ORDER_RESERVE. */
+    bucket: text('bucket').notNull(),
+    amount: money('amount').notNull(),
+    refType: text('ref_type').notNull(),
+    refId: text('ref_id').notNull(),
+    memo: text('memo'),
+    createdAt: createdAt()
+  },
+  (t) => [uniqueIndex('ledger_entries_once_key').on(t.paperAccountId, t.kind, t.refId), index('ledger_entries_owner_idx').on(t.ownerId, t.createdAt)]
+);
+
+/* ───────────────────────── M2 slice 3: paper exits (EXT-01/02/05/06/07) ───────────────────────── */
+
+/** One row per confirmed exit fill: reason, quantity, price, fee, realized P&L, released margin. Append-only. */
+export const positionExits = pgTable(
+  'position_exits',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    positionId: uuid('position_id')
+      .notNull()
+      .references(() => positions.id),
+    /** Null for venue-triggered stops (no platform order intent). */
+    intentId: uuid('intent_id').references(() => orderIntents.id),
+    reason: text('reason').notNull(),
+    exchangeFillId: text('exchange_fill_id').notNull(),
+    contracts: qty('contracts').notNull(),
+    price: price('price').notNull(),
+    fee: money('fee').notNull(),
+    realizedPnl: money('realized_pnl').notNull(),
+    marginReleased: money('margin_released').notNull(),
+    remainingContracts: qty('remaining_contracts').notNull(),
+    filledAt: timestamp('filled_at', { withTimezone: true }).notNull(),
+    createdAt: createdAt()
+  },
+  (t) => [uniqueIndex('position_exits_fill_key').on(t.paperAccountId, t.exchangeFillId), index('position_exits_position_idx').on(t.positionId)]
+);
+
+/** The simulator's own view of each paper position (the venue's authority for reduce-only). */
+export const simPositions = pgTable(
+  'sim_positions',
+  {
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    side: text('side'),
+    contracts: qty('contracts').notNull().default('0'),
+    updatedAt: updatedAt()
+  },
+  (t) => [primaryKey({ columns: [t.paperAccountId, t.instrumentId] }), check('sim_positions_nonnegative', sql`${t.contracts} >= 0`)]
+);
+
+/**
+ * EXT-03 take-profit targets of one position (a fixed TP is one target). Immutable level ID and
+ * planned share of the base quantity; requested and confirmed filled quantities are tracked
+ * separately, and only confirmed fills complete a target.
+ */
+export const positionTargets = pgTable(
+  'position_targets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    positionId: uuid('position_id')
+      .notNull()
+      .references(() => positions.id),
+    levelId: text('level_id').notNull(),
+    ordinal: integer('ordinal').notNull(),
+    movePct: numeric('move_pct', { precision: 10, scale: 4 }).notNull(),
+    closePct: numeric('close_pct', { precision: 10, scale: 4 }).notNull(),
+    triggerPrice: price('trigger_price').notNull(),
+    triggerBasis: text('trigger_basis').notNull(),
+    plannedContracts: qty('planned_contracts').notNull(),
+    requestedContracts: qty('requested_contracts').notNull().default('0'),
+    filledContracts: qty('filled_contracts').notNull().default('0'),
+    status: text('status').notNull().default('PENDING'),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('position_targets_level_key').on(t.positionId, t.levelId),
+    check('position_targets_status_valid', sql`${t.status} IN ('PENDING', 'REQUESTED', 'PARTIAL', 'DONE', 'CANCELLED')`),
+    check('position_targets_quantities', sql`${t.plannedContracts} >= 0 AND ${t.requestedContracts} >= 0 AND ${t.filledContracts} >= 0 AND ${t.filledContracts} <= ${t.plannedContracts}`)
+  ]
 );
