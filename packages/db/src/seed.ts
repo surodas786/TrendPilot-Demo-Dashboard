@@ -5,6 +5,7 @@ import { leverageChoicesFor, lookupFixtureContract } from './mexcFixtures';
 import { hashPassword } from './repos/users';
 import { instruments, signalRoutes, strategyPackages, strategyVersionInstruments, strategyVersions, users, webhookIngress } from './schema';
 import { createIngress } from './signals/ingress';
+import { lockPaperAccount } from './paper/accounts';
 
 /** Password for fixture users. Dev/test only; seeding refuses production. */
 export function seedPassword(): string {
@@ -62,6 +63,11 @@ export async function seedFixtures(db: Db): Promise<{ ingressToken: string | nul
     }
     await insertInstruments(tx, FIXTURE_INSTRUMENTS);
     await tx.insert(strategyPackages).values({ id: FIXTURE_IDS.package, name: FIXTURE_STRATEGY.packageName }).onConflictDoNothing();
+    // SCP-03: each seeded investor gets an isolated paper account with a fixture balance.
+    for (const u of [FIXTURE_USERS.investorA, FIXTURE_USERS.investorB]) {
+      const [row] = await tx.select({ id: users.id }).from(users).where(eq(users.email, u.email));
+      if (row) await lockPaperAccount(tx, row.id);
+    }
 
     const [existing] = await tx.select({ id: strategyVersions.id }).from(strategyVersions).where(eq(strategyVersions.id, FIXTURE_IDS.version));
     if (!existing) {
@@ -90,12 +96,12 @@ export async function seedSignalFixtures(db: Db): Promise<{ ingressToken: string
     ingress = created.ingress;
     issued = created.token;
   }
-  for (const action of ['BULLISH_FLIP', 'BEARISH_FLIP'] as const) {
+  for (const action of ['BULLISH_FLIP', 'BEARISH_FLIP', 'CLOSE_LONG', 'CLOSE_SHORT'] as const) {
     await db
       .insert(signalRoutes)
       .values({
         ingressId: ingress.id,
-        name: `BTCUSDT 15m ${action === 'BULLISH_FLIP' ? 'bullish' : 'bearish'} flip`,
+        name: `BTCUSDT 15m ${{ BULLISH_FLIP: 'bullish flip', BEARISH_FLIP: 'bearish flip', CLOSE_LONG: 'close long', CLOSE_SHORT: 'close short' }[action]}`,
         sourceExchange: f.sourceExchange,
         sourceSymbol: f.sourceSymbol,
         interval: f.interval,
@@ -139,6 +145,6 @@ export async function resetDatabase(db: Db, connectionString: string): Promise<v
   const name = new URL(connectionString).pathname.slice(1);
   if (!/_(test|e2e)$/.test(name)) throw new Error(`Refusing to reset database "${name}": only *_test or *_e2e databases can be reset.`);
   await db.execute(
-    sql`TRUNCATE signal_decisions, jobs, signal_rejections, signal_events, signal_routes, webhook_ingress, audit_events, email_outbox, user_tokens, order_blocks, sessions, strategy_version_instruments, strategy_versions, strategy_packages, instruments, users RESTART IDENTITY CASCADE`
+    sql`TRUNCATE position_targets, position_exits, sim_positions, ledger_entries, fills, positions, sim_fills, sim_orders, order_intents, paper_accounts, market_quotes, market_candles, signal_decisions, jobs, signal_rejections, signal_events, signal_routes, webhook_ingress, audit_events, email_outbox, user_tokens, order_blocks, sessions, strategy_version_instruments, strategy_versions, strategy_packages, instruments, users RESTART IDENTITY CASCADE`
   );
 }

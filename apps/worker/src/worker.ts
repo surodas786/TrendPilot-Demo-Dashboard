@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { createDb, drainJobs, processNextJob, requireEnv, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { createDb, processNextJob, requireEnv, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
 import { assertLiveTransportDisabled } from '@trendpilot/domain';
 
 /**
@@ -26,8 +26,32 @@ export const workerIdentity = () => `worker-${hostname()}-${process.pid}`;
 
 const describe = (r: ProcessResult) =>
   r.summary
-    ? `job ${r.job?.id} ${r.outcome}: event ${r.summary.eventId} evaluated=${r.summary.evaluated} new=${r.summary.inserted} ready=${r.summary.ready} skipped=${r.summary.skipped}`
-    : `job ${r.job?.id} ${r.outcome}${r.error ? `: ${r.error}` : ''}`;
+    ? `job ${r.job?.id} ${r.outcome}: event ${r.summary.eventId} evaluated=${r.summary.evaluated} new=${r.summary.inserted} ready=${r.summary.ready} skipped=${r.summary.skipped} entriesApproved=${r.summary.entriesApproved} entriesSkipped=${r.summary.entriesSkipped} exitsRequested=${r.summary.exitsRequested} exitsHeld=${r.summary.exitsHeld}${r.summary.reversalsPending ? ` reversalsPending=${r.summary.reversalsPending}` : ''}`
+    : r.close
+      ? `job ${r.job?.id} ${r.outcome}: paper close ${r.close.intentId} ${r.close.state}${r.close.reason ? ` (${r.close.reason})` : ''}${r.close.filled ? ` filled=${r.close.filled} remaining=${r.close.remaining}${r.close.closed ? ' position CLOSED' : ''}` : ''}${r.close.reconciled ? ' [reconciled with simulator]' : ''}${r.close.exitReason ? ` exit=${r.close.exitReason}` : ''}${r.close.targetLevelId ? ` target=${r.close.targetLevelId}` : ''}${r.close.next ? ` next=${r.close.next}` : ''}${r.close.reversalQueued ? ' reversal queued' : ''}`
+      : r.tick
+        ? `job ${r.job?.id} ${r.outcome}: market tick stopsTriggered=${r.tick.stopsTriggered} stopExitsRecorded=${r.tick.stopExitsRecorded} takeProfitsRequested=${r.tick.takeProfitsRequested} trailingActivated=${r.tick.trailingActivated} trailingTightened=${r.tick.trailingTightened} trailingStopsRequested=${r.tick.trailingStopsRequested} exitsWaiting=${r.tick.exitsWaiting}`
+        : r.reverse
+          ? `job ${r.job?.id} ${r.outcome}: reversal for close ${r.reverse.closeIntentId} ${r.reverse.outcome}${r.reverse.reason ? ` (${r.reverse.reason})` : ''}${r.reverse.intentId ? ` order=${r.reverse.intentId}` : ''}`
+          : r.submit
+      ? `job ${r.job?.id} ${r.outcome}: paper order ${r.submit.intentId} ${r.submit.state}${r.submit.reason ? ` (${r.submit.reason})` : ''}${r.submit.positionId ? ` position=${r.submit.positionId}` : ''}${r.submit.reconciled ? ' [reconciled with simulator]' : ''}`
+      : `job ${r.job?.id} ${r.outcome}${r.error ? `: ${r.error}` : ''}`;
+
+/**
+ * Restart drill (dev/test only): PAPER_SIM_CRASH_AFTER_FILL=1 makes the process exit right after
+ * the simulator fills an order and before the platform records it, like a crash mid-submission.
+ * The next worker run must reconcile by client order ID instead of submitting again.
+ */
+function crashHooks(env: Record<string, string | undefined>, log: (m: string) => void) {
+  if (env.PAPER_SIM_CRASH_AFTER_FILL !== '1') return {};
+  if (env.NODE_ENV === 'production') throw new Error('PAPER_SIM_CRASH_AFTER_FILL is not allowed in production.');
+  return {
+    afterSimulatorFill: () => {
+      log('PAPER_SIM_CRASH_AFTER_FILL: exiting after the simulated fill, before recording it');
+      process.exit(75);
+    }
+  };
+}
 
 export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWorker> {
   const env = opts.env ?? process.env;
@@ -41,6 +65,7 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
   await handle.db.execute(sql`select 1`);
   const workerId = workerIdentity();
   const clock = signalClockFromEnv(env);
+  const hooks = crashHooks(env, log);
   log(`started as ${workerId}; database reachable; live order transport disabled`);
 
   let stopping = false;
@@ -50,7 +75,7 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
     if (stopping) return;
     try {
       for (;;) {
-        const r = await processNextJob(handle.db, { workerId, now: clock() });
+        const r = await processNextJob(handle.db, { workerId, now: clock(), leaseNow: new Date(), hooks });
         if (r.outcome === 'IDLE' || stopping) break;
         log(describe(r));
       }
@@ -90,8 +115,15 @@ export async function runOnce(opts: { env?: Record<string, string | undefined>; 
   const clock = signalClockFromEnv(env);
   const handle = createDb(env.DATABASE_URL ?? requireEnv('DATABASE_URL'), 2);
   try {
-    const results = await drainJobs(handle.db, { workerId: workerIdentity(), now: clock });
-    for (const r of results) log(describe(r));
+    const hooks = crashHooks(env, log);
+    const results: ProcessResult[] = [];
+    // Log each job as it finishes, so output survives a crash later in the run.
+    for (;;) {
+      const r = await processNextJob(handle.db, { workerId: workerIdentity(), now: clock(), leaseNow: new Date(), hooks });
+      if (r.outcome === 'IDLE') break;
+      log(describe(r));
+      results.push(r);
+    }
     log(results.length ? `processed ${results.length} job(s)` : 'no runnable jobs');
     return results;
   } finally {

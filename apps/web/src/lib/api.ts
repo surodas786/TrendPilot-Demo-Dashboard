@@ -10,10 +10,11 @@ export interface ApiFailure {
 export type ApiResult<T> = { ok: true; data: T } | ApiFailure;
 
 /** Browser client for /v1. The session cookie is sent automatically (same origin). */
-export async function request<T>(method: string, path: string, opts: { body?: unknown; revision?: number; redirectOn401?: boolean } = {}): Promise<ApiResult<T>> {
+export async function request<T>(method: string, path: string, opts: { body?: unknown; revision?: number; idempotencyKey?: string; redirectOn401?: boolean } = {}): Promise<ApiResult<T>> {
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   if (opts.revision !== undefined) headers['if-match'] = `"${opts.revision}"`;
+  if (opts.idempotencyKey) headers['idempotency-key'] = opts.idempotencyKey;
   let res: Response;
   try {
     res = await fetch(path, { method, headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body), cache: 'no-store' });
@@ -32,6 +33,8 @@ export const api = {
   updateBlock: (id: string, revision: number, body: unknown) => request<OrderBlockDto>('PATCH', `/v1/me/order-blocks/${id}`, { body, revision }),
   pauseBlock: (id: string, revision: number) => request<OrderBlockDto>('POST', `/v1/me/order-blocks/${id}/pause`, { revision }),
   resumeBlock: (id: string, revision: number) => request<OrderBlockDto>('POST', `/v1/me/order-blocks/${id}/resume`, { revision }),
+  closePosition: (id: string, idempotencyKey: string) =>
+    request<{ commandId: string; positionId: string; state: string; replayed: boolean }>('POST', `/v1/me/positions/${id}/close`, { idempotencyKey }),
   previewDraft: <T>(body: unknown) => request<T>('POST', '/v1/me/order-blocks/preview', { body })
 };
 

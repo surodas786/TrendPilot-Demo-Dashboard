@@ -48,7 +48,9 @@ async function deliver(raw: string, opts: { token?: string; contentType?: string
 }
 
 const count = async (t: typeof schema.signalEvents | typeof schema.jobs | typeof schema.signalDecisions | typeof schema.signalRejections) => (await direct.db.select().from(t)).length;
-const decisionsFor = async (eventId: string) => direct.db.select().from(schema.signalDecisions).where(eq(schema.signalDecisions.eventId, eventId));
+// Routing-screen outcomes (one per investor). The entry step (ENTRY_V1) is covered in paper.test.ts.
+const decisionsFor = async (eventId: string) =>
+  direct.db.select().from(schema.signalDecisions).where(and(eq(schema.signalDecisions.eventId, eventId), eq(schema.signalDecisions.step, 'ENTRY_SCREEN_V1')));
 const runWorker = (now = clock, hooks?: Parameters<typeof processNextJob>[1]['hooks']) => processNextJob(direct.db, { workerId: 'test-worker', now, hooks });
 
 beforeAll(async () => {
@@ -382,7 +384,7 @@ describe('outcomes are private (IAM-02)', () => {
     const ops = await call(adminEvents.GET, { path: '/x', cookie: admin });
     expect(ops.status).toBe(200);
     const first = ops.body.events.find((e: any) => e.id === event1);
-    expect(first.outcomes).toEqual({ READY_FOR_EVALUATION: 1, 'SKIPPED:PAUSED': 1 });
+    expect(first.outcomes).toMatchObject({ READY_FOR_EVALUATION: 1, 'SKIPPED:PAUSED': 1 }); // plus A's entry-step result
     const dump = JSON.stringify(ops.body);
     for (const id of [await userId(USERS.investorA.email), await userId(USERS.investorB.email), aBlock.id, bBlock.id]) expect(dump).not.toContain(id);
     expect((await call(adminEvents.GET, { path: '/x', cookie: a })).status).toBe(403);

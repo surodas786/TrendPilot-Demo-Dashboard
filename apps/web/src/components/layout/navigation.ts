@@ -29,7 +29,7 @@ const investorNav: NavItem[] = [
   { path: '/my-account', label: 'My Account', icon: UserRoundIcon },
   { path: '/trade-settings', label: 'Trade Settings', icon: SlidersHorizontalIcon },
   { path: '/signals', label: 'Signals', icon: BellRingIcon },
-  { path: '/my-trades', label: 'My Trades', icon: ListChecksIcon, pending: true }
+  { path: '/my-trades', label: 'My Trades', icon: ListChecksIcon }
 ];
 
 /** PRD §2.3 / MagicPatterns admin menu: Users, Signals & Strategy Packages, Trading Pairs & Defaults, Logs. */

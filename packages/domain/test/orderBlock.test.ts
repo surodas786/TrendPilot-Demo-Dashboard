@@ -72,6 +72,15 @@ describe('order block schema', () => {
     expect(paths(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'a', movePct: '3', closePct: '50' }]))).toContain('takeProfit.levels');
   });
 
+  it('a split below 100% is valid only when the trailing stop manages the remainder (EXT-07)', () => {
+    const trail = { enabled: true, activationPct: '3', distancePct: '1', basis: 'MARK' };
+    const levels = [{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '30' }];
+    expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels }, trailing: trail })).ok).toBe(true);
+    expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels } }))).toContain('takeProfit');
+    const over = [{ id: 'a', movePct: '2', closePct: '60' }, { id: 'b', movePct: '4', closePct: '50' }];
+    expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels: over }, trailing: trail }))).toContain('takeProfit');
+  });
+
   it('fixed TP closes 100%; OFF has no levels', () => {
     expect(paths(valid({ takeProfit: { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] } }))).toContain('takeProfit.levels.0.closePct');
     expect(parse(valid({ takeProfit: { mode: 'OFF', levels: [] } })).ok).toBe(true);

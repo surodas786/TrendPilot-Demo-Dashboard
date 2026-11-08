@@ -154,8 +154,10 @@ function refineSettings(s: SettingsBase, ctx: IssueSink): void {
       if (prev && !new Decimal(l.movePct).gt(prev.movePct)) add(['takeProfit', 'levels', i, 'movePct'], 'Must be further than the previous target.');
     });
     const total = tp.levels.reduce((sum, l) => sum.plus(l.closePct), new Decimal(0));
-    // A full split allocates 100% (EXT-07). Remainder-to-trailing arrives with M2 exit plans.
-    if (!total.eq(100)) add(['takeProfit'], `Close allocations total ${total.toFixed()}% — they must total exactly 100%.`);
+    // EXT-07: a full split allocates 100%. Otherwise the remainder goes to an enabled trailing stop.
+    if (total.gt(100)) add(['takeProfit'], `Close allocations total ${total.toFixed()}% — they cannot exceed 100%.`);
+    else if (total.lt(100) && !s.trailing.enabled)
+      add(['takeProfit'], `Close allocations total ${total.toFixed()}% — allocate exactly 100%, or enable the trailing stop to manage the remaining ${new Decimal(100).minus(total).toFixed()}%.`);
   }
   const ids = new Set(tp.levels.map((l) => l.id));
   if (ids.size !== tp.levels.length) add(['takeProfit', 'levels'], 'Target IDs must be unique.');

@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { BellRingIcon } from 'lucide-react';
 import { getDb, listMyOutcomes, orderBlocksFor } from '@trendpilot/db';
 import { PageContainer } from '@/components/layout/PageContainer';
@@ -21,7 +22,7 @@ export default async function SignalsPage() {
     <PageContainer
       title="Signals"
       description="How each shared TradingView alert was evaluated against your own order blocks."
-      scope={`${user.name} · My Account · Paper · "Ready for evaluation" is not an entry or a fill — price, EMA, risk and sizing checks arrive in later releases.`}
+      scope={`${user.name} · My Account · Paper — simulated orders against fixture market data. Live trading is disabled.`}
     >
       {outcomes.length === 0 ? (
         <EmptyState icon={BellRingIcon} title="No signal outcomes yet" body="When an approved TradingView alert matches one of your order blocks, its outcome appears here." />
@@ -51,10 +52,65 @@ export default async function SignalsPage() {
                     {symbolOf(o.orderBlockId)}
                     <span className="block text-xs text-subtle">strategy v{o.strategyVersion}</span>
                   </td>
-                  <td className="px-4 py-2.5">
-                    {o.status === 'READY_FOR_EVALUATION' ? <StatusPill tone="accent">Ready for evaluation{o.side ? ` · ${o.side === 'LONG' ? 'Long' : 'Short'}` : ''}</StatusPill> : <StatusPill tone="neutral">Skipped · {o.reason}</StatusPill>}
+                  <td className="px-4 py-2.5" data-testid="outcome-status" data-entry={o.entry?.status ?? ''} data-entry-reason={o.entry?.reason ?? ''}>
+                    {o.exit ? (
+                      o.exit.status === 'EXIT_REQUESTED' ? (
+                        <span className="flex flex-wrap gap-1">
+                          <StatusPill tone="warn">
+                            {o.exit.reason === 'REVERSAL_CLOSE' ? 'Close and reverse' : 'Paper close'} · {(o.exit.orderState ?? 'pending').toLowerCase()}
+                          </StatusPill>
+                          {o.exit.reason === 'REVERSAL_CLOSE' && (
+                            <span data-testid="reversal-status" data-reversal={o.entry?.status ?? 'PENDING'} data-reversal-reason={o.entry?.reason ?? ''}>
+                              {!o.entry ? (
+                                <StatusPill tone="neutral">Opening leg pending</StatusPill>
+                              ) : o.entry.status === 'ENTRY_APPROVED' ? (
+                                <StatusPill tone="gain">
+                                  Reversed · Paper {o.side === 'LONG' ? 'Long' : 'Short'} {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
+                                </StatusPill>
+                              ) : (
+                                <StatusPill tone="neutral">Stayed flat · {o.entry.reason}</StatusPill>
+                              )}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <StatusPill tone="neutral">Position kept open · {o.exit.reason}</StatusPill>
+                      )
+                    ) : o.status !== 'READY_FOR_EVALUATION' ? (
+                      <StatusPill tone="neutral">Skipped · {o.reason}</StatusPill>
+                    ) : !o.entry ? (
+                      <StatusPill tone="accent">Ready for evaluation{o.side ? ` · ${o.side === 'LONG' ? 'Long' : 'Short'}` : ''}</StatusPill>
+                    ) : o.entry.status === 'ENTRY_APPROVED' ? (
+                      <StatusPill tone="gain">
+                        Paper {o.side === 'LONG' ? 'Long' : 'Short'} · {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
+                      </StatusPill>
+                    ) : (
+                      <StatusPill tone="neutral">Entry skipped · {o.entry.reason}</StatusPill>
+                    )}
                   </td>
-                  <td className="px-4 py-2.5 text-xs text-muted">{o.reasonText ?? 'Passed pause, direction, weekday and freshness checks.'}</td>
+                  <td className="px-4 py-2.5 text-xs text-muted">
+                    {o.exit ? (
+                      <span>
+                        {o.exit.reason === 'REVERSAL_CLOSE' && o.entry?.reasonText ? `${o.entry.reasonText} ` : (o.exit.reasonText ?? '')}{' '}
+                        {o.entry?.positionId && (
+                          <Link href={`/my-trades/${o.entry.positionId}`} className="mr-2 font-semibold text-accent hover:underline">
+                            View new position
+                          </Link>
+                        )}
+                        {o.exit.positionId && (
+                          <Link href={`/my-trades/${o.exit.positionId}`} className="font-semibold text-accent hover:underline">
+                            View position
+                          </Link>
+                        )}
+                      </span>
+                    ) : o.entry?.positionId ? (
+                      <Link href={`/my-trades/${o.entry.positionId}`} className="font-semibold text-accent hover:underline">
+                        View position and stop
+                      </Link>
+                    ) : (
+                      (o.entry?.reasonText ?? o.entry?.orderStateReason ?? o.reasonText ?? 'Passed pause, direction, weekday and freshness checks.')
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

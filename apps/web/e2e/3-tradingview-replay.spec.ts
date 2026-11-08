@@ -81,7 +81,7 @@ test('worker: one outcome per investor, and a retried job adds none', async () =
   expect(retry).toMatch(/evaluated=2 new=0/);
   expect(run(['run', 'worker:once'])).toMatch(/no runnable jobs/);
   const rows = await sql<{ email: string; status: string; reason: string | null }>(
-    'SELECT u.email, d.status, d.reason FROM signal_decisions d JOIN users u ON u.id = d.owner_id ORDER BY u.email'
+    "SELECT u.email, d.status, d.reason FROM signal_decisions d JOIN users u ON u.id = d.owner_id WHERE d.step = 'ENTRY_SCREEN_V1' ORDER BY u.email"
   );
   expect(rows).toEqual([
     { email: 'investor.a@trendpilot.local', status: 'READY_FOR_EVALUATION', reason: null },
@@ -90,7 +90,7 @@ test('worker: one outcome per investor, and a retried job adds none', async () =
 });
 
 test('each investor sees only their own outcome, in the UI and through the API', async ({ browser }) => {
-  const [bDecision] = await sql<{ id: string }>("SELECT d.id FROM signal_decisions d JOIN users u ON u.id = d.owner_id WHERE u.email = 'investor.b@trendpilot.local'");
+  const [bDecision] = await sql<{ id: string }>("SELECT d.id FROM signal_decisions d JOIN users u ON u.id = d.owner_id WHERE u.email = 'investor.b@trendpilot.local' AND d.step = 'ENTRY_SCREEN_V1'");
 
   const pageA = await (await browser.newContext()).newPage();
   await signIn(pageA, 'investor.a@trendpilot.local');
@@ -98,7 +98,8 @@ test('each investor sees only their own outcome, in the UI and through the API',
   const rowsA = pageA.getByTestId('signal-outcome');
   await expect(rowsA).toHaveCount(1);
   await expect(rowsA.first()).toHaveAttribute('data-status', 'READY_FOR_EVALUATION');
-  await expect(rowsA.first()).toContainText('Ready for evaluation · Long');
+  // No market fixtures in this spec: A passes routing but the entry check finds no fresh quote.
+  await expect(rowsA.first()).toContainText('Entry skipped · FEED_STALE');
   await expect(pageA.getByText('PAUSED')).toHaveCount(0);
   expect((await pageA.request.get(`/v1/me/signals/${bDecision!.id}`)).status()).toBe(404);
 
