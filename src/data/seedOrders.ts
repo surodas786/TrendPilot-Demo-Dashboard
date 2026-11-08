@@ -1,0 +1,34 @@
+import { dayTimeToMs } from '../utils/clock';
+import { makeOrder } from '../utils/orders';
+import type { OrderRecord } from '../types/execution';
+
+/**
+ * Simulated order records behind the seeded positions. Submission/acknowledgement events
+ * were not itemized for these, so they are flagged `seeded` and timelines do not invent them.
+ * Entry fees for these fills were not recorded in this demo (fee: null).
+ */
+const t = dayTimeToMs;
+
+export const seedOrders: OrderRecord[] = [
+// Demo Account A · BTCUSDT long
+makeOrder({ id: 'ORD-A-1001', accountId: 'acct-a', positionId: 'pos-btc', pair: 'BTCUSDT', baseAsset: 'BTC', purpose: 'entry', side: 'Buy', type: 'Market', requestedQty: 0.016, filledQty: 0.016, price: 62500, state: 'filled', createdAt: t('08:00:04'), updatedAt: t('08:00:05'), priceDecimals: 1, quantityDecimals: 3, fills: [{ id: 'FIL-A-1001', at: t('08:00:05'), price: 62500, quantity: 0.016, fee: null }], seeded: true, reduceOnly: false }),
+makeOrder({ id: 'ORD-A-1002', accountId: 'acct-a', positionId: 'pos-btc', pair: 'BTCUSDT', baseAsset: 'BTC', purpose: 'stop-loss', side: 'Sell', type: 'Stop market', requestedQty: 0.016, price: 61200, state: 'submitted', createdAt: t('08:00:09'), priceDecimals: 1, quantityDecimals: 3, seeded: true }),
+makeOrder({ id: 'ORD-A-1003', accountId: 'acct-a', positionId: 'pos-btc', pair: 'BTCUSDT', baseAsset: 'BTC', purpose: 'take-profit', side: 'Sell', type: 'Limit', requestedQty: 0.016, price: 66000, state: 'submitted', createdAt: t('08:00:09'), priceDecimals: 1, quantityDecimals: 3, seeded: true }),
+// Demo Account A · ETHUSDT short
+makeOrder({ id: 'ORD-A-1004', accountId: 'acct-a', positionId: 'pos-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'entry', side: 'Sell', type: 'Market', requestedQty: 0.3, filledQty: 0.3, price: 3200, state: 'filled', createdAt: t('10:00:05'), updatedAt: t('10:00:06'), priceDecimals: 2, quantityDecimals: 2, fills: [{ id: 'FIL-A-1004', at: t('10:00:06'), price: 3200, quantity: 0.3, fee: null }], seeded: true, reduceOnly: false }),
+makeOrder({ id: 'ORD-A-1005', accountId: 'acct-a', positionId: 'pos-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'stop-loss', side: 'Buy', type: 'Stop market', requestedQty: 0.3, price: 3260, state: 'submitted', createdAt: t('10:00:11'), priceDecimals: 2, quantityDecimals: 2, seeded: true }),
+makeOrder({ id: 'ORD-A-1006', accountId: 'acct-a', positionId: 'pos-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'take-profit', side: 'Buy', type: 'Limit', requestedQty: 0.3, price: 3050, state: 'submitted', createdAt: t('10:00:11'), priceDecimals: 2, quantityDecimals: 2, seeded: true }),
+// Demo Account A · SOLUSDT long (partial take profit filled; resized stop awaiting confirmation)
+makeOrder({ id: 'ORD-A-1007', accountId: 'acct-a', positionId: 'pos-sol', pair: 'SOLUSDT', baseAsset: 'SOL', purpose: 'entry', side: 'Buy', type: 'Market', requestedQty: 3.75, filledQty: 3.75, price: 160, state: 'filled', createdAt: t('09:15:03'), updatedAt: t('09:15:04'), priceDecimals: 2, quantityDecimals: 2, fills: [{ id: 'FIL-A-1007', at: t('09:15:04'), price: 160, quantity: 3.75, fee: null }], seeded: true, reduceOnly: false }),
+makeOrder({ id: 'ORD-A-1008', accountId: 'acct-a', positionId: 'pos-sol', pair: 'SOLUSDT', baseAsset: 'SOL', purpose: 'take-profit', side: 'Sell', type: 'Limit · TP1', requestedQty: 1.25, filledQty: 1.25, price: 168, state: 'filled', createdAt: t('09:15:08'), updatedAt: t('11:42:18'), priceDecimals: 2, quantityDecimals: 2, fills: [{ id: 'FIL-A-1008', at: t('11:42:18'), price: 168, quantity: 1.25, fee: 1.0 }], seeded: true }),
+makeOrder({ id: 'ORD-A-1009', accountId: 'acct-a', positionId: 'pos-sol', pair: 'SOLUSDT', baseAsset: 'SOL', purpose: 'take-profit', side: 'Sell', type: 'Limit · TP2', requestedQty: 2.5, price: 176, state: 'submitted', createdAt: t('09:15:08'), updatedAt: t('11:42:25'), priceDecimals: 2, quantityDecimals: 2, seeded: true }),
+makeOrder({ id: 'ORD-A-1010', accountId: 'acct-a', positionId: 'pos-sol', pair: 'SOLUSDT', baseAsset: 'SOL', purpose: 'stop-loss', side: 'Sell', type: 'Stop market · resized', requestedQty: 2.5, price: 154, state: 'pending-submission', createdAt: t('11:42:25'), priceDecimals: 2, quantityDecimals: 2, seeded: true, note: 'Resize after partial exit awaiting confirmation' }),
+// Demo Account B · ETHUSDT long
+makeOrder({ id: 'ORD-B-2001', accountId: 'acct-b', positionId: 'pos-b-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'entry', side: 'Buy', type: 'Market', requestedQty: 0.16, filledQty: 0.16, price: 3125, state: 'filled', createdAt: t('04:00:03'), updatedAt: t('04:00:04'), priceDecimals: 2, quantityDecimals: 2, fills: [{ id: 'FIL-B-2001', at: t('04:00:04'), price: 3125, quantity: 0.16, fee: null }], seeded: true, reduceOnly: false }),
+makeOrder({ id: 'ORD-B-2002', accountId: 'acct-b', positionId: 'pos-b-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'stop-loss', side: 'Sell', type: 'Stop market', requestedQty: 0.16, price: 3060, state: 'submitted', createdAt: t('04:00:08'), priceDecimals: 2, quantityDecimals: 2, seeded: true }),
+makeOrder({ id: 'ORD-B-2003', accountId: 'acct-b', positionId: 'pos-b-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'take-profit', side: 'Sell', type: 'Limit · partial', requestedQty: 0.08, price: 3190, state: 'submitted', createdAt: t('04:00:07'), priceDecimals: 2, quantityDecimals: 2, seeded: true }),
+makeOrder({ id: 'ORD-B-2004', accountId: 'acct-b', positionId: 'pos-b-eth', pair: 'ETHUSDT', baseAsset: 'ETH', purpose: 'take-profit', side: 'Sell', type: 'Limit', requestedQty: 0.08, price: 3260, state: 'submitted', createdAt: t('04:00:08'), priceDecimals: 2, quantityDecimals: 2, seeded: true }),
+// Demo Account B · BTCUSDT short
+makeOrder({ id: 'ORD-B-2005', accountId: 'acct-b', positionId: 'pos-b-btc', pair: 'BTCUSDT', baseAsset: 'BTC', purpose: 'entry', side: 'Sell', type: 'Market', requestedQty: 0.0032, filledQty: 0.0032, price: 62500, state: 'filled', createdAt: t('09:00:03'), updatedAt: t('09:00:04'), priceDecimals: 1, quantityDecimals: 4, fills: [{ id: 'FIL-B-2005', at: t('09:00:04'), price: 62500, quantity: 0.0032, fee: null }], seeded: true, reduceOnly: false }),
+makeOrder({ id: 'ORD-B-2006', accountId: 'acct-b', positionId: 'pos-b-btc', pair: 'BTCUSDT', baseAsset: 'BTC', purpose: 'stop-loss', side: 'Buy', type: 'Stop market', requestedQty: 0.0032, price: 65000, state: 'submitted', createdAt: t('09:00:09'), priceDecimals: 1, quantityDecimals: 4, seeded: true }),
+makeOrder({ id: 'ORD-B-2007', accountId: 'acct-b', positionId: 'pos-b-btc', pair: 'BTCUSDT', baseAsset: 'BTC', purpose: 'take-profit', side: 'Buy', type: 'Limit', requestedQty: 0.0032, price: 60800, state: 'submitted', createdAt: t('09:00:09'), priceDecimals: 1, quantityDecimals: 4, seeded: true })];
