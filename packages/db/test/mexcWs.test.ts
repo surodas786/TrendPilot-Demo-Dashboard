@@ -166,8 +166,12 @@ describe('MEXC public WebSocket ticker stream', () => {
     s.start();
     const ws = FakeWs.all[0]!;
     ws.open();
+    vi.advanceTimersByTime(5_000);
     s.setSymbols(['BTC_USDT', 'ETH_USDT']);
+    expect(s.subscribedSince('BTC_USDT')!.toISOString()).toBe('2026-11-09T10:00:00.000Z');
+    expect(s.subscribedSince('ETH_USDT')!.toISOString()).toBe('2026-11-09T10:00:05.000Z'); // its own grace start
     s.setSymbols(['ETH_USDT']);
+    expect(s.subscribedSince('BTC_USDT')).toBeNull();
     expect(ws.sent.filter((m) => m.method !== 'ping').map((m) => `${m.method} ${(m.param as { symbol: string }).symbol}`)).toEqual(['sub.ticker BTC_USDT', 'sub.ticker ETH_USDT', 'unsub.ticker BTC_USDT']);
     s.stop();
   });

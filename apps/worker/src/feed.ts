@@ -263,6 +263,8 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
   const tick = async () => {
     if (stopping) return;
     try {
+      // Subscribe newly published contracts first, so their tickers do not wait for REST backfill.
+      if (stream) stream.setSymbols(await feed.refreshCoverage());
       const s = await feed.cycle();
       stream?.setSymbols(feed.coveredExchangeSymbols);
       if (Date.now() - lastBeat >= 15_000) {

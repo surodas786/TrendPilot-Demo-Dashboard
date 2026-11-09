@@ -191,7 +191,14 @@ async function previewQuote(instrument: InstrumentDto): Promise<Quote | undefine
 
 async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettings): Promise<OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null } }> {
   const quote = await previewQuote(instrument);
-  if (!quote) throw new DomainError(422, ErrorCode.VALIDATION_FAILED, `No fixture quote is available for ${instrument.symbol}.`);
+  if (!quote)
+    throw new DomainError(
+      422,
+      ErrorCode.VALIDATION_FAILED,
+      instrument.isFixture
+        ? `No fixture quote is available for ${instrument.symbol}.`
+        : `No fresh public MEXC price for ${instrument.symbol} (${instrument.exchangeSymbol}) yet. The market feed picks up a newly published pair within seconds; if it stays unavailable, check Admin → Market Data Feed (the contract may not be trading).`
+    );
   const spec = {
     contractMultiplier: instrument.contract.multiplier,
     qtyStep: instrument.contract.qtyStep,

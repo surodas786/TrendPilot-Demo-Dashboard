@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "code": 0,
+  "data": {
+    "symbol": "XAU_USDT",
+    "displayNameEn": "GOLD(XAU)_USDT PERPETUAL",
+    "baseCoin": "XAU",
+    "quoteCoin": "USDT",
+    "settleCoin": "USDT",
+    "futureType": 1,
+    "contractSize": 0.001,
+    "minLeverage": 1,
+    "maxLeverage": 1000,
+    "priceScale": 2,
+    "priceUnit": 0.01,
+    "volUnit": 1,
+    "minVol": 1,
+    "maxVol": 1000000,
+    "takerFeeRate": 0.0002,
+    "makerFeeRate": 0,
+    "state": 0,
+    "isHidden": false,
+    "apiAllowed": true,
+    "openingTime": 1779861600000,
+    "type": 1
+  }
+}

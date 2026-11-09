@@ -57,11 +57,25 @@ const suggestions = {
   suggestedTrailingPct: percentDistance
 };
 
+/** "XAUUSDT", "xau_usdt" → platform symbol XAUUSDT + MEXC Futures symbol XAU_USDT. */
+export const PAIR_INPUT_RE = /^([A-Z0-9]{2,20})_?USDT$/;
+
 export const tickerSchema = z
   .string()
   .trim()
   .toUpperCase()
-  .regex(/^[A-Z0-9]{2,20}USDT$/, 'Enter a USDT perpetual ticker such as BTCUSDT.');
+  .regex(PAIR_INPUT_RE, 'Enter a USDT perpetual ticker such as BTCUSDT or XAU_USDT.');
+
+/**
+ * Admin pair input → the platform symbol (no separator, e.g. XAUUSDT) and the MEXC Futures symbol
+ * to look up (XAU_USDT). The exchange-returned symbol is what gets stored for execution. The
+ * TradingView source symbol (e.g. XAUUSDT.P) is configured separately on signal routes.
+ */
+export function normalizePairInput(raw: string): { symbol: string; exchangeSymbol: string; base: string } | null {
+  const m = PAIR_INPUT_RE.exec(raw.trim().toUpperCase());
+  if (!m) return null;
+  return { symbol: `${m[1]}USDT`, exchangeSymbol: `${m[1]}_USDT`, base: m[1]! };
+}
 
 export const instrumentValidateSchema = z.object({ symbol: tickerSchema }).strict();
 export const instrumentCreateSchema = z.object({ symbol: tickerSchema, ...suggestions }).strict();

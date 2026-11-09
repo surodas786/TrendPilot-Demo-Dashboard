@@ -78,7 +78,8 @@ export interface Suggestions {
 }
 
 /** UI-05: create an approved pair from a validated (fixture) exchange contract. */
-export async function createInstrumentFromContract(db: Executor, spec: MexcContractFixture, s: Suggestions): Promise<InstrumentDto> {
+/** Creates a PUBLISHED pair from a validated contract. `isFixture` marks unverified fixture metadata. */
+export async function createInstrumentFromContract(db: Executor, spec: MexcContractFixture & { minLeverage?: number; isFixture?: boolean }, s: Suggestions): Promise<InstrumentDto> {
   const [row] = await db
     .insert(instruments)
     .values({
@@ -94,9 +95,9 @@ export async function createInstrumentFromContract(db: Executor, spec: MexcContr
       maxQty: spec.maxQty,
       priceTick: spec.priceTick,
       takerFeeRate: spec.takerFeeRate,
-      leverageChoices: leverageChoicesFor(spec.maxLeverage),
+      leverageChoices: leverageChoicesFor(spec.maxLeverage, spec.minLeverage ?? 1),
       ...s,
-      isFixture: true
+      isFixture: spec.isFixture ?? true
     })
     .onConflictDoNothing()
     .returning();
