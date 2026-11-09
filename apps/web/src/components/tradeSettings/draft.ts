@@ -169,13 +169,15 @@ export function validateDraft(d: Draft, instrument: InstrumentDto | undefined, v
  * plus the version a saved block is pinned to (kept until the investor explicitly switches).
  */
 export function versionChoices(versions: StrategyVersionDto[], instrumentId: string, pinnedId?: string): StrategyVersionDto[] {
-  const out = versions.filter((v) => v.isLatest && v.instrumentIds.includes(instrumentId));
+  // Archived packages are hidden from new selections; a block already pinned to one still shows it.
+  const out = versions.filter((v) => v.isLatest && !v.packageArchived && v.instrumentIds.includes(instrumentId));
   const pinned = pinnedId ? versions.find((v) => v.id === pinnedId) : undefined;
   if (pinned && !out.some((v) => v.id === pinned.id)) out.unshift(pinned);
   return out;
 }
 
-export const versionLabel = (v: StrategyVersionDto) => `${v.packageName} · v${v.version}${v.isLatest ? '' : ' (pinned — newer version available)'}`;
+/** "Supertrend 15m — paper fixture · v2 · 5m": the real timeframe, whatever the package name says. */
+export const versionLabel = (v: StrategyVersionDto) => `${v.packageName} · v${v.version} · ${v.timeframe}${v.isLatest ? '' : ' (pinned — newer version available)'}${v.packageArchived ? ' (archived)' : ''}`;
 
 /** Field errors keyed by path; the first message per path wins. */
 export function errorMap(issues: Issue[]): Record<string, string> {

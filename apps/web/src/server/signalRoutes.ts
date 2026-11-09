@@ -14,6 +14,7 @@ import {
 } from '@trendpilot/db';
 import { DomainError, ErrorCode, notFound, type SignalRouteCreate } from '@trendpilot/domain';
 import { validationError } from './http';
+import { assertPackageActive } from './strategyPackages';
 
 /**
  * UI-05 signal route maintenance. Every rule is enforced here, server-side, inside one transaction
@@ -48,6 +49,7 @@ export async function checkRouteTarget(input: SignalRouteCreate): Promise<void> 
   const db = getDb();
   const inst = await getInstrument(db, input.instrumentId);
   if (!inst || inst.status !== 'PUBLISHED') throw validationError([{ path: 'instrumentId', message: 'Select a published pair.' }]);
+  await assertPackageActive(input.packageId);
   const issues = await routeStrategyIssues(db, input);
   if (issues.length) throw validationError(issues);
 }

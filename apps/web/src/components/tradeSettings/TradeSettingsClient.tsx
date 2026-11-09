@@ -38,7 +38,7 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
   };
   const strategyOf = (b: OrderBlockDto) => {
     const v = versions.find((x) => x.id === b.strategyVersionId);
-    return v ? `${v.packageName} · v${v.version}${v.isLatest ? '' : ' (pinned)'}` : 'Unpublished strategy version';
+    return v ? `${v.packageName} · v${v.version} · ${v.timeframe}${v.isLatest ? '' : ' (pinned)'}` : 'Unpublished strategy version';
   };
 
   const toggle = async (b: OrderBlockDto) => {

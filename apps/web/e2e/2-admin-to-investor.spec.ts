@@ -121,7 +121,8 @@ test('admin creates a package and publishes v1 (5m, EMA 200, close and reverse) 
   await admin.getByLabel('New strategy package').fill(PKG);
   await admin.getByRole('button', { name: 'Create package' }).click();
   const pkg = admin.getByTestId(`package-${PKG}`);
-  await pkg.getByRole('button', { name: 'New version' }).click();
+  // Creating a package opens its first draft straight away.
+  await expect(pkg.getByTestId('draft-form')).toBeVisible();
   await pkg.getByRole('radio', { name: '5m', exact: true }).click();
   await pkg.getByRole('radio', { name: 'EMA 200' }).click();
   await pkg.getByRole('radio', { name: 'Close and reverse' }).click();
@@ -131,8 +132,8 @@ test('admin creates a package and publishes v1 (5m, EMA 200, close and reverse) 
   if ((await pkg.getByRole('checkbox', { name: 'BTC/USDT' }).getAttribute('aria-checked')) === 'true') await pkg.getByRole('checkbox', { name: 'BTC/USDT' }).click();
   if ((await pkg.getByRole('checkbox', { name: 'ETH/USDT' }).getAttribute('aria-checked')) !== 'true') await pkg.getByRole('checkbox', { name: 'ETH/USDT' }).click();
   await pkg.getByRole('button', { name: 'Save draft' }).click();
-  await expect(pkg.getByTestId('version-1').getByText('Draft')).toBeVisible();
-  await pkg.getByRole('button', { name: 'Publish v1' }).click();
+  await expect(pkg.getByTestId('version-1').getByText('Draft', { exact: true })).toBeVisible();
+  await pkg.getByRole('button', { name: 'Publish', exact: true }).click();
   await admin.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
   await expect(pkg.getByTestId('version-1').getByText('Published · latest')).toBeVisible();
   await expect(pkg.getByTestId('version-1')).toContainText('5m · ATR 14 × 2.5 · EMA 200');
@@ -181,7 +182,7 @@ test('the investor configures ETH/USDT, previews the order with fixture data and
   await chloe.getByRole('button', { name: 'Add Token' }).click();
   const panel = chloe.getByRole('dialog');
   await panel.getByLabel('Trading pair').selectOption({ label: 'ETH/USDT' });
-  await expect(panel.getByLabel('Strategy').locator('option:checked')).toHaveText(`${PKG} · v1`);
+  await expect(panel.getByLabel('Strategy').locator('option:checked')).toHaveText(`${PKG} · v1 · 5m`);
   await panel.getByRole('radio', { name: 'Long only' }).click();
   await panel.getByLabel('Order cost (USDT)').fill('40');
   await panel.getByLabel('Leverage').selectOption('5');
@@ -196,7 +197,7 @@ test('the investor configures ETH/USDT, previews the order with fixture data and
   await panel.getByRole('button', { name: 'Save & Activate' }).click();
   const row = chloe.getByTestId('order-block-ETHUSDT');
   await expect(row.getByText('Active — waiting for signal')).toBeVisible();
-  await expect(row).toContainText(`${PKG} · v1 · Long only`);
+  await expect(row).toContainText(`${PKG} · v1 · 5m · Long only`);
   await expect(row.getByTestId('trading-days')).toHaveText('Trading days: Sun, Mon, Tue, Wed, Thu, Fri · Asia/Dhaka');
 });
 
@@ -235,14 +236,15 @@ test('publishing v2 leaves the investor pinned to v1', async () => {
   await pkg.getByRole('radio', { name: '15m', exact: true }).click();
   await pkg.getByRole('radio', { name: 'Keep position open' }).click();
   await pkg.getByRole('button', { name: 'Save draft' }).click();
-  await pkg.getByRole('button', { name: 'Publish v2' }).click();
+  await expect(pkg.getByTestId('version-2').getByText('Draft', { exact: true })).toBeVisible();
+  await pkg.getByRole('button', { name: 'Publish', exact: true }).click();
   await admin.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
   await expect(pkg.getByTestId('version-2').getByText('Published · latest')).toBeVisible();
   await expect(pkg.getByTestId('version-1').getByText('Published', { exact: true })).toBeVisible();
 
   await chloe.reload();
   const row = chloe.getByTestId('order-block-ETHUSDT');
-  await expect(row).toContainText(`${PKG} · v1 (pinned)`);
+  await expect(row).toContainText(`${PKG} · v1 · 5m (pinned)`);
   await row.getByRole('button', { name: /^Edit/ }).click();
   await expect(chloe.getByTestId('pinned-notice')).toContainText('Version 2 is published');
   await chloe.getByRole('button', { name: 'Cancel' }).click();

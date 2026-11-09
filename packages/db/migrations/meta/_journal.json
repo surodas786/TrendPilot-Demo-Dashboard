@@ -120,6 +120,13 @@
       "when": 1794230028121,
       "tag": "0016_m6_ws_ticker",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1794237501462,
+      "tag": "0017_m7_package_archive",
+      "breakpoints": true
     }
   ]
 }

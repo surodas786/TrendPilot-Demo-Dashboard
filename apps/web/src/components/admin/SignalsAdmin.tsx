@@ -105,7 +105,12 @@ function RouteFields({ form, setForm, errors, instruments, packages }: { form: R
           {errors.instrumentId && <p className="mt-1 text-xs text-loss">{errors.instrumentId}</p>}
         </div>
         <div>
-          <FilterSelect label="Strategy lineage" value={form.packageId} onChange={(v) => setForm({ ...form, packageId: v })} options={packages.map((p) => ({ value: p.id, label: lineageLabel(p) }))} />
+          <FilterSelect
+            label="Strategy lineage"
+            value={form.packageId}
+            onChange={(v) => setForm({ ...form, packageId: v })}
+            options={packages.filter((p) => !p.archivedAt || p.id === form.packageId).map((p) => ({ value: p.id, label: lineageLabel(p) + (p.archivedAt ? ' (archived)' : '') }))}
+          />
           {latest && (
             <p className={`mt-1 text-xs ${latest.timeframe === `${form.interval}m` ? 'text-subtle' : 'text-warn'}`} data-testid="form-lineage-timeframe">
               Current version v{latest.version} uses {latest.timeframe}
@@ -137,7 +142,7 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     action: 'BULLISH_FLIP',
     kind: 'ACTIONABLE',
     instrumentId: instruments[0]?.id ?? '',
-    packageId: packages[0]?.id ?? '',
+    packageId: packages.find((p) => !p.archivedAt)?.id ?? '',
     maxSignalAgeSeconds: '120',
     clockToleranceSeconds: '5'
   });

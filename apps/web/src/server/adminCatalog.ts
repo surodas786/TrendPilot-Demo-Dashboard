@@ -5,6 +5,7 @@ import {
   FIXTURE_LABEL,
   getDb,
   getInstrument,
+  getVersion,
   leverageChoicesFor,
   MexcPublicClient,
   MEXC_PUBLIC_DEFAULT_BASE_URL,
@@ -34,6 +35,7 @@ import {
   type Issue
 } from '@trendpilot/domain';
 import { validationError } from './http';
+import { assertPackageActive } from './strategyPackages';
 
 /** UI-05 admin configuration: trading pairs and CFG-02 strategy versions. */
 
@@ -170,6 +172,7 @@ const versionSummary = (v: StrategyVersionDto) => ({
 
 export async function createVersionDraft(admin: PublicUser, packageId: string, raw: unknown, correlationId: string): Promise<StrategyVersionDto> {
   const draft = parse(strategyVersionDraftSchema, raw);
+  await assertPackageActive(packageId);
   await checkPairs(draft.instrumentIds);
   return getDb().transaction(async (tx) => {
     const v = await createDraft(tx, packageId, draft, admin.id);
@@ -180,6 +183,8 @@ export async function createVersionDraft(admin: PublicUser, packageId: string, r
 
 export async function editVersionDraft(admin: PublicUser, id: string, revision: number, raw: unknown, correlationId: string): Promise<StrategyVersionDto> {
   const draft = parse(strategyVersionDraftSchema, raw);
+  const current = await getVersion(getDb(), id);
+  if (current) await assertPackageActive(current.packageId);
   await checkPairs(draft.instrumentIds);
   return getDb().transaction(async (tx) => {
     const r = await updateDraft(tx, id, revision, draft);
@@ -191,6 +196,8 @@ export async function editVersionDraft(admin: PublicUser, id: string, revision: 
 
 /** CFG-02: publishing creates an immutable version. Existing order blocks stay pinned to theirs. */
 export async function publishVersion(admin: PublicUser, id: string, revision: number, correlationId: string): Promise<StrategyVersionDto> {
+  const current = await getVersion(getDb(), id);
+  if (current) await assertPackageActive(current.packageId);
   return getDb().transaction(async (tx) => {
     const r = await publishDraft(tx, id, revision, admin.id);
     if (!r.ok) throw r.reason === 'NOT_FOUND' ? notFound() : r.reason === 'IMMUTABLE' ? immutable() : conflict('draft');

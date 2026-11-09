@@ -33,6 +33,7 @@ async function catalogCheck(db: Executor, instrumentId: string, s: { strategyVer
   const issues: Issue[] = [];
   if (!instrument) issues.push({ path: 'instrumentId', message: 'Select a trading pair.' });
   if (!version) issues.push({ path: 'strategyVersionId', message: 'Select a strategy.' });
+  else if (version.packageArchived) issues.push({ path: 'strategyVersionId', message: `“${version.packageName}” has been archived by the administrator. Select another strategy.` });
   if (instrument && version) {
     // CFG-02: the version must be approved for this pair (contract mapping).
     issues.push(...catalogIssues(s, { instrument, version }));
