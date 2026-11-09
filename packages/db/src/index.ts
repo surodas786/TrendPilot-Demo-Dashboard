@@ -27,6 +27,8 @@ export * from './venue/types';
 export * from './market/feed';
 export * from './market/health';
 export * from './market/mexcPublic';
+export * from './market/mexcWs';
+export * from './market/quoteListener';
 export * from './paper/accounts';
 export * from './paper/entry';
 export * from './paper/exits';

@@ -1,8 +1,9 @@
 import Link from 'next/link';
 import { ActivityIcon, AlertTriangleIcon, FlaskConicalIcon } from 'lucide-react';
-import { getDb, getMyDashboard } from '@trendpilot/db';
+import { getDb, getMyDashboard, listLatestQuotes } from '@trendpilot/db';
 import { isIsoDate } from '@trendpilot/domain';
 import { PageContainer } from '@/components/layout/PageContainer';
+import { LiveQuotesPanel } from '@/components/market/LiveQuotesPanel';
 import { FUNDING_LABEL, fmtTime, pnlTone, usdtOrUnavailable } from '@/components/reporting/format';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { now } from '@/server/clock';
@@ -26,7 +27,11 @@ function Stat({ label, value, tone, testId, note }: { label: string; value: stri
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ date?: string }> }) {
   const { user } = await requirePageRole('INVESTOR');
   const { date } = await searchParams;
-  const d = await getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: now(), date: date && isIsoDate(date) ? date : undefined });
+  const at = now();
+  const [d, quotes] = await Promise.all([
+    getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined }),
+    listLatestQuotes(getDb(), at, { publishedOnly: true })
+  ]);
   const stale = d.freshness.stale;
 
   return (
@@ -60,6 +65,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           Last price update: {fmtTime(d.freshness.lastPriceUpdate, d.timezone)}
         </span>
       </div>
+
+      <LiveQuotesPanel initial={quotes} timezone={d.timezone} />
 
       {!d.account ? (
         <p className="rounded-xl border border-line bg-surface p-4 text-sm text-muted">Your paper account opens with your first paper evaluation.</p>

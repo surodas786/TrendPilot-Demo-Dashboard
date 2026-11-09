@@ -8,18 +8,21 @@ import {
   FUNDING_CYCLE_HOURS,
   INTERVAL_MS,
   isClosedBar,
+  isRateLimitCode,
   missingBarRanges,
   newestClosedBarOpen,
   quoteProblem,
   toLocalTime,
   type CandleInterval,
-  type FeedState
+  type FeedState,
+  type QuoteChannel
 } from '@trendpilot/domain';
 import type { Db } from '../client';
 import { recordMarketTick } from '../paper/exits';
 import { recordFundingRate } from '../paper/funding';
 import { fundingRates, instruments, marketCandles, marketFeedEvents, marketFeedStatus } from '../schema';
-import { isMexcFuturesSymbol, MexcPublicError, type MexcKline, type PublicMarketSource } from './mexcPublic';
+import { isMexcFuturesSymbol, MexcPublicError, type MexcKline, type MexcTicker, type PublicMarketSource } from './mexcPublic';
+import type { StreamTicker, TickerStreamView } from './mexcWs';
 
 /**
  * MKT-01/02 public price feed for Paper mode. Each cycle, for every approved (published) contract
@@ -32,6 +35,15 @@ import { isMexcFuturesSymbol, MexcPublicError, type MexcKline, type PublicMarket
  *    late revisions of a closed bar recorded.
  * Failures back off per contract. State is persisted in `market_feed_status`, notable transitions
  * in `market_feed_events`. Order execution is untouched: fills stay in the paper simulator.
+ *
+ * Ticker transport. With a `stream` (the public WebSocket, the default in production) quotes arrive
+ * through `ingestStreamTicker` and the cycle makes NO REST ticker call: it judges each contract's
+ * quote freshness from what the stream delivered, separately from socket connectivity, and keeps
+ * REST for contract detail, closed-candle backfill and settled funding. REST errors then only back
+ * off the REST work; they never mark a contract DOWN while fresh WebSocket quotes arrive. A REST
+ * ticker read happens only as an explicitly enabled, rate-limited fallback (`restFallback`), and
+ * such quotes are labelled REST_FALLBACK. Without a stream the legacy REST polling path is used.
+ * A MEXC 510 / HTTP 429 (IP rate limit) pauses every REST call of this process for a cooldown.
  */
 
 export const FEED_SOURCE = 'MEXC_PUBLIC';
@@ -48,6 +60,10 @@ export interface FeedOptions {
   clockCheckMs?: number;
   /** Re-check a contract's public detail this often (and after it was unavailable). */
   detailCheckMs?: number;
+  /** WebSocket ticker stream (primary quote source). Absent: legacy REST ticker polling. */
+  stream?: TickerStreamView;
+  /** Stream mode only: REST ticker reads while the stream has no fresh quote. Off unless enabled. */
+  restFallback?: { enabled: boolean; minIntervalMs?: number };
 }
 
 export interface InstrumentCycleResult {
@@ -58,9 +74,14 @@ export interface InstrumentCycleResult {
   candlesWritten: number;
   gapsBackfilled: number;
   fundingRecorded?: number;
-  skipped?: 'BACKOFF';
+  /** REST work skipped: per-contract backoff, or the process-wide rate-limit cooldown. */
+  skipped?: 'BACKOFF' | 'RATE_LIMIT';
+  /** Channel of the quote written this cycle (REST_POLL or REST_FALLBACK); WS quotes arrive via ingest. */
+  quoteChannel?: QuoteChannel;
   error?: string;
 }
+
+export type IngestOutcome = 'WRITTEN' | 'REPEAT' | 'STALE' | 'CLOCK_SKEW' | 'IGNORED';
 
 export interface CycleSummary {
   at: string;
@@ -104,6 +125,12 @@ export class MarketFeed {
   private offsetCheckedAt = 0;
   /** Gap ranges already reported as unresolved in this process (avoids an event every cycle). */
   private readonly reportedGaps = new Set<string>();
+  /** No REST call before this time (local ms) after a rate-limit answer. */
+  private restCooldownUntil = 0;
+  private lastCovered: Covered[] = [];
+  private readonly lastFallbackAt = new Map<string, number>();
+  /** Per-contract serialisation of quote-state writes (stream ingest vs. cycle evaluation). */
+  private readonly locks = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly db: Db,
@@ -120,6 +147,47 @@ export class MarketFeed {
 
   get clockOffset(): number | null {
     return this.offsetMs;
+  }
+
+  /** Clock sample from another channel (WebSocket pong). Keeps REST pings unnecessary. */
+  setClockOffset(offsetMs: number): void {
+    this.offsetMs = offsetMs;
+    this.offsetCheckedAt = this.now().getTime();
+  }
+
+  /** Exchange symbols the stream should carry (from the last cycle's coverage). */
+  get coveredExchangeSymbols(): string[] {
+    return this.lastCovered.map((c) => c.exchangeSymbol).filter(isMexcFuturesSymbol);
+  }
+
+  /** Local ms until which REST is paused after a rate-limit answer (0 = not paused). */
+  get restPausedUntil(): number {
+    return this.restCooldownUntil > this.now().getTime() ? this.restCooldownUntil : 0;
+  }
+
+  private restCooling(): boolean {
+    return this.restCooldownUntil > this.now().getTime();
+  }
+
+  private noteRateLimit(e: unknown): void {
+    if (!(e instanceof MexcPublicError) || !isRateLimitCode(e.kind, e.code)) return;
+    const until = this.now().getTime() + Math.round(FEED_POLICY.restRateLimitCooldownMs * (0.8 + 0.4 * this.rand()));
+    if (until > this.restCooldownUntil) {
+      this.restCooldownUntil = until;
+      this.log(`REST rate limited by MEXC (${e.message}); pausing all REST calls until ${new Date(until).toISOString()}`);
+    }
+  }
+
+  private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this.locks.set(key, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.locks.get(key) === tail) this.locks.delete(key);
+    }
   }
 
   /** Contracts the feed must cover: published ones plus any with an open position (MKT-01). */
@@ -142,17 +210,25 @@ export class MarketFeed {
     return rows.filter((r) => r.status === 'PUBLISHED' || r.openPositions > 0);
   }
 
+  /** Reloads the covered contracts (what the stream subscribes to) without any exchange call. */
+  async refreshCoverage(): Promise<string[]> {
+    this.lastCovered = await this.covered();
+    return this.coveredExchangeSymbols;
+  }
+
   async cycle(): Promise<CycleSummary> {
     const started = this.now();
     await this.measureClock();
     const results: InstrumentCycleResult[] = [];
-    for (const inst of await this.covered()) results.push(await this.runInstrument(inst));
+    this.lastCovered = await this.covered();
+    for (const inst of this.lastCovered) results.push(this.o.stream ? await this.runStreamInstrument(inst) : await this.runInstrument(inst));
     return { at: started.toISOString(), clockOffsetMs: this.offsetMs, instruments: results };
   }
 
   private async measureClock(): Promise<void> {
     const t = this.now().getTime();
     if (this.offsetMs !== null && t - this.offsetCheckedAt < this.clockCheckMs) return;
+    if (this.restCooling()) return;
     try {
       const sent = this.now().getTime();
       const server = await this.o.source.serverTimeMs();
@@ -161,6 +237,7 @@ export class MarketFeed {
       this.offsetCheckedAt = received;
     } catch (e) {
       // Keep the last measurement; with none, ticker and candle reads below fail and back off.
+      this.noteRateLimit(e);
       this.log(`clock check failed: ${(e as Error).message}`);
     }
   }
@@ -207,6 +284,7 @@ export class MarketFeed {
       return { ...base, state: 'SYMBOL_UNAVAILABLE', error: 'Symbol mapping missing' };
     }
     if (prev?.nextRetryAt && prev.nextRetryAt > now) return { ...base, state: prev.state as FeedState, skipped: 'BACKOFF' };
+    if (this.restCooling()) return { ...base, state: (prev?.state ?? 'STARTING') as FeedState, skipped: 'RATE_LIMIT' };
 
     try {
       // 1. Symbol mapping and contract spec (public detail).
@@ -219,7 +297,7 @@ export class MarketFeed {
       }
       if (this.offsetMs === null) throw new MexcPublicError('exchange clock unknown (ping failed)', 'NETWORK');
 
-      // 2. Quote.
+      // 2. Quote (legacy REST polling).
       const quote = await this.syncQuote(inst, prev);
       // 3. Closed candles.
       let candlesWritten = 0;
@@ -231,14 +309,154 @@ export class MarketFeed {
       }
       // 4. Settled funding (REP-02), once per settlement.
       const fundingRecorded = await this.syncFunding(inst);
-      return { ...base, state: quote.state, quoteWritten: quote.written, candlesWritten, gapsBackfilled, fundingRecorded };
+      return { ...base, state: quote.state, quoteWritten: quote.written, quoteChannel: quote.written ? 'REST_POLL' : undefined, candlesWritten, gapsBackfilled, fundingRecorded };
     } catch (e) {
       return { ...base, ...(await this.fail(inst, prev, e)) };
     }
   }
 
+  /**
+   * Stream mode. REST work (detail, candles, funding) runs under its own backoff and the shared
+   * rate-limit cooldown; its errors are recorded but never change the quote state. The quote state
+   * comes from the stream's per-contract freshness (plus the optional REST fallback).
+   */
+  private async runStreamInstrument(inst: Covered): Promise<InstrumentCycleResult> {
+    const base: InstrumentCycleResult = { symbol: inst.symbol, exchangeSymbol: inst.exchangeSymbol, state: 'STARTING', quoteWritten: false, candlesWritten: 0, gapsBackfilled: 0 };
+    const prev = await this.status(inst.id);
+    const now = this.now();
+
+    if (!isMexcFuturesSymbol(inst.exchangeSymbol)) {
+      await this.withLock(inst.id, () => this.transition(inst, prev, 'SYMBOL_UNAVAILABLE', `no MEXC Futures symbol mapped (got "${inst.exchangeSymbol}")`, { lastError: 'Symbol mapping missing' }));
+      return { ...base, state: 'SYMBOL_UNAVAILABLE', error: 'Symbol mapping missing' };
+    }
+
+    const out: InstrumentCycleResult = { ...base };
+    if (prev?.nextRetryAt && prev.nextRetryAt > now) out.skipped = 'BACKOFF';
+    else if (this.restCooling()) out.skipped = 'RATE_LIMIT';
+    else {
+      try {
+        const due = !prev?.contractCheckedAt || now.getTime() - prev.contractCheckedAt.getTime() >= (prev.state === 'SYMBOL_UNAVAILABLE' ? 600_000 : this.detailCheckMs);
+        if (due) {
+          const ok = await this.withLock(inst.id, () => this.checkContract(inst, prev));
+          if (!ok) return { ...base, state: 'SYMBOL_UNAVAILABLE', error: 'Symbol not available on MEXC Futures' };
+        }
+        if (prev?.state !== 'SYMBOL_UNAVAILABLE' || due) {
+          if (this.offsetMs !== null) {
+            for (const interval of this.intervals) {
+              const r = await this.syncCandles(inst, interval);
+              out.candlesWritten += r.written;
+              out.gapsBackfilled += r.backfilled;
+            }
+            out.fundingRecorded = await this.syncFunding(inst);
+          }
+          if (prev?.consecutiveFailures || prev?.lastError?.startsWith('REST')) await this.save(inst.id, inst.exchangeSymbol, { consecutiveFailures: 0, nextRetryAt: null, lastError: null });
+        }
+      } catch (e) {
+        const unavailable = await this.restFailed(inst, e);
+        if (unavailable) return { ...base, state: 'SYMBOL_UNAVAILABLE', error: unavailable };
+        out.error = `REST: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`;
+      }
+    }
+
+    const cur = await this.status(inst.id);
+    if (cur?.state === 'SYMBOL_UNAVAILABLE') return { ...out, state: 'SYMBOL_UNAVAILABLE' };
+    const q = await this.withLock(inst.id, () => this.evaluateStreamQuote(inst));
+    return { ...out, state: q.state, quoteWritten: q.written, quoteChannel: q.written ? 'REST_FALLBACK' : undefined, error: out.error ?? q.error };
+  }
+
+  /** Records a REST failure in stream mode: backoff + lastError only. Returns a message if the symbol is unavailable. */
+  private async restFailed(inst: Covered, e: unknown): Promise<string | null> {
+    const message = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    this.noteRateLimit(e);
+    if (e instanceof MexcPublicError && e.kind === 'API' && e.code === 1001) {
+      await this.withLock(inst.id, async () => this.transition(inst, await this.status(inst.id), 'SYMBOL_UNAVAILABLE', message, { lastError: message, contractCheckedAt: this.now() }));
+      return message;
+    }
+    const prev = await this.status(inst.id);
+    const failures = (prev?.consecutiveFailures ?? 0) + 1;
+    const retryAt = new Date(this.now().getTime() + backoffMs(failures, this.rand()));
+    await this.save(inst.id, inst.exchangeSymbol, { consecutiveFailures: failures, nextRetryAt: retryAt, lastError: `REST: ${message}` });
+    this.log(`${inst.symbol}: REST ${message} (failure ${failures}, REST retry at ${retryAt.toISOString()}; quote state unaffected)`);
+    return null;
+  }
+
+  /** Quote state from stream freshness; optionally one rate-limited REST fallback read. */
+  private async evaluateStreamQuote(inst: Covered): Promise<{ state: FeedState; written: boolean; error?: string }> {
+    const prev = await this.status(inst.id);
+    const now = this.now();
+    const quiet = { lastSuccessAt: prev?.lastSuccessAt ?? null, clockOffsetMs: this.offsetMs };
+    if (this.offsetMs !== null && Math.abs(this.offsetMs) > FEED_POLICY.maxClockSkewMs) {
+      await this.transition(inst, prev, 'CLOCK_SKEW', `exchange clock differs from local by ${this.offsetMs} ms (limit ${FEED_POLICY.maxClockSkewMs} ms)`, quiet);
+      return { state: 'CLOCK_SKEW', written: false };
+    }
+    const lastQuoteAt = prev?.lastQuoteAt ?? null;
+    const age = lastQuoteAt ? now.getTime() - lastQuoteAt.getTime() : Infinity;
+    if (age <= FEED_POLICY.maxQuoteAgeMs) {
+      await this.transition(inst, prev, 'HEALTHY', `receiving prices (${prev?.quoteChannel === 'REST_FALLBACK' ? 'REST fallback' : 'WebSocket'})`, quiet);
+      return { state: 'HEALTHY', written: false };
+    }
+
+    // No fresh quote. Optional, explicitly enabled REST fallback, at most once per interval.
+    let error: string | undefined;
+    const fb = this.o.restFallback;
+    if (fb?.enabled && this.offsetMs !== null && !this.restCooling()) {
+      const last = this.lastFallbackAt.get(inst.id) ?? 0;
+      if (now.getTime() - last >= (fb.minIntervalMs ?? FEED_POLICY.restFallbackMinIntervalMs)) {
+        this.lastFallbackAt.set(inst.id, now.getTime());
+        try {
+          const t = await this.o.source.ticker(inst.exchangeSymbol);
+          const r = await this.acceptQuote(inst, prev, t, 'REST_FALLBACK', { clockOffsetMs: this.offsetMs, lastSuccessAt: now });
+          if (r === 'WRITTEN' || r === 'REPEAT') return { state: 'HEALTHY', written: r === 'WRITTEN' };
+        } catch (e) {
+          this.noteRateLimit(e);
+          error = `REST fallback: ${(e as Error).message}`.slice(0, 500);
+          this.log(`${inst.symbol}: ${error}`);
+        }
+      }
+    }
+
+    const stream = this.o.stream!;
+    const since = stream.connectedSince();
+    const ageText = lastQuoteAt ? `${Math.round(age / 1000)} s` : 'ever';
+    let next: FeedState;
+    let reason: string;
+    if (!stream.connected()) {
+      next = 'DOWN';
+      reason = `WebSocket disconnected; reconnecting (no quote for ${ageText})`;
+    } else if (!lastQuoteAt && since && now.getTime() - since.getTime() < FEED_POLICY.maxQuoteAgeMs) {
+      next = 'STARTING';
+      reason = 'subscribed; waiting for the first ticker';
+    } else {
+      next = 'STALE';
+      reason = `WebSocket connected but no fresh ${inst.exchangeSymbol} ticker (none for ${ageText})`;
+    }
+    const cur = await this.status(inst.id);
+    await this.transition(inst, cur, next, reason, { ...quiet, ...(error ? { lastError: error } : {}) });
+    return { state: next, written: false, error };
+  }
+
+  /**
+   * A `push.ticker` from the WebSocket. Writes the quote (source MEXC_PUBLIC, channel WS) and its
+   * market.tick job unless it is a repeat, stale, skewed or for a contract we do not cover.
+   */
+  async ingestStreamTicker(t: StreamTicker): Promise<IngestOutcome> {
+    const inst = this.lastCovered.find((c) => c.exchangeSymbol === t.exchangeSymbol);
+    if (!inst || this.offsetMs === null) return 'IGNORED';
+    return this.withLock(inst.id, async () => {
+      const prev = await this.status(inst.id);
+      if (prev?.state === 'SYMBOL_UNAVAILABLE') return 'IGNORED';
+      try {
+        return await this.acceptQuote(inst, prev, t, 'WS', { lastSuccessAt: t.receivedAt, clockOffsetMs: this.offsetMs, lastStreamAt: t.receivedAt }, t.receivedAt);
+      } catch (e) {
+        this.log(`${inst.symbol}: WebSocket ticker rejected: ${(e as Error).message}`);
+        return 'IGNORED';
+      }
+    });
+  }
+
   private async fail(inst: Covered, prev: StatusRow | null, e: unknown): Promise<{ state: FeedState; error: string }> {
     const message = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    this.noteRateLimit(e);
     if (e instanceof MexcPublicError && e.kind === 'API' && e.code === 1001) {
       await this.transition(inst, prev, 'SYMBOL_UNAVAILABLE', message, { lastError: message, contractCheckedAt: this.now() });
       return { state: 'SYMBOL_UNAVAILABLE', error: message };
@@ -283,12 +501,24 @@ export class MarketFeed {
   private async syncQuote(inst: Covered, prevRow: StatusRow | null): Promise<{ state: FeedState; written: boolean }> {
     const prev = (await this.status(inst.id)) ?? prevRow;
     const t = await this.o.source.ticker(inst.exchangeSymbol);
-    const now = this.now();
-    const ok = { consecutiveFailures: 0, nextRetryAt: null, lastError: null, lastSuccessAt: now, clockOffsetMs: this.offsetMs };
+    const ok = { consecutiveFailures: 0, nextRetryAt: null, lastError: null, lastSuccessAt: this.now(), clockOffsetMs: this.offsetMs };
+    const r = await this.acceptQuote(inst, prev, t, 'REST_POLL', ok);
+    return { state: r === 'CLOCK_SKEW' ? 'CLOCK_SKEW' : r === 'STALE' ? 'STALE' : 'HEALTHY', written: r === 'WRITTEN' };
+  }
 
+  /** Validates one ticker and records it. Shared by REST polling, REST fallback and the WebSocket. */
+  private async acceptQuote(
+    inst: Covered,
+    prev: StatusRow | null,
+    t: MexcTicker,
+    channel: QuoteChannel,
+    ok: Partial<typeof marketFeedStatus.$inferInsert>,
+    receivedAt?: Date
+  ): Promise<Exclude<IngestOutcome, 'IGNORED'>> {
+    const now = this.now();
     if (Math.abs(this.offsetMs!) > FEED_POLICY.maxClockSkewMs) {
       await this.transition(inst, prev, 'CLOCK_SKEW', `exchange clock differs from local by ${this.offsetMs} ms (limit ${FEED_POLICY.maxClockSkewMs} ms)`, ok);
-      return { state: 'CLOCK_SKEW', written: false };
+      return 'CLOCK_SKEW';
     }
     const problem = quoteProblem(t);
     if (problem) throw new MexcPublicError(`ticker ${inst.exchangeSymbol}: ${problem}`, 'PARSE');
@@ -298,21 +528,22 @@ export class MarketFeed {
     const repeated = prev?.lastExchangeTime && prev.lastExchangeTime.getTime() === t.exchangeTimeMs;
     if (ageMs > FEED_POLICY.maxQuoteAgeMs) {
       await this.transition(inst, prev, 'STALE', `newest exchange price is ${Math.round(ageMs / 1000)} s old`, ok);
-      return { state: 'STALE', written: false };
+      return 'STALE';
     }
     if (repeated) {
-      // Nothing new from the exchange this cycle; the previous quote is still fresh.
+      // Nothing new from the exchange; the previous quote is still fresh.
       await this.transition(inst, prev, 'HEALTHY', 'receiving prices', ok);
-      return { state: 'HEALTHY', written: false };
+      return 'REPEAT';
     }
 
-    await recordMarketTick(this.db, { instrumentId: inst.id, asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: null, source: FEED_SOURCE });
+    await recordMarketTick(this.db, { instrumentId: inst.id, asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: null, source: FEED_SOURCE, channel, receivedAt: receivedAt ?? now });
 
     // Recovery after an outage or a stale stretch: record the interval where price crossings could
     // not be observed. Exits continue from the current price; nothing is filled retroactively.
     const lastQuoteAt = prev?.lastQuoteAt ?? null;
     if (prev && prev.state !== 'HEALTHY' && prev.state !== 'STARTING') {
-      await this.event(inst.id, 'RECOVERED', `${inst.symbol} recovered from ${prev.state}`, { from: prev.state });
+      const via = channel === 'WS' ? 'WebSocket' : channel === 'REST_FALLBACK' ? 'REST fallback' : 'REST';
+      await this.event(inst.id, 'RECOVERED', `${inst.symbol} recovered from ${prev.state} (${via})`, { from: prev.state, channel });
     }
     if (lastQuoteAt && asOf.getTime() - lastQuoteAt.getTime() > FEED_POLICY.maxQuoteAgeMs) {
       await this.event(
@@ -323,8 +554,8 @@ export class MarketFeed {
         { from: lastQuoteAt, to: asOf }
       );
     }
-    await this.transition(inst, prev, 'HEALTHY', 'receiving prices', { ...ok, lastQuoteAt: asOf, lastExchangeTime: new Date(t.exchangeTimeMs) });
-    return { state: 'HEALTHY', written: true };
+    await this.transition(inst, prev, 'HEALTHY', 'receiving prices', { ...ok, lastQuoteAt: asOf, lastExchangeTime: new Date(t.exchangeTimeMs), quoteChannel: channel });
+    return 'WRITTEN';
   }
 
   /** After each funding settlement (with a 60 s settle delay), records the newly settled rates. */

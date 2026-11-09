@@ -14,6 +14,7 @@ import {
   type PriceBasis,
   type TrailingState
 } from '@trendpilot/domain';
+import type { QuoteChannel } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { completeJob, enqueueJob, type JobRow } from '../jobs';
 import { fills, instruments, marketQuotes, orderIntents, positionExits, positions, positionTargets } from '../schema';
@@ -498,21 +499,53 @@ export interface TickSummary {
   exitsWaiting: number;
 }
 
-/** Enqueue a replayed price (fixture): the quote and its tick job commit together. */
+/** Postgres NOTIFY channel carrying every stored quote (payload: QuoteNotification JSON). */
+export const QUOTE_NOTIFY_CHANNEL = 'market_quote';
+
+export interface QuoteNotification {
+  instrumentId: string;
+  asOf: string;
+  bid: string;
+  ask: string;
+  mark: string;
+  last: string;
+  source: string;
+  channel: string | null;
+  /** Feed-process receipt time. */
+  receivedAt: string;
+}
+
 /**
  * Stores one quote and queues the `market.tick` job that runs stops, targets and trailing on it.
  * Fixture ticks (CLI, tests) default to source FIXTURE; the public feed passes MEXC_PUBLIC.
  */
 export async function recordMarketTick(
   db: Db,
-  t: { instrumentId: string; asOf: Date; bid: string; ask: string; mark: string; last: string; liquidityContracts?: string | null; source?: 'FIXTURE' | 'MEXC_PUBLIC' }
+  t: {
+    instrumentId: string;
+    asOf: Date;
+    bid: string;
+    ask: string;
+    mark: string;
+    last: string;
+    liquidityContracts?: string | null;
+    source?: 'FIXTURE' | 'MEXC_PUBLIC';
+    /** MEXC_PUBLIC transport (WS, REST_FALLBACK, REST_POLL). */
+    channel?: QuoteChannel | null;
+    /** When the feed process received it (for end-to-end latency); defaults to now. */
+    receivedAt?: Date;
+  }
 ): Promise<void> {
   const source = t.source ?? 'FIXTURE';
+  const channel = t.channel ?? null;
   await db.transaction(async (tx) => {
     await tx
       .insert(marketQuotes)
-      .values({ instrumentId: t.instrumentId, asOf: t.asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source })
-      .onConflictDoUpdate({ target: [marketQuotes.instrumentId, marketQuotes.asOf], set: { bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source } });
+      .values({ instrumentId: t.instrumentId, asOf: t.asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source, channel })
+      .onConflictDoUpdate({ target: [marketQuotes.instrumentId, marketQuotes.asOf], set: { bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source, channel } });
+    // Delivered to LISTENers (the web app's live quote stream) when this transaction commits.
+    const note: QuoteNotification = { instrumentId: t.instrumentId, asOf: t.asOf.toISOString(), bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, source, channel, receivedAt: (t.receivedAt ?? new Date()).toISOString() };
+    await tx.execute(sql`select pg_notify(${QUOTE_NOTIFY_CHANNEL}, ${JSON.stringify(note)})`);
     await enqueueJob(tx, {
       kind: MARKET_TICK_JOB,
       dedupeKey: `${MARKET_TICK_JOB}:${t.instrumentId}:${t.asOf.toISOString()}:${t.mark}:${t.last}:${t.bid}:${t.ask}`,

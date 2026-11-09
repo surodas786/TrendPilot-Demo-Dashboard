@@ -1,8 +1,11 @@
 'use client';
 
 import React, { useState } from 'react';
-import type { FeedEventDto, FeedHealthDto } from '@trendpilot/db';
+import type { FeedEventDto, FeedHealthDto, FeedTransportDto, LiveQuoteDto } from '@trendpilot/db';
+import { FEED_POLICY } from '@trendpilot/domain';
 import { request } from '@/lib/api';
+import { ConnectionPill } from '../market/LiveQuotesPanel';
+import { useLiveQuotes } from '../market/useLiveQuotes';
 import { Button } from '../ui/Button';
 import { StatusPill, type PillTone } from '../ui/StatusPill';
 
@@ -12,25 +15,87 @@ const stateLabel: Record<string, string> = { HEALTHY: 'Healthy', STARTING: 'Star
 const fmt = (iso: string | null, tz: string) =>
   iso ? new Intl.DateTimeFormat('en-GB', { timeZone: tz, dateStyle: 'short', timeStyle: 'medium' }).format(new Date(iso)) : '—';
 
+/** "74651.000000000000" → "74651", matching the live stream. */
+const trim = (v: string) => (v.includes('.') ? v.replace(/\.?0+$/, '') : v);
+
+const toLive = (items: FeedHealthDto[]): LiveQuoteDto[] =>
+  items.map((i) => ({
+    instrumentId: i.instrumentId,
+    symbol: i.symbol,
+    exchangeSymbol: i.exchangeSymbol,
+    quote: i.latestQuote ? { bid: trim(i.latestQuote.bid), ask: trim(i.latestQuote.ask), mark: trim(i.latestQuote.mark), last: trim(i.latestQuote.last), source: i.latestQuote.source, channel: i.latestQuote.channel, sourceLabel: i.latestQuote.sourceLabel, asOf: i.latestQuote.asOf } : null
+  }));
+
+function TransportBanner({ t, timezone }: { t: FeedTransportDto | null; timezone: string }) {
+  if (!t) return <p className="rounded-xl border border-line bg-surface px-4 py-3 text-xs text-subtle" data-testid="feed-transport">No market feed process has reported yet.</p>;
+  const s = t.stream;
+  const ws = t.tickerSource === 'ws';
+  return (
+    <div className="space-y-1 rounded-xl border border-line bg-surface px-4 py-3 text-xs" data-testid="feed-transport">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-semibold text-ink">Ticker transport</span>
+        {!t.reporting ? (
+          <StatusPill tone="warn">Feed not reporting</StatusPill>
+        ) : ws ? (
+          <StatusPill tone={s?.state === 'OPEN' ? 'gain' : 'loss'}>{s?.state === 'OPEN' ? 'WebSocket connected' : `WebSocket ${s?.state?.toLowerCase() ?? 'unknown'}`}</StatusPill>
+        ) : (
+          <StatusPill tone="warn">REST polling (MARKET_FEED_TICKER_SOURCE=rest)</StatusPill>
+        )}
+        {ws && <span className="text-muted">REST ticker fallback {t.restFallback ? 'on (rate-limited)' : 'off'}</span>}
+        {t.restPausedUntil && <StatusPill tone="warn">REST paused (MEXC rate limit) until {fmt(t.restPausedUntil, timezone)}</StatusPill>}
+      </div>
+      {ws && s && (
+        <div className="text-muted">
+          {s.connectedSince ? `Connected since ${fmt(s.connectedSince, timezone)}` : s.nextReconnectAt ? `Reconnecting at ${fmt(s.nextReconnectAt, timezone)}` : 'Not connected'} · subscribed {s.subscribed.join(', ') || 'none'} · receiving{' '}
+          {s.confirmed.join(', ') || 'none yet'} · {s.reconnects} reconnect(s) · last message {fmt(s.lastMessageAt, timezone)}
+          {s.lastError ? ` · last error: ${s.lastError}` : ''}
+        </div>
+      )}
+      <div className="text-subtle">
+        REST calls since feed start: ticker {t.restCalls.ticker ?? 0} · kline {t.restCalls.kline ?? 0} · detail {t.restCalls.detail ?? 0} · funding {t.restCalls.funding_rate ?? 0} · ping {t.restCalls.ping ?? 0} · instance {t.instance}, reported{' '}
+        {fmt(t.lastSeenAt, timezone)}
+      </div>
+      {t.otherInstances.length > 0 && <div className="text-loss">Another active feed instance is reporting ({t.otherInstances.join(', ')}). Run exactly one feed per deployment.</div>}
+    </div>
+  );
+}
+
 /** MKT-02 feed health for admins: per contract state, freshness, data source and recent events. */
-export function MarketFeedsAdmin({ initial, timezone }: { initial: { items: FeedHealthDto[]; events: FeedEventDto[]; checkedAt: string }; timezone: string }) {
+export function MarketFeedsAdmin({
+  initial,
+  timezone
+}: {
+  initial: { items: FeedHealthDto[]; events: FeedEventDto[]; transport: FeedTransportDto | null; checkedAt: string };
+  timezone: string;
+}) {
   const [data, setData] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const live = useLiveQuotes(toLive(initial.items));
+  const liveById = new Map(live.items.map((q) => [q.instrumentId, q]));
+  // Refresh reads TrendPilot's own stored state; it never calls MEXC.
   const refresh = async () => {
     setBusy(true);
     const r = await request<typeof initial>('GET', '/v1/admin/market-feeds');
     if (r.ok) setData(r.data);
+    await live.refresh();
     setBusy(false);
   };
 
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-subtle">Checked {fmt(data.checkedAt, timezone)} ({timezone})</p>
+        <div className="flex items-center gap-2">
+          <ConnectionPill connection={live.connection} />
+          <p className="text-xs text-subtle">
+            Prices update live. Feed state checked {fmt(data.checkedAt, timezone)} ({timezone})
+          </p>
+        </div>
         <Button variant="secondary" onClick={() => void refresh()} disabled={busy}>
           {busy ? 'Refreshing…' : 'Refresh'}
         </Button>
       </div>
+
+      <TransportBanner t={data.transport} timezone={timezone} />
 
       <div className="overflow-x-auto rounded-xl border border-line bg-surface">
         <table className="w-full min-w-[960px] text-left text-sm" aria-label="Market data feeds">
@@ -72,18 +137,32 @@ export function MarketFeedsAdmin({ initial, timezone }: { initial: { items: Feed
                   )}
                 </td>
                 <td className="px-4 py-3">
-                  {i.latestQuote ? (
-                    <div className="space-y-1">
-                      <StatusPill tone={i.latestQuote.source === 'MEXC_PUBLIC' ? 'accent' : 'neutral'}>{i.latestQuote.sourceLabel}</StatusPill>
-                      <div className={`text-xs ${i.latestQuote.freshness === 'FRESH' ? 'text-muted' : 'text-warn'}`}>
-                        {i.latestQuote.freshness === 'FRESH' ? 'Fresh' : 'Stale'} · {i.latestQuote.ageSeconds} s old
+                  {(() => {
+                    const lq = liveById.get(i.instrumentId);
+                    const q = lq?.quote;
+                    if (!q) return <span className="text-xs text-subtle">No price</span>;
+                    const age = live.nowMs === null ? null : Math.max(0, Math.round((live.nowMs - Date.parse(q.asOf)) / 1000));
+                    const fresh = age === null ? i.latestQuote?.freshness !== 'STALE' : age * 1000 <= FEED_POLICY.maxQuoteAgeMs;
+                    return (
+                      <div className="space-y-1">
+                        <StatusPill tone={q.channel === 'REST_FALLBACK' ? 'warn' : q.source === 'MEXC_PUBLIC' ? 'accent' : 'neutral'}>
+                          <span data-testid="quote-source">{q.sourceLabel}</span>
+                        </StatusPill>
+                        <div className={`text-xs ${fresh ? 'text-muted' : 'text-warn'}`} data-testid="quote-age">
+                          {fresh ? 'Fresh' : 'Stale'}
+                          {age !== null ? ` · ${age} s old` : ''} · {fmt(q.asOf, timezone)}
+                        </div>
+                        {lq?.latencyMs !== undefined && <div className="text-[11px] text-subtle">pushed ~{lq.latencyMs} ms after feed receipt</div>}
                       </div>
-                    </div>
-                  ) : (
-                    <span className="text-xs text-subtle">No price</span>
-                  )}
+                    );
+                  })()}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-ink">{i.latestQuote ? `${i.latestQuote.bid} / ${i.latestQuote.ask} · ${i.latestQuote.mark}` : '—'}</td>
+                <td className="px-4 py-3 font-mono text-xs text-ink" data-testid="quote-prices">
+                  {(() => {
+                    const q = liveById.get(i.instrumentId)?.quote;
+                    return q ? `${q.bid} / ${q.ask} · ${q.mark}` : '—';
+                  })()}
+                </td>
                 <td className="px-4 py-3 text-xs text-muted">
                   {i.feed && Object.keys(i.feed.lastCandleOpen).length
                     ? Object.entries(i.feed.lastCandleOpen)
