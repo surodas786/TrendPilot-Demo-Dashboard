@@ -179,14 +179,58 @@ export const userTokens = pgTable(
 );
 
 /** Development email capture (§13 "mock email"). Replaced by a provider adapter later. */
-export const emailOutbox = pgTable('email_outbox', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  toEmail: text('to_email').notNull(),
-  subject: text('subject').notNull(),
-  bodyText: text('body_text').notNull(),
-  template: text('template').notNull(),
-  createdAt: createdAt()
-});
+export const emailOutbox = pgTable(
+  'email_outbox',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    toEmail: text('to_email').notNull(),
+    subject: text('subject').notNull(),
+    bodyText: text('body_text').notNull(),
+    template: text('template').notNull(),
+    /** CAPTURED (dev/test capture, never sent), QUEUED, SENT or FAILED (SMTP delivery). */
+    deliveryStatus: text('delivery_status').notNull().default('CAPTURED'),
+    /** Redacted SMTP error or reason; never credentials. */
+    deliveryError: text('delivery_error'),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    createdAt: createdAt()
+  },
+  (t) => [
+    check('email_outbox_delivery_status', sql`${t.deliveryStatus} IN ('CAPTURED', 'QUEUED', 'SENT', 'FAILED')`),
+    index('email_outbox_delivery_idx').on(t.deliveryStatus, t.createdAt)
+  ]
+);
+
+/**
+ * Admin → Settings → Mail Box. Single row (id = 1). The SMTP password is sealed with the
+ * platform secret box (AES-256-GCM, DATA_ENCRYPTION_KEY) and is never returned by any API.
+ */
+export const mailSettings = pgTable(
+  'mail_settings',
+  {
+    id: integer('id').primaryKey().default(1),
+    smtpHost: text('smtp_host').notNull(),
+    smtpPort: integer('smtp_port').notNull(),
+    smtpSecurity: text('smtp_security').notNull(),
+    smtpUsername: text('smtp_username').notNull().default(''),
+    smtpPasswordSealed: text('smtp_password_sealed'),
+    senderName: text('sender_name').notNull(),
+    senderEmail: text('sender_email').notNull(),
+    replyTo: text('reply_to'),
+    revision: integer('revision').notNull().default(1),
+    updatedBy: uuid('updated_by').references(() => users.id),
+    lastTestAt: timestamp('last_test_at', { withTimezone: true }),
+    lastTestOk: boolean('last_test_ok'),
+    lastTestRecipient: text('last_test_recipient'),
+    lastTestDetail: text('last_test_detail'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    check('mail_settings_singleton', sql`${t.id} = 1`),
+    check('mail_settings_port', sql`${t.smtpPort} BETWEEN 1 AND 65535`),
+    check('mail_settings_security', sql`${t.smtpSecurity} IN ('STARTTLS', 'TLS')`)
+  ]
+);
 
 /** CFG-03 order block. One per owner, instrument and mode (D5). */
 export const orderBlocks = pgTable(

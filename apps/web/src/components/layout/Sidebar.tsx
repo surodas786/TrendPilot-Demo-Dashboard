@@ -1,11 +1,50 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LockIcon } from 'lucide-react';
+import { ChevronDownIcon, LockIcon } from 'lucide-react';
 import { cn } from '@/lib/cn';
-import { navFor, type ShellRole } from './navigation';
+import { navFor, type NavItem, type ShellRole } from './navigation';
+
+const linkClass = (active: boolean) =>
+  cn(
+    'flex items-center gap-3 rounded-lg border px-2.5 py-2 text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60',
+    active ? 'border-accent/30 bg-accent/10 font-semibold text-accent' : 'border-transparent text-muted hover:bg-inset hover:text-ink'
+  );
+
+/** A menu group (e.g. Settings) with its submenu; open while one of its pages is shown. */
+function NavGroup({ item, pathname }: { item: NavItem; pathname: string }) {
+  const inGroup = pathname === item.path || pathname.startsWith(`${item.path}/`);
+  const [open, setOpen] = useState(inGroup);
+  const Icon = item.icon;
+  const id = `nav-group-${item.path.replace(/W+/g, '-')}`;
+  return (
+    <li>
+      <button type="button" aria-expanded={open || inGroup} aria-controls={id} onClick={() => setOpen((o) => !o)} className={cn(linkClass(false), 'w-full', inGroup && 'text-ink')}>
+        <Icon className="h-4 w-4 shrink-0" aria-hidden />
+        <span className="truncate">{item.label}</span>
+        <ChevronDownIcon className={cn('ml-auto h-4 w-4 shrink-0 transition-transform duration-150', (open || inGroup) && 'rotate-180')} aria-hidden />
+      </button>
+      {(open || inGroup) && (
+        <ul id={id} className="mt-0.5 space-y-0.5 pl-4">
+          {item.children!.map((c) => {
+            const ChildIcon = c.icon;
+            const active = pathname === c.path;
+            return (
+              <li key={c.path}>
+                <Link href={c.path} aria-current={active ? 'page' : undefined} className={linkClass(active)}>
+                  <ChildIcon className="h-4 w-4 shrink-0" aria-hidden />
+                  <span className="truncate">{c.label}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </li>
+  );
+}
 
 export function Sidebar({ role, name }: { role: ShellRole; name: string }) {
   const pathname = usePathname();
@@ -22,6 +61,7 @@ export function Sidebar({ role, name }: { role: ShellRole; name: string }) {
         <ul className="space-y-0.5">
           {items.map((item) => {
             const Icon = item.icon;
+            if (item.children?.length) return <NavGroup key={item.path} item={item} pathname={pathname} />;
             if (item.pending) {
               return (
                 <li key={item.path}>
@@ -43,10 +83,7 @@ export function Sidebar({ role, name }: { role: ShellRole; name: string }) {
                 <Link
                   href={item.path}
                   aria-current={active ? 'page' : undefined}
-                  className={cn(
-                    'flex items-center gap-3 rounded-lg border px-2.5 py-2 text-sm transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60',
-                    active ? 'border-accent/30 bg-accent/10 font-semibold text-accent' : 'border-transparent text-muted hover:bg-inset hover:text-ink'
-                  )}
+                  className={linkClass(active)}
                 >
                   <Icon className="h-4 w-4 shrink-0" aria-hidden />
                   <span className="truncate">{item.label}</span>
