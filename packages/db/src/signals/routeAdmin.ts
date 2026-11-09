@@ -47,10 +47,9 @@ export async function routeStrategyIssues(db: Executor, r: Pick<SignalRouteCreat
 
 /** Signal history that makes a route undeletable (events reference it; rejections record it). */
 export async function routeHistory(db: Executor, routeId: string): Promise<{ events: number; rejections: number }> {
-  const [[e], [r]] = await Promise.all([
-    db.select({ n: count() }).from(signalEvents).where(eq(signalEvents.routeId, routeId)),
-    db.select({ n: count() }).from(signalRejections).where(eq(signalRejections.routeId, routeId))
-  ]);
+  // Sequential: inside a transaction all queries share one connection.
+  const [e] = await db.select({ n: count() }).from(signalEvents).where(eq(signalEvents.routeId, routeId));
+  const [r] = await db.select({ n: count() }).from(signalRejections).where(eq(signalRejections.routeId, routeId));
   return { events: Number(e?.n ?? 0), rejections: Number(r?.n ?? 0) };
 }
 

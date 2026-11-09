@@ -128,6 +128,8 @@ export interface StrategyVersionDto {
   id: string;
   packageId: string;
   packageName: string;
+  /** Archived packages are hidden from new selections (routes, Trade Settings, new drafts). */
+  packageArchived: boolean;
   version: number;
   status: 'DRAFT' | 'PUBLISHED';
   timeframe: '5m' | '15m';
@@ -148,7 +150,7 @@ export interface StrategyVersionDto {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function hydrateVersions(db: Executor, rows: { v: typeof strategyVersions.$inferSelect; packageName: string }[]): Promise<StrategyVersionDto[]> {
+async function hydrateVersions(db: Executor, rows: { v: typeof strategyVersions.$inferSelect; packageName: string; packageArchivedAt: Date | null }[]): Promise<StrategyVersionDto[]> {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.v.id);
   const maps = await db.select().from(strategyVersionInstruments).where(inArray(strategyVersionInstruments.versionId, ids));
@@ -158,10 +160,11 @@ async function hydrateVersions(db: Executor, rows: { v: typeof strategyVersions.
     .where(isNotNull(strategyVersions.publishedAt))
     .groupBy(strategyVersions.packageId);
   const latest = new Map(latestRows.map((l) => [l.packageId, Number(l.latest)]));
-  return rows.map(({ v, packageName }) => ({
+  return rows.map(({ v, packageName, packageArchivedAt }) => ({
     id: v.id,
     packageId: v.packageId,
     packageName,
+    packageArchived: packageArchivedAt !== null,
     version: v.version,
     status: v.publishedAt ? 'PUBLISHED' : 'DRAFT',
     timeframe: v.timeframe,
@@ -181,7 +184,7 @@ async function hydrateVersions(db: Executor, rows: { v: typeof strategyVersions.
 }
 
 const versionSelect = (db: Executor) =>
-  db.select({ v: strategyVersions, packageName: strategyPackages.name }).from(strategyVersions).innerJoin(strategyPackages, eq(strategyPackages.id, strategyVersions.packageId));
+  db.select({ v: strategyVersions, packageName: strategyPackages.name, packageArchivedAt: strategyPackages.archivedAt }).from(strategyVersions).innerJoin(strategyPackages, eq(strategyPackages.id, strategyVersions.packageId));
 
 /** Published versions, newest first within each package. */
 export async function listPublishedVersions(db: Executor): Promise<StrategyVersionDto[]> {
@@ -198,6 +201,8 @@ export async function getVersion(db: Executor, id: string): Promise<StrategyVers
 export interface PackageDto {
   id: string;
   name: string;
+  archivedAt: string | null;
+  revision: number;
   versions: StrategyVersionDto[];
 }
 
@@ -205,7 +210,7 @@ export async function listPackages(db: Executor): Promise<PackageDto[]> {
   const pkgs = await db.select().from(strategyPackages).orderBy(asc(strategyPackages.name));
   const rows = await versionSelect(db).orderBy(desc(strategyVersions.version));
   const versions = await hydrateVersions(db, rows);
-  return pkgs.map((p) => ({ id: p.id, name: p.name, versions: versions.filter((v) => v.packageId === p.id) }));
+  return pkgs.map((p) => ({ id: p.id, name: p.name, archivedAt: p.archivedAt?.toISOString() ?? null, revision: p.revision, versions: versions.filter((v) => v.packageId === p.id) }));
 }
 
 export async function createPackage(db: Executor, name: string): Promise<{ id: string; name: string }> {

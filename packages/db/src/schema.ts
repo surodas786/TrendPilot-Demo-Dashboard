@@ -113,7 +113,12 @@ export const instruments = pgTable(
 
 export const strategyPackages = pgTable('strategy_packages', {
   id: uuid('id').primaryKey().defaultRandom(),
+  /** Display name only; renaming never changes the ID, versions, routes or investor settings. */
   name: text('name').notNull(),
+  /** Archived packages keep their history but are hidden from new selections. */
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archivedBy: uuid('archived_by'),
+  revision: integer('revision').notNull().default(1),
   createdAt: createdAt()
 });
 
