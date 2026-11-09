@@ -2,6 +2,15 @@
 # requires a publicly trusted certificate on port 443). STAGING_DOMAIN=localhost uses Caddy's
 # internal CA, for local rehearsal only.
 {$STAGING_DOMAIN} {
-	encode gzip
-	reverse_proxy web:3000
+	# Live quotes (Server-Sent Events): never compressed or buffered, flushed as each event is written.
+	@quoteStream path /v1/market/quotes/stream
+	handle @quoteStream {
+		reverse_proxy web:3000 {
+			flush_interval -1
+		}
+	}
+	handle {
+		encode gzip
+		reverse_proxy web:3000
+	}
 }

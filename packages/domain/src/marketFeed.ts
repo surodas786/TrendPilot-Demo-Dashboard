@@ -19,6 +19,30 @@ export const MARKET_SOURCE_LABEL: Record<MarketSource, string> = {
 
 export const marketSourceLabel = (s: string | null | undefined): string => (s && s in MARKET_SOURCE_LABEL ? MARKET_SOURCE_LABEL[s as MarketSource] : 'Unknown source');
 
+/**
+ * How a MEXC_PUBLIC quote reached TrendPilot. The source stays MEXC_PUBLIC either way (entry and
+ * exit rules only care that the price is public exchange data and fresh); the channel says which
+ * transport delivered it.
+ *  - WS: the public Futures WebSocket (`push.ticker`), the primary path.
+ *  - REST_FALLBACK: an explicitly enabled, rate-limited REST ticker read while the WebSocket had no
+ *    fresh quote for the contract.
+ *  - REST_POLL: the legacy REST polling mode (MARKET_FEED_TICKER_SOURCE=rest).
+ */
+export const QUOTE_CHANNELS = ['WS', 'REST_FALLBACK', 'REST_POLL'] as const;
+export type QuoteChannel = (typeof QUOTE_CHANNELS)[number];
+
+export const QUOTE_CHANNEL_LABEL: Record<QuoteChannel, string> = {
+  WS: 'WebSocket',
+  REST_FALLBACK: 'REST fallback',
+  REST_POLL: 'REST poll'
+};
+
+/** "MEXC public market data · WebSocket", "… · REST fallback", "Fixture (replay data)". */
+export function quoteSourceLabel(source: string | null | undefined, channel: string | null | undefined): string {
+  const base = marketSourceLabel(source);
+  return source === 'MEXC_PUBLIC' && channel && channel in QUOTE_CHANNEL_LABEL ? `${base} · ${QUOTE_CHANNEL_LABEL[channel as QuoteChannel]}` : base;
+}
+
 export const FEED_POLICY = {
   /** A quote older than this is stale (same limit the entry check uses). */
   maxQuoteAgeMs: 15_000,
@@ -32,8 +56,23 @@ export const FEED_POLICY = {
   overlapBars: 2,
   /** Retry backoff after consecutive failures. */
   backoffBaseMs: 1_000,
-  backoffMaxMs: 60_000
+  backoffMaxMs: 60_000,
+  /** WebSocket keepalive: MEXC drops a socket that sends no ping for 60 s. */
+  streamPingMs: 15_000,
+  /** An open socket that receives nothing (not even a pong) for this long is closed and reopened. */
+  streamSilenceMs: 30_000,
+  /** A socket that has not opened within this time is abandoned and retried. */
+  streamConnectTimeoutMs: 10_000,
+  streamBackoffBaseMs: 1_000,
+  streamBackoffMaxMs: 30_000,
+  /** After MEXC answers 510 (IP rate limit) or HTTP 429, no REST call is made for this long. */
+  restRateLimitCooldownMs: 60_000,
+  /** Explicitly enabled REST ticker fallback: at most one read per contract this often. */
+  restFallbackMinIntervalMs: 10_000
 } as const;
+
+/** MEXC public API "too frequent requests" answers: envelope code 510, or plain HTTP 429. */
+export const isRateLimitCode = (kind: string, code: number | undefined) => (kind === 'API' && code === 510) || (kind === 'HTTP' && code === 429);
 
 export type FeedState = 'STARTING' | 'HEALTHY' | 'STALE' | 'DOWN' | 'CLOCK_SKEW' | 'SYMBOL_UNAVAILABLE';
 
@@ -41,7 +80,7 @@ export const FEED_STATE_TEXT: Record<FeedState, string> = {
   STARTING: 'Starting: no quote received yet.',
   HEALTHY: 'Receiving fresh public prices.',
   STALE: 'The exchange price has not updated recently. Entries on this pair are blocked.',
-  DOWN: 'Public endpoint unreachable. Retrying with backoff. Entries on this pair are blocked.',
+  DOWN: 'No fresh public price: the WebSocket is disconnected or the public endpoint is unreachable. Retrying with backoff. Entries on this pair are blocked.',
   CLOCK_SKEW: 'The local clock differs too much from the exchange clock. Quotes are not recorded.',
   SYMBOL_UNAVAILABLE: 'The mapped exchange symbol is not available on MEXC Futures.'
 };
@@ -50,8 +89,8 @@ export const INTERVAL_MS = { '5': 300_000, '15': 900_000 } as const;
 export type CandleInterval = keyof typeof INTERVAL_MS;
 
 /** Exponential backoff with ±20% jitter (rand in [0,1)). failures ≥ 1. */
-export function backoffMs(failures: number, rand = Math.random()): number {
-  const base = Math.min(FEED_POLICY.backoffMaxMs, FEED_POLICY.backoffBaseMs * 2 ** Math.max(0, failures - 1));
+export function backoffMs(failures: number, rand = Math.random(), baseMs: number = FEED_POLICY.backoffBaseMs, maxMs: number = FEED_POLICY.backoffMaxMs): number {
+  const base = Math.min(maxMs, baseMs * 2 ** Math.max(0, failures - 1));
   return Math.round(base * (0.8 + 0.4 * rand));
 }
 

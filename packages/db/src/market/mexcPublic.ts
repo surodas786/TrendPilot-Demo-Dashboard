@@ -70,6 +70,8 @@ export interface PublicMarketSource {
   contractDetail(exchangeSymbol: string): Promise<MexcContractDetail>;
   /** Newest settled funding rates, newest first. Optional: sources without it book no funding. */
   fundingHistory?(exchangeSymbol: string, pageSize?: number): Promise<MexcSettledFunding[]>;
+  /** REST requests sent so far, by endpoint (for logs and the zero-REST-ticker check). */
+  readonly requestCounts?: Record<string, number>;
 }
 
 const KLINE_INTERVAL: Record<CandleInterval, string> = { '5': 'Min5', '15': 'Min15' };
@@ -108,7 +110,12 @@ export function parseServerTime(body: unknown): number {
 }
 
 export function parseTicker(body: unknown, exchangeSymbol: string): MexcTicker {
-  const d = unwrap(body, `ticker ${exchangeSymbol}`) as Record<string, unknown>;
+  return tickerFromData(unwrap(body, `ticker ${exchangeSymbol}`), exchangeSymbol);
+}
+
+/** The ticker object shared by REST `/contract/ticker` and WebSocket `push.ticker`. */
+export function tickerFromData(data: unknown, exchangeSymbol: string): MexcTicker {
+  const d = data as Record<string, unknown>;
   if (!d || typeof d !== 'object' || Array.isArray(d)) throw new MexcPublicError(`ticker ${exchangeSymbol}: expected one contract`, 'PARSE');
   if (d.symbol !== exchangeSymbol) throw new MexcPublicError(`ticker ${exchangeSymbol}: response is for ${String(d.symbol)}`, 'PARSE');
   const ts = d.timestamp;
@@ -182,6 +189,8 @@ export class MexcPublicClient implements PublicMarketSource {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  /** REST requests sent since start, by endpoint (ping, ticker, kline, detail, funding_rate). */
+  readonly requestCounts: Record<string, number> = {};
 
   constructor(o: MexcPublicClientOptions = {}) {
     this.baseUrl = (o.baseUrl ?? MEXC_PUBLIC_DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -191,6 +200,8 @@ export class MexcPublicClient implements PublicMarketSource {
 
   async get(path: string, query: Record<string, string> = {}): Promise<unknown> {
     if (!PUBLIC_PATHS.some((re) => re.test(path))) throw new MexcPublicError(`Refusing non-public path ${path}`, 'NOT_PUBLIC');
+    const endpoint = path.split('/')[4] ?? path;
+    this.requestCounts[endpoint] = (this.requestCounts[endpoint] ?? 0) + 1;
     const url = new URL(this.baseUrl + path);
     for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
     let res: Response;

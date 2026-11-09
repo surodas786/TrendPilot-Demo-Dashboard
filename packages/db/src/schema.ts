@@ -514,6 +514,8 @@ export const marketQuotes = pgTable(
     /** Fixture liquidity: a market order fills at most this many contracts (null = unlimited). */
     liquidityContracts: qty('liquidity_contracts'),
     source: text('source').notNull(),
+    /** MEXC_PUBLIC transport: WS (primary), REST_FALLBACK or REST_POLL. Null for fixtures. */
+    channel: text('channel'),
     createdAt: createdAt()
   },
   (t) => [primaryKey({ columns: [t.instrumentId, t.asOf] }), check('market_quotes_book', sql`${t.ask} >= ${t.bid} AND ${t.bid} > 0`)]
@@ -887,6 +889,10 @@ export const marketFeedStatus = pgTable(
     nextRetryAt: timestamp('next_retry_at', { withTimezone: true }),
     lastError: text('last_error'),
     clockOffsetMs: integer('clock_offset_ms'),
+    /** Channel of the newest written quote (WS, REST_FALLBACK, REST_POLL). */
+    quoteChannel: text('quote_channel'),
+    /** Local receipt time of the newest WebSocket ticker for this contract (repeats included). */
+    lastStreamAt: timestamp('last_stream_at', { withTimezone: true }),
     contractCheck: jsonb('contract_check'),
     contractCheckedAt: timestamp('contract_checked_at', { withTimezone: true }),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
