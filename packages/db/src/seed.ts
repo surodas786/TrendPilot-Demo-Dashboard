@@ -145,6 +145,6 @@ export async function resetDatabase(db: Db, connectionString: string): Promise<v
   const name = new URL(connectionString).pathname.slice(1);
   if (!/_(test|e2e)$/.test(name)) throw new Error(`Refusing to reset database "${name}": only *_test or *_e2e databases can be reset.`);
   await db.execute(
-    sql`TRUNCATE position_targets, position_exits, sim_positions, ledger_entries, fills, positions, sim_fills, sim_orders, order_intents, paper_accounts, market_quotes, market_candles, signal_decisions, jobs, signal_rejections, signal_events, signal_routes, webhook_ingress, audit_events, email_outbox, user_tokens, order_blocks, sessions, strategy_version_instruments, strategy_versions, strategy_packages, instruments, users RESTART IDENTITY CASCADE`
+    sql`TRUNCATE live_pilots, service_heartbeats, paper_funding, funding_rates, position_targets, position_exits, sim_positions, ledger_entries, fills, positions, sim_fills, sim_orders, order_intents, paper_accounts, market_feed_events, market_feed_status, market_quotes, market_candles, signal_decisions, jobs, signal_rejections, signal_events, signal_routes, webhook_ingress, audit_events, email_outbox, user_tokens, order_blocks, sessions, strategy_version_instruments, strategy_versions, strategy_packages, instruments, users RESTART IDENTITY CASCADE`
   );
 }

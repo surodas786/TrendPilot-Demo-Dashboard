@@ -31,3 +31,9 @@ next-env.d.ts
 test-results
 playwright-report
 coverage
+
+# Staging and local secrets (only the templates are committed)
+.env.*
+!.env.example
+!.env.staging.example
+backups/

@@ -1,0 +1,7 @@
+# TLS front for Paper staging. A public domain gets an ACME certificate automatically (TradingView
+# requires a publicly trusted certificate on port 443). STAGING_DOMAIN=localhost uses Caddy's
+# internal CA, for local rehearsal only.
+{$STAGING_DOMAIN} {
+	encode gzip
+	reverse_proxy web:3000
+}

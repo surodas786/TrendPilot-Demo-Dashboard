@@ -54,7 +54,22 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
             <Row label="Liquidation (estimate, isolated)" value={t.liquidationEstimate} />
             <Row label="Realized P&L (gross)" value={signedUsdt(t.realizedPnlUsdt)} testId="realized-pnl" />
             <Row label="Fees (open + close)" value={`${t.feesUsdt} USDT`} />
-            <Row label="Net realized" value={signedUsdt(t.netRealizedUsdt)} testId="net-pnl" />
+            <Row label="Net realized (after fees)" value={signedUsdt(t.netRealizedUsdt)} testId="net-pnl" />
+            <Row label="Funding (simulated, booked)" value={t.funding.length ? signedUsdt(t.fundingUsdt) : 'None booked'} testId="funding-total" />
+            <Row label="Net realized incl. funding" value={signedUsdt(t.netRealizedWithFundingUsdt)} testId="net-with-funding" />
+            <Row
+              label="Triggering signal"
+              value={
+                t.signal ? (
+                  <Link href="/signals" className="text-accent hover:underline" data-testid="trade-signal">
+                    {t.signal.action.replace('_', ' ').toLowerCase()} · bar closed {fmt(t.signal.barCloseAt)}
+                  </Link>
+                ) : (
+                  'None (manual or no signal)'
+                )
+              }
+            />
+            <Row label="Entry price data" value={`${t.marketData.label} · fills simulated (Paper)`} testId="market-source" />
             <Row label="Opened" value={fmt(t.openedAt)} />
             {t.closedAt && <Row label="Closed" value={fmt(t.closedAt)} />}
           </dl>
@@ -222,6 +237,35 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
                 ))}
               </ul>
             </>
+          )}
+        </section>
+        <section className="rounded-xl border border-line bg-surface p-4 text-sm" data-testid="funding">
+          <h3 className="mb-2 font-semibold text-ink">Funding (simulated)</h3>
+          {t.funding.length === 0 ? (
+            <p className="text-xs text-subtle">No funding booked. Funding is booked only from a settled funding rate at a settlement while the position was open; a predicted rate is never booked.</p>
+          ) : (
+            <table className="w-full text-left text-xs">
+              <thead className="text-subtle">
+                <tr>
+                  <th className="py-1 font-medium">Settled</th>
+                  <th className="py-1 font-medium">Rate</th>
+                  <th className="py-1 font-medium">Contracts</th>
+                  <th className="py-1 font-medium">Mark</th>
+                  <th className="py-1 font-medium">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="text-muted tabular-nums">
+                {t.funding.map((f) => (
+                  <tr key={f.settledAt} data-testid="funding-row">
+                    <td className="py-1">{fmt(f.settledAt)}</td>
+                    <td className="py-1">{(Number(f.rate) * 100).toFixed(4)}%</td>
+                    <td className="py-1">{f.contracts}</td>
+                    <td className="py-1">{f.markPrice}</td>
+                    <td className={`py-1 ${Number(f.amountUsdt) >= 0 ? 'text-gain' : 'text-loss'}`}>{signedUsdt(f.amountUsdt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </section>
         <section className="rounded-xl border border-line bg-surface p-4 text-sm">

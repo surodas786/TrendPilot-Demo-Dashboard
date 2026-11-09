@@ -7,7 +7,7 @@ import type { OppositePolicy } from './strategy';
  * EXT-01…07 and STR-04/05/06 exit rules for paper positions. Pure functions.
  */
 
-export type ExitReason = 'STOP_LOSS' | 'TAKE_PROFIT' | 'TRAILING_STOP' | 'SIGNAL_CLOSE' | 'OPPOSITE_SIGNAL_CLOSE' | 'REVERSAL_CLOSE' | 'MANUAL_CLOSE';
+export type ExitReason = 'STOP_LOSS' | 'TAKE_PROFIT' | 'TRAILING_STOP' | 'SIGNAL_CLOSE' | 'OPPOSITE_SIGNAL_CLOSE' | 'REVERSAL_CLOSE' | 'MANUAL_CLOSE' | 'PROTECTION_FAILURE';
 
 export const EXIT_REASON_TEXT: Record<ExitReason, string> = {
   STOP_LOSS: 'The attached stop loss was triggered.',
@@ -16,7 +16,8 @@ export const EXIT_REASON_TEXT: Record<ExitReason, string> = {
   SIGNAL_CLOSE: 'A matching close signal was received.',
   OPPOSITE_SIGNAL_CLOSE: 'An opposite signal closed the position (policy: close position only).',
   REVERSAL_CLOSE: 'An opposite signal closed the position to reverse it (policy: close and reverse).',
-  MANUAL_CLOSE: 'You closed the position at market.'
+  MANUAL_CLOSE: 'You closed the position at market.',
+  PROTECTION_FAILURE: 'The stop loss could not be confirmed at the venue, so the position was closed at market to remove unprotected exposure.'
 };
 
 type Side = 'LONG' | 'SHORT';

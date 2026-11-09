@@ -1,4 +1,5 @@
 import { Decimal } from './decimal';
+import type { MarketSource } from './marketFeed';
 import type { OrderBlockSettings, PriceBasis } from './orderBlock';
 
 /**
@@ -20,8 +21,8 @@ export interface Quote {
   ask: string;
   mark: string;
   asOf: string;
-  /** Where the quote came from. M1 previews always use labelled fixtures. */
-  source: 'FIXTURE';
+  /** Where the quote came from: labelled fixtures or public MEXC market data. */
+  source: MarketSource;
 }
 
 export type PreviewReason = 'SIZE_BELOW_MINIMUM' | 'SIZE_ABOVE_MAXIMUM' | 'STOP_WRONG_SIDE' | 'RISK_LIMIT' | 'DIRECTION_DISABLED';

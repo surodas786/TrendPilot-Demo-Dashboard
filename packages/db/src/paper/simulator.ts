@@ -26,6 +26,9 @@ export interface OpeningRequest {
   /** EXE-02: exchange-hosted stop carried in the same request. Required. */
   stop: { price: string; basis: string } | null;
   now: Date;
+  /** Live venues need these (MEXC: leverage is required to open; openType). The simulator ignores them. */
+  leverage?: number;
+  marginMode?: 'ISOLATED' | 'CROSS';
 }
 
 export interface SimFill {

@@ -1,4 +1,6 @@
 import {
+  ActivityIcon,
+  ServerCogIcon,
   BellRingIcon,
   CandlestickChartIcon,
   WebhookIcon,
@@ -25,7 +27,7 @@ export interface NavItem {
 
 /** PRD §2.2 investor screens (MagicPatterns consolidated navigation). */
 const investorNav: NavItem[] = [
-  { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboardIcon, pending: true },
+  { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboardIcon },
   { path: '/my-account', label: 'My Account', icon: UserRoundIcon },
   { path: '/trade-settings', label: 'Trade Settings', icon: SlidersHorizontalIcon },
   { path: '/signals', label: 'Signals', icon: BellRingIcon },
@@ -38,6 +40,8 @@ const adminNav: NavItem[] = [
   { path: '/admin/signals', label: 'TradingView Webhook & Routes', icon: WebhookIcon },
   { path: '/admin/strategies', label: 'Strategy Packages', icon: RadioTowerIcon },
   { path: '/admin/pairs', label: 'Trading Pairs & Defaults', icon: CandlestickChartIcon },
+  { path: '/admin/operations', label: 'Operations', icon: ServerCogIcon },
+  { path: '/admin/market-data', label: 'Market Data Feed', icon: ActivityIcon },
   { path: '/admin/audit', label: 'Audit Log', icon: ScrollTextIcon },
   { path: '/admin/security', label: 'My Security', icon: KeyRoundIcon }
 ];

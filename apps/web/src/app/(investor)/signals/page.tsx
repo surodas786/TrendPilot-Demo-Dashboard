@@ -22,7 +22,7 @@ export default async function SignalsPage() {
     <PageContainer
       title="Signals"
       description="How each shared TradingView alert was evaluated against your own order blocks."
-      scope={`${user.name} · My Account · Paper — simulated orders against fixture market data. Live trading is disabled.`}
+      scope={`${user.name} · My Account · Paper — simulated orders on fixture or public MEXC prices. Live trading is disabled.`}
     >
       {outcomes.length === 0 ? (
         <EmptyState icon={BellRingIcon} title="No signal outcomes yet" body="When an approved TradingView alert matches one of your order blocks, its outcome appears here." />

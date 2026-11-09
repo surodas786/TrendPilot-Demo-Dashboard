@@ -14,7 +14,9 @@ Built:
 
 **M2 slice 1 (TradingView intake, durable jobs, per-investor routing): done.** See [M2 slice 1](#m2-slice-1--tradingview-intake-and-routing).
 
-**Live order submission is disabled and no live adapter exists.** EMA, market data and paper execution are later M2 slices.
+**Steps 8 and 9 (public MEXC market data in Paper mode; Dashboard, Holdings and reporting): done.** See [Step 8](#step-8--public-mexc-prices-and-closed-candles-in-paper-mode) and [Step 9](#step-9--dashboard-holdings-trade-reporting-and-reconciliation).
+
+**Live order submission is disabled and no live adapter exists.** Paper orders always fill in the paper simulator.
 
 ## Repository layout
 
@@ -155,10 +157,10 @@ M1 exit condition: *"Isolation, onboarding and configuration tests pass."* Every
 | AT-02 "Connection changes cannot strand a position; one verified exchange account per investor" | **Open** | CFG-01 exchange connections not built |
 | UI-05 TradingView Webhook and Signal Routes screen | **Open** | Route storage and ingestion are M2 |
 | UI-05 Operations (feed/connection health, blocked entries, reconciliation) | **Open** | Only the audit log exists; health data arrives with M2/M3 workers |
-| UI-01 Dashboard, UI-04 My Trades, Holdings | **Open** | Navigation shows "Soon"; no trade data exists before M2 |
+| UI-01 Dashboard, UI-04 My Trades, Holdings | **Done (Step 9)** | Dashboard, Holdings, trade reporting; see [Step 9](#step-9--dashboard-holdings-trade-reporting-and-reconciliation). Contract/strategy filters and exports still open |
 | IAM-02 admin operational-access permission for private records | **Open** | No admin screen exposes investor settings, so no such permission exists yet |
-| Hardening | **Open** | RLS or least-privilege DB role; shared rate limiter (currently in-memory); job/outbox tables (ARC-01) |
-| Docs | **Open** | Capability matrix, deployment and recovery notes |
+| Hardening | **Open** | RLS or least-privilege DB role; shared rate limiter (currently in-memory). Job/outbox tables (ARC-01) exist since M2 |
+| Docs | **Partly done (Step 10)** | Deployment, operations, backup and restore: [`docs/STAGING.md`](docs/STAGING.md). Capability matrix still open |
 
 ### Decisions in this milestone
 
@@ -582,8 +584,131 @@ Variations:
 | `apps/web/e2e/6-split-trailing-reverse.spec.ts` | The real `demo:paper --profile split/reverse`, `replay`, `market:tick` and `worker:once` commands; the My Trades, trade detail and Signals views for both investors |
 
 ### Still open after this slice
-- **Market data:** public MEXC market data integration is deferred. Prices are fixtures (`source = FIXTURE`).
+- **Market data:** public MEXC market data was added in Step 8 (below). Replays still use fixtures (`source = FIXTURE`).
 - **Trailing:** the trailing stop is a software trigger; native venue tightening is not modelled.
 - **Minimum residuals:** there is no special handling for exchange minimum residuals beyond rounding targets down to the contract step.
 - **Risk:** daily-loss limits and cooldown are not enforced yet.
 - **Live trading:** live order submission remains disabled; no adapter or credentials exist.
+
+## Step 8 — public MEXC prices and closed candles in Paper mode
+
+Paper mode can now run on live **public** MEXC Futures market data. Order execution is unchanged: every order still fills in the paper simulator. Live order submission stays disabled; the web app, the worker and the feed all check `LIVE_ORDER_TRANSPORT=disabled`.
+
+**Feed** (`npm run market:feed`, or `npm run market:feed -- --once` for one cycle):
+- **Endpoints:** public only — `ping`, `ticker`, `kline/{symbol}` (Min5, Min15), `detail` and `funding_rate/history` under `https://contract.mexc.com/api/v1/contract/`. The adapter refuses any other path before sending, and it sends no key, signature or cookie.
+- **Coverage:** every published contract plus any contract with an open position. Symbols come from each instrument's `exchange_symbol` (for example `BTC_USDT`).
+- **Quotes:** bid/ask, mark (`fairPrice`) and last. Each quote goes to `market_quotes` with `source = 'MEXC_PUBLIC'` and queues the same `market.tick` job a fixture tick does, so stops, TP targets and trailing run on it.
+- **Candles:** closed 5m and 15m bars go to `market_candles` (`source = 'MEXC_PUBLIC'`). A bar counts as closed only 3 s after its close on the exchange clock, so a forming bar is never stored. The first run backfills 300 bars per interval; later syncs re-read the last two bars to catch late revisions.
+- **EMA:** EMA 200 never mixes sources. The consecutive run stops at a candle from a different source than the signal bar.
+- **Health (MKT-02):**
+  - *Stale:* the exchange price has not updated for 15 s. Stale quotes are not written, and entries are blocked by `FEED_STALE`.
+  - *Down:* backoff per contract (1 s doubling to 60 s, ±20 % jitter).
+  - *Clock skew:* the offset is measured from `ping`. Quotes are mapped to the local clock; beyond ±5 s none are written.
+  - *Gaps:* detected and backfilled. A bar the exchange cannot supply is recorded once as `GAP_UNRESOLVED`.
+  - *Recovery:* after an outage the feed records an `UNVERIFIED_INTERVAL` window, in which stop or target crossings could not be observed, and continues from the current price. Nothing is filled retroactively.
+  - *Symbols:* an unmapped or unknown symbol is `SYMBOL_UNAVAILABLE`. Contract-spec differences from the public detail are flagged as `CONTRACT_MISMATCH`.
+  - State is kept in `market_feed_status` and history in `market_feed_events`, so a restarted feed continues where it stopped.
+- **Labels:**
+  - The order preview shows *MEXC public price* when a fresh public quote exists, otherwise *Fixture data*.
+  - Entry decisions record `checks.quote.source` and `checks.ema.source`.
+  - Trade detail shows *Entry price data*.
+  - Admins see **Market Data Feed** (`/admin/market-data`, `GET /v1/admin/market-feeds`): per contract, the state, freshness and current price source, plus recent feed events. A stopped feed shows *Not reporting*.
+- **Fixtures:** replays and tests keep `source = 'FIXTURE'` (`market:fixture`, `market:tick`, `demo:paper`). The feed refuses to start while `SIGNAL_TEST_CLOCK` is set; fixture replays don't need it. Tests never use the network: they use recorded responses in `packages/db/test/fixtures/mexc-public/` and an in-process stub exchange.
+
+## Step 9 — Dashboard, Holdings, trade reporting and reconciliation
+
+**Where:**
+- *Dashboard* (`/dashboard`, `GET /v1/me/dashboard[?date=YYYY-MM-DD]`):
+  - available balance, used margin, order reserve and equity (wallet + unrealized);
+  - unrealized P&L (mark) and open positions;
+  - for the selected day: gross realized, fees (entry and exit), simulated funding, net realized and fill counts;
+  - the last price update with a stale flag, a Paper label and a ledger check.
+- *My Account → Holdings* (`GET /v1/me/holdings`): for each open position, the contract, side, remaining of initial contracts, notional, entry, current mark and last (with source and time), stop coverage, unrealized P&L and liquidation. Liquidation is shown only as the simulator's isolated-margin estimate and labelled *Estimated*; otherwise it shows *Unavailable*.
+- *Trade detail* (`/my-trades/{id}`): entry and exit fills, partial exits, fees, a **Funding (simulated)** table, net realized including funding, the exit reason and a link to the triggering signal.
+- *Signals*: each investor still sees only their own decisions and skip reasons (`DAY_DISABLED`, `EMA_FILTERED`, `FEED_STALE`, …).
+
+**Rules (REP-02/03/04):**
+- **Sources of truth:** confirmed paper fills, booked funding and the paper ledger.
+  - Opening fees come from opening-order fills. Closing fees and realized P&L come from `position_exits`. Each is counted once.
+  - Margin postings and releases, and the opening balance, are balance movements and never P&L.
+- **Reporting day:** a calendar day in the investor's reporting timezone (Asia/Dhaka by default, so one day runs from 18:00 UTC to 18:00 UTC). Realized results count on the fill date, funding on the settlement time.
+- **Net realized** = gross realized − fees + booked funding.
+- **Funding:**
+  - Booked only from a **settled** rate: public `funding_rate/history`, or `npm run market:funding` as a fixture. A predicted rate is never booked.
+  - Applies to every paper position open at a settlement (every 8 h, UTC), on the contracts held then, at the newest mark price within 15 minutes before the settlement.
+  - Paid funding is negative, received funding positive.
+  - Booked once per position and settlement (a `paper_funding` unique key plus a ledger key). A repeated rate or a re-delivered job books nothing.
+  - **Status:** `NONE_DUE` is a real zero (no position was open at a settlement). `UNAVAILABLE` means funding was due but no settled rate or mark price is recorded; the amount is null, never 0. `INCOMPLETE` means partly booked.
+- **Missing or stale prices:** a position without a price shows *Unavailable*, and unrealized P&L and equity are null. A price older than 15 s is shown with *Stale*.
+- **Reconciliation:**
+  - Wallet, margin and reserve each equal their ledger bucket.
+  - The realized P&L ledger equals the exits.
+  - The fee ledger equals opening plus closing fees.
+  - The funding ledger equals booked funding.
+- **Ownership:** every `/v1/me/*` route uses the session owner only. Another investor's trade ID returns 404, and any `ownerId` parameter is ignored.
+
+### Reproduce the dashboard totals
+
+```sh
+# Terminal 1 (web app pinned to 09:30:03Z = 15:30 in Dhaka)
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run dev
+# Terminal 2
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run demo:paper -- --reset-paper --profile exits   # A: TP 3 %, B: TP 6 %
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run replay
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run worker:once        # entriesApproved=2 (A 153 contracts, B 38)
+npm run market:tick -- --price 67000 --at 2026-11-08T09:31:00Z
+SIGNAL_TEST_CLOCK=2026-11-08T09:31:00Z npm run worker:once        # A closes by TAKE_PROFIT; B stays open
+```
+
+Sign in as each investor and open **Dashboard**, **My Account → Holdings** and **My Trades**.
+
+To book funding, restart the web app with `SIGNAL_TEST_CLOCK=2026-11-08T16:00:10Z`, then run:
+
+```sh
+npm run market:tick -- --price 65500 --at 2026-11-08T15:59:50Z
+SIGNAL_TEST_CLOCK=2026-11-08T15:59:50Z npm run worker:once
+npm run market:funding -- --rate 0.0001 --at 2026-11-08T16:00:00Z
+SIGNAL_TEST_CLOCK=2026-11-08T16:00:10Z npm run worker:once        # funding … positions=1 booked=1 (B only; A is flat)
+npm run market:funding -- --rate 0.0001 --at 2026-11-08T16:00:00Z   # (already recorded): nothing new
+```
+
+B's Dashboard then shows funding *Booked*, and B's trade lists it.
+
+### Tests for Steps 8 and 9
+
+| Suite | Covers |
+| --- | --- |
+| `packages/domain/test/marketFeed.test.ts` | Closed-bar rule (never a forming bar), gap ranges, backoff, clock offset, quote sanity, freshness, EMA source isolation |
+| `packages/domain/test/reporting.test.ts` | Asia/Dhaka day bounds and DST days, unrealized P&L and funding signs, settlement times, funding status, net realized |
+| `packages/db/test/mexcPublic.test.ts` | Recorded MEXC responses (ticker, klines, ping, detail, funding history); the public-path allowlist; no credentials sent; HTTP, API and network errors |
+| `apps/worker/test/feedGuard.test.ts` | The feed refuses a fixed clock and an enabled live transport |
+| `apps/web/test/api/marketFeed.test.ts` | Public data drives a paper entry (EMA on public candles), tick jobs and a stop-loss exit; incremental sync, revisions and gaps; outage, backoff and recovery; stale prices; clock skew; symbol mapping; restart; settled funding sync; the admin feed API |
+| `apps/web/test/api/reporting.test.ts` | Holdings and dashboard; stale and missing prices; a partial exit and a duplicate tick; funding booked once (duplicate rate and job); a close after local midnight; unavailable vs zero funding; ledger reconciliation; ownership |
+| `apps/web/e2e/7-reporting-isolation.spec.ts` | Two investors on the same token with different sizes and exits: Dashboard totals vs the database, Holdings, trade detail, cross-investor 404s, own signal decisions |
+
+## Step 10 — Paper release: operations, staging and recovery
+
+- **Operations** (`/admin/operations`, `GET /v1/admin/operations`): database, worker and market-feed liveness (heartbeats in `service_heartbeats`), job queue (pending, running, due backlog, failed/DEAD with errors), feed state and events, and alerts in text. `GET /v1/health` is a public, data-free liveness check.
+- **Retention:** the worker removes finished jobs and quotes older than `JOB_RETENTION_DAYS` / `QUOTE_RETENTION_DAYS` (default 7) every hour. Pending, running and failed jobs, candles, fills, exits, funding and the ledger are never pruned.
+- **Fresh deployments:** `npm run ops:bootstrap-admin` creates the first administrator (refused once one exists) and prints a single-use invite link; *Create webhook* in TradingView Webhook & Routes issues the first webhook URL; `npm run ops:mail` relays captured invite/reset mail (no SMTP in this build).
+- **Staging:** `Dockerfile`, `docker-compose.staging.yml` (db, migrate, web, worker, feed, Caddy HTTPS), `.env.staging.example`, `npm run staging:smoke` (HTTPS webhook smoke test) and `scripts/backup-restore-drill.sh`. Runbook: [`docs/STAGING.md`](docs/STAGING.md).
+- **Tests:** `apps/web/test/api/operations.test.ts` (health, admin-only operations, heartbeats, a DEAD job and a DOWN feed surfacing, first-webhook creation, retention).
+
+## Step 11 — private MEXC Futures adapter (live activation still disabled)
+
+- **Exchange interface:** the paper entry, exit and reversal flows now call an `ExecutionVenue` (`packages/db/src/venue/`). PAPER resolves to the paper simulator (`paperVenue`, unchanged behaviour); LIVE resolves through `openLiveOrderTransport`, which refuses in every environment of this build. Durable `order_intents` and the existing worker drive both.
+- **Adapter:** `packages/db/src/live/` — server-side signing (HMAC-SHA256, `ApiKey`/`Request-Time`/`Signature`), a READ_ONLY transport (allowlisted GETs) and an ORDERS transport that cannot be constructed here, normalization of balances, positions, orders, fills (de-duplicated by deal ID) and stop orders, and `mexcVenue` (open with `stopLossPrice` in the same request, reduce-only closes that cannot flip, stop resize after a partial close).
+- **Gate:** every order needs its capability verified on a live pilot (`capabilities.ts`); nothing is, so the adapter refuses every order without contacting MEXC.
+- **Execution safety added for live venues:** a fill whose stop is not verified queues an immediate emergency close (`PROTECTION_FAILURE`); an uncertain submission is reconciled by client order ID and never resent blind (`reconcileGraceMs`); a stop replaced by the venue updates the position's stop reference.
+- **Read-only account check:** `npm run ops:mexc-readonly-check` (pending: no authorized read-only account is configured).
+- **Endpoints, fields, documentation gaps, capability matrix and the Step 12 checklist:** [`docs/MEXC_PRIVATE_ADAPTER.md`](docs/MEXC_PRIVATE_ADAPTER.md).
+- **Tests:** `packages/db/test/mexcPrivate.test.ts` (signing, refusal in Paper/Demo/replay/CI, read-only transport, normalization, gate, source scan) and `apps/web/test/api/liveAdapter.test.ts` (the real alert → intent → worker flow against a mocked MEXC: attached stop, missing/failed stops, rejections, partial fills, duplicate deals, timeouts before/after acceptance, failed lookups, capped closes, stop resize and auto-shrink, rejected closes).
+
+## Step 12 — live pilot preparation (dry run only; live submission disabled)
+
+- **Pilot scope:** `live_pilots` (migration `0014`) allowlists one investor, one MEXC account reference (never a key) and one contract, with operator-approved limits (max contracts and notional per order, max leverage, max exposure). Adds and automatic reversal are off by database constraint; only one pilot can be open.
+- **Two authorizations:** platform approval (`POST /v1/admin/live-pilot/approve`, refused until six pre-pilot checks are recorded with evidence) and explicit investor activation (`POST /v1/me/live-pilot/activate`, allowlisted investor only, block must fit the limits). Every action is audited.
+- **Guard:** `pilotGuardedVenue` wraps the MEXC adapter: opening orders pass the allowlist, approvals, activation, halt and limits; closes, stop resizes and lookups are never gated. A missing stop or an uncertain submission halts new entries automatically; only an operator resumes, and not while an order is unresolved or a position unprotected.
+- **Readiness:** `GET /v1/admin/live-pilot` lists every item for the first supervised trade and for expansion (today: not ready — see the runbook).
+- **Dry run:** `apps/web/test/api/pilotRehearsal.test.ts` runs the planned flow against mocked MEXC responses and writes `test-results/pilot-rehearsal.md` (redacted requests, results, reconciliation, readiness).
+- **Runbook:** [`docs/LIVE_PILOT_RUNBOOK.md`](docs/LIVE_PILOT_RUNBOOK.md).

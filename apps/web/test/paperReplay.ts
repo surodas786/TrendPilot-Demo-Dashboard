@@ -32,10 +32,10 @@ export async function deliver(action: SignalAction, barOpen: Date) {
 
 export const work = (now = clock.now, hooks?: Parameters<typeof processNextJob>[1]['hooks'], db = direct.db) => processNextJob(db, { workerId: 'test', now, hooks });
 
-export async function drain(now = clock.now, db = direct.db) {
+export async function drain(now = clock.now, db = direct.db, hooks?: Parameters<typeof processNextJob>[1]['hooks']) {
   const out = [];
   for (let i = 0; i < 40; i++) {
-    const r = await work(now, undefined, db);
+    const r = await work(now, hooks, db);
     if (r.outcome === 'IDLE') break;
     out.push(r);
   }
@@ -87,6 +87,10 @@ export interface OpenOptions {
   a?: Record<string, unknown> | null;
   b?: Record<string, unknown> | null;
   version?: () => Promise<string>;
+  /** Replaces the fixture candles and quote (e.g. a public-feed cycle against a stub exchange). */
+  market?: () => Promise<void>;
+  /** Job hooks for the opening drain (e.g. an injected venue). */
+  hooks?: Parameters<typeof processNextJob>[1]['hooks'];
 }
 
 /**
@@ -113,8 +117,9 @@ export async function openFromAlert(o: OpenOptions = {}) {
     if (created.status !== 201) throw new Error(`block for ${who}: ${JSON.stringify(created.body)}`);
     blocksOut[who] = (await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies[who], params: { id: created.body.id }, ifMatch: created.body.revision })).body;
   }
-  await writeMarketFixture(direct.db, { instrumentId: BTC, interval: '15', endBarOpen: bar, count: 260, endClose: '65000', trend: o.side === 'SHORT' ? 'DOWN' : 'UP', quoteAt: clock.now });
+  if (o.market) await o.market();
+  else await writeMarketFixture(direct.db, { instrumentId: BTC, interval: '15', endBarOpen: bar, count: 260, endClose: '65000', trend: o.side === 'SHORT' ? 'DOWN' : 'UP', quoteAt: clock.now });
   if ((await deliver(o.side === 'SHORT' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', bar)) !== 202) throw new Error('alert not accepted');
-  await drain();
+  await drain(clock.now, direct.db, o.hooks);
   return blocksOut;
 }

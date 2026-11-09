@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { createDb, processNextJob, requireEnv, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { createDb, heartbeat, markStopped, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
 import { assertLiveTransportDisabled } from '@trendpilot/domain';
 
 /**
@@ -31,6 +31,8 @@ const describe = (r: ProcessResult) =>
       ? `job ${r.job?.id} ${r.outcome}: paper close ${r.close.intentId} ${r.close.state}${r.close.reason ? ` (${r.close.reason})` : ''}${r.close.filled ? ` filled=${r.close.filled} remaining=${r.close.remaining}${r.close.closed ? ' position CLOSED' : ''}` : ''}${r.close.reconciled ? ' [reconciled with simulator]' : ''}${r.close.exitReason ? ` exit=${r.close.exitReason}` : ''}${r.close.targetLevelId ? ` target=${r.close.targetLevelId}` : ''}${r.close.next ? ` next=${r.close.next}` : ''}${r.close.reversalQueued ? ' reversal queued' : ''}`
       : r.tick
         ? `job ${r.job?.id} ${r.outcome}: market tick stopsTriggered=${r.tick.stopsTriggered} stopExitsRecorded=${r.tick.stopExitsRecorded} takeProfitsRequested=${r.tick.takeProfitsRequested} trailingActivated=${r.tick.trailingActivated} trailingTightened=${r.tick.trailingTightened} trailingStopsRequested=${r.tick.trailingStopsRequested} exitsWaiting=${r.tick.exitsWaiting}`
+        : r.funding
+          ? `job ${r.job?.id} ${r.outcome}: funding ${r.funding.settledAt} positions=${r.funding.positions} booked=${r.funding.booked} alreadyBooked=${r.funding.alreadyBooked}${r.funding.noMark ? ` noMark=${r.funding.noMark}` : ''}`
         : r.reverse
           ? `job ${r.job?.id} ${r.outcome}: reversal for close ${r.reverse.closeIntentId} ${r.reverse.outcome}${r.reverse.reason ? ` (${r.reverse.reason})` : ''}${r.reverse.intentId ? ` order=${r.reverse.intentId}` : ''}`
           : r.submit
@@ -70,6 +72,11 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
 
   let stopping = false;
   let busy: Promise<void> = Promise.resolve();
+  // OPS: liveness and queue counters, visible in the admin Operations view.
+  const startedAt = new Date();
+  const stats = { processed: 0, failed: 0, lastJobAt: null as string | null, lastError: null as string | null, lastPrunedAt: null as string | null };
+  const beat = () => heartbeat(handle.db, { service: 'worker', instance: workerId, startedAt, detail: { ...stats, pid: process.pid } });
+  await beat();
 
   const poll = async () => {
     if (stopping) return;
@@ -77,6 +84,12 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       for (;;) {
         const r = await processNextJob(handle.db, { workerId, now: clock(), leaseNow: new Date(), hooks });
         if (r.outcome === 'IDLE' || stopping) break;
+        stats.processed += 1;
+        stats.lastJobAt = new Date().toISOString();
+        if (r.outcome === 'RETRY' || r.outcome === 'DEAD') {
+          stats.failed += 1;
+          stats.lastError = `${r.job?.kind} ${r.outcome}: ${r.error ?? ''}`.slice(0, 300);
+        }
         log(describe(r));
       }
     } catch (e) {
@@ -87,12 +100,23 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
   const pollTimer = opts.processJobs === false ? null : setInterval(() => (busy = busy.then(poll)), opts.pollMs ?? Number(env.WORKER_POLL_MS ?? 1000));
   const beatTimer = setInterval(async () => {
     try {
-      await handle.db.execute(sql`select 1`);
-      log('heartbeat ok');
+      await beat();
     } catch (e) {
       log(`heartbeat failed: ${(e as Error).message}`);
     }
   }, opts.heartbeatMs ?? 30_000);
+  // Retention for finished jobs and old quotes (hourly; first run a minute after start).
+  const prune = async () => {
+    try {
+      const r = await pruneRetention(handle.db, { jobDays: Number(env.JOB_RETENTION_DAYS ?? RETENTION_DEFAULTS.jobDays), quoteDays: Number(env.QUOTE_RETENTION_DAYS ?? RETENTION_DEFAULTS.quoteDays) });
+      stats.lastPrunedAt = new Date().toISOString();
+      if (r.jobs || r.quotes) log(`retention: removed ${r.jobs} finished job(s) and ${r.quotes} old quote(s)`);
+    } catch (e) {
+      log(`retention failed: ${(e as Error).message}`);
+    }
+  };
+  const pruneStart = opts.processJobs === false ? null : setTimeout(() => void prune(), 60_000);
+  const pruneTimer = opts.processJobs === false ? null : setInterval(() => void prune(), 3_600_000);
 
   return {
     workerId,
@@ -100,7 +124,10 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       stopping = true;
       if (pollTimer) clearInterval(pollTimer);
       clearInterval(beatTimer);
+      if (pruneStart) clearTimeout(pruneStart);
+      if (pruneTimer) clearInterval(pruneTimer);
       await busy;
+      await markStopped(handle.db, 'worker', workerId).catch(() => undefined);
       await handle.close();
       log('stopped');
     }

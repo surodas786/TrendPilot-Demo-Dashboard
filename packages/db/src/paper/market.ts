@@ -3,7 +3,7 @@ import { fixtureCandles, syntheticQuote, type Candle, type FixtureTrend, type Pa
 import type { Executor } from '../client';
 import { marketCandles, marketQuotes } from '../schema';
 
-/** MKT-01 reads used by entry evaluation. Fixture-sourced in this slice. */
+/** MKT-01 reads used by entry evaluation. Rows are FIXTURE (replays, tests) or MEXC_PUBLIC (public feed). */
 
 export async function loadClosedCandles(db: Executor, instrumentId: string, interval: string, upToOpen: Date, limit = 1000): Promise<Candle[]> {
   const rows = await db
@@ -12,7 +12,7 @@ export async function loadClosedCandles(db: Executor, instrumentId: string, inte
     .where(and(eq(marketCandles.instrumentId, instrumentId), eq(marketCandles.interval, interval), lte(marketCandles.openTime, upToOpen)))
     .orderBy(desc(marketCandles.openTime))
     .limit(limit);
-  return rows.reverse().map((r) => ({ openTime: r.openTime, open: r.open, high: r.high, low: r.low, close: r.close, closed: r.closed }));
+  return rows.reverse().map((r) => ({ openTime: r.openTime, open: r.open, high: r.high, low: r.low, close: r.close, closed: r.closed, source: r.source }));
 }
 
 /** Newest quote stamped at or before `now` (plus a small skew allowance). */
