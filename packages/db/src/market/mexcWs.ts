@@ -67,6 +67,8 @@ export interface TickerStreamView {
   connected(): boolean;
   /** When the current socket opened (null while disconnected). */
   connectedSince(): Date | null;
+  /** When `sub.ticker` for this symbol was sent on the current socket (null if not subscribed). */
+  subscribedSince?(exchangeSymbol: string): Date | null;
 }
 
 export interface MexcTickerStreamOptions {
@@ -133,6 +135,7 @@ export class MexcTickerStream implements TickerStreamView {
   private state: StreamState = 'IDLE';
   private readonly wanted = new Set<string>();
   private readonly confirmed = new Set<string>();
+  private readonly subscribedAt = new Map<string, Date>();
   private opened = 0;
   private failures = 0;
   private openedAt: Date | null = null;
@@ -166,6 +169,14 @@ export class MexcTickerStream implements TickerStreamView {
 
   connectedSince(): Date | null {
     return this.state === 'OPEN' ? this.openedAt : null;
+  }
+
+  subscribedSince(exchangeSymbol: string): Date | null {
+    return this.state === 'OPEN' ? (this.subscribedAt.get(exchangeSymbol) ?? null) : null;
+  }
+
+  private subscribe(sym: string): void {
+    if (this.send({ method: 'sub.ticker', param: { symbol: sym } }, `sub.ticker ${sym}`)) this.subscribedAt.set(sym, this.now());
   }
 
   status(): TickerStreamStatus {
@@ -217,11 +228,12 @@ export class MexcTickerStream implements TickerStreamView {
     for (const s of removed) {
       this.wanted.delete(s);
       this.confirmed.delete(s);
+      this.subscribedAt.delete(s);
       this.send({ method: 'unsub.ticker', param: { symbol: s } }, `unsub.ticker ${s}`);
     }
     for (const s of added) {
       this.wanted.add(s);
-      this.send({ method: 'sub.ticker', param: { symbol: s } }, `sub.ticker ${s}`);
+      this.subscribe(s);
     }
   }
 
@@ -293,7 +305,7 @@ export class MexcTickerStream implements TickerStreamView {
       this.lastMessageAt = this.openedAt;
       this.confirmed.clear();
       this.log(`ws: connected${this.opened > 1 ? ` (reconnect #${this.opened - 1})` : ''}; subscribing ${this.wanted.size} contract(s)`);
-      for (const s of this.wanted) this.send({ method: 'sub.ticker', param: { symbol: s } }, `sub.ticker ${s}`);
+      for (const s of this.wanted) this.subscribe(s);
       this.ping();
       this.pingTimer = setInterval(() => this.keepalive(), this.pingMs);
     };
@@ -324,6 +336,7 @@ export class MexcTickerStream implements TickerStreamView {
     this.lastCloseCode = code;
     const wasOpen = this.state === 'OPEN';
     this.confirmed.clear();
+    this.subscribedAt.clear();
     if (this.state === 'STOPPED') return;
     this.state = 'CLOSED';
     this.openedAt = null;

@@ -6,12 +6,18 @@ import {
   getDb,
   getInstrument,
   leverageChoicesFor,
-  lookupFixtureContract,
+  MexcPublicClient,
+  MEXC_PUBLIC_DEFAULT_BASE_URL,
+  pairContractSource,
   publishDraft,
+  resolvePairContract,
   recordAudit,
   updateDraft,
   updateInstrument,
+  type ContractInfoSource,
   type InstrumentDto,
+  type PairContract,
+  type PairContractSource,
   type PublicUser,
   type StrategyVersionDto
 } from '@trendpilot/db';
@@ -40,33 +46,73 @@ function parse<T>(schema: Parameters<typeof parseWith<T>>[0], raw: unknown): T {
 const conflict = (what: string) => new DomainError(409, ErrorCode.REVISION_CONFLICT, `This ${what} changed since you loaded it. Reload and try again.`);
 const immutable = () => new DomainError(409, ErrorCode.IMMUTABLE, 'Published versions cannot be changed. Create a new draft instead.');
 
-/** "Type a ticker, validate it against the exchange" — against the local MEXC contract fixtures in M1. */
-export function validateTicker(raw: unknown) {
-  const { symbol } = parse(instrumentValidateSchema, raw);
-  const spec = lookupFixtureContract(symbol);
-  if (!spec) {
-    throw validationError([{ path: 'symbol', message: `${symbol} is not in the local MEXC contract fixtures. Only fixture contracts can be validated until the exchange adapter exists.` }]);
+/* ───────────── UI-05 pair validation: MEXC Get Contract Info (deployed) or fixtures (tests, demo) ───────────── */
+
+let override: { source: PairContractSource; client?: ContractInfoSource } | null = null;
+
+/** Test-only: force the contract source (and a stub client). Refuses to run in production. */
+export function setPairContractSourceForTests(o: { source: PairContractSource; client?: ContractInfoSource } | null): void {
+  if (process.env.NODE_ENV === 'production') throw new Error('Pair contract overrides cannot be used in production.');
+  override = o;
+}
+
+function contractSource(): { source: PairContractSource; client?: ContractInfoSource } {
+  if (override) return override;
+  const source = pairContractSource();
+  return source === 'FIXTURE' ? { source } : { source, client: new MexcPublicClient({ baseUrl: process.env.MEXC_PUBLIC_BASE_URL || MEXC_PUBLIC_DEFAULT_BASE_URL, timeoutMs: 8_000 }) };
+}
+
+/** Resolves an admin's ticker to a contract, or throws the matching API error. */
+async function lookupPair(symbol: string): Promise<PairContract> {
+  const r = await resolvePairContract(symbol, contractSource());
+  if (r.ok) return r.contract;
+  switch (r.reason) {
+    case 'RATE_LIMITED':
+      throw new DomainError(429, ErrorCode.RATE_LIMITED, r.message);
+    case 'EXCHANGE_UNAVAILABLE':
+      throw new DomainError(503, ErrorCode.EXCHANGE_UNAVAILABLE, r.message);
+    default:
+      throw validationError([{ path: 'symbol', message: r.message }]);
   }
+}
+
+/** "Type a ticker, validate it against the exchange." Accepts XAUUSDT or XAU_USDT. */
+export async function validateTicker(raw: unknown) {
+  const { symbol } = parse(instrumentValidateSchema, raw);
+  const c = await lookupPair(symbol);
   return {
-    symbol: spec.symbol,
-    exchangeSymbol: spec.exchangeSymbol,
-    base: spec.base,
-    quote: spec.quote,
-    contract: { multiplier: spec.contractMultiplier, qtyStep: spec.qtyStep, minQty: spec.minQty, maxQty: spec.maxQty, priceTick: spec.priceTick, takerFeeRate: spec.takerFeeRate },
-    leverageChoices: leverageChoicesFor(spec.maxLeverage),
-    source: 'FIXTURE' as const,
-    fixtureLabel: FIXTURE_LABEL
+    symbol: c.symbol,
+    exchangeSymbol: c.exchangeSymbol,
+    base: c.base,
+    quote: c.quote,
+    settleCoin: c.settleCoin,
+    displayName: c.displayName,
+    contract: { multiplier: c.contractMultiplier, qtyStep: c.qtyStep, minQty: c.minQty, maxQty: c.maxQty, priceTick: c.priceTick, takerFeeRate: c.takerFeeRate },
+    leverage: { min: c.minLeverage, max: c.maxLeverage },
+    leverageChoices: leverageChoicesFor(c.maxLeverage, c.minLeverage),
+    source: c.source,
+    fixtureLabel: c.source === 'FIXTURE' ? FIXTURE_LABEL : null,
+    warnings: c.warnings,
+    checkedAt: c.checkedAt
   };
 }
 
+/** Publish: the contract is looked up again on the server; nothing from the browser is trusted. */
 export async function createPair(admin: PublicUser, raw: unknown, correlationId: string): Promise<InstrumentDto> {
   const input = parse(instrumentCreateSchema, raw);
-  const spec = lookupFixtureContract(input.symbol);
-  if (!spec) throw validationError([{ path: 'symbol', message: 'Validate the ticker first: it is not in the local MEXC contract fixtures.' }]);
+  const c = await lookupPair(input.symbol);
   const { symbol: _s, ...suggestions } = input;
   return getDb().transaction(async (tx) => {
-    const inst = await createInstrumentFromContract(tx, spec, suggestions);
-    await recordAudit(tx, { actorUserId: admin.id, action: 'ADMIN_INSTRUMENT_CREATE', targetType: 'instrument', targetId: inst.id, result: 'SUCCESS', after: { symbol: inst.symbol, status: inst.status, suggested: inst.suggested }, correlationId });
+    const inst = await createInstrumentFromContract(tx, { ...c, isFixture: c.source === 'FIXTURE' }, suggestions);
+    await recordAudit(tx, {
+      actorUserId: admin.id,
+      action: 'ADMIN_INSTRUMENT_CREATE',
+      targetType: 'instrument',
+      targetId: inst.id,
+      result: 'SUCCESS',
+      after: { symbol: inst.symbol, exchangeSymbol: inst.exchangeSymbol, status: inst.status, suggested: inst.suggested, contractSource: c.source, checkedAt: c.checkedAt },
+      correlationId
+    });
     return inst;
   });
 }

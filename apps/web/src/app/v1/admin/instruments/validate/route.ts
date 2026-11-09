@@ -6,5 +6,5 @@ export const dynamic = 'force-dynamic';
 
 export const POST = route(async (req, { correlationId }) => {
   await requireAdmin(req);
-  return json(correlationId, validateTicker(await readJson(req)));
+  return json(correlationId, await validateTicker(await readJson(req)));
 });

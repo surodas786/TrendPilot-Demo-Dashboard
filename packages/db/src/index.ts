@@ -29,6 +29,7 @@ export * from './market/health';
 export * from './market/mexcPublic';
 export * from './market/mexcWs';
 export * from './market/quoteListener';
+export * from './market/contractCatalog';
 export * from './paper/accounts';
 export * from './paper/entry';
 export * from './paper/exits';

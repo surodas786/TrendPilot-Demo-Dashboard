@@ -416,14 +416,16 @@ export class MarketFeed {
     }
 
     const stream = this.o.stream!;
-    const since = stream.connectedSince();
+    // Grace for the first ticker runs from this contract's subscription (a pair published while the
+    // socket is up is subscribed later than the socket opened).
+    const since = stream.subscribedSince ? stream.subscribedSince(inst.exchangeSymbol) : stream.connectedSince();
     const ageText = lastQuoteAt ? `${Math.round(age / 1000)} s` : 'ever';
     let next: FeedState;
     let reason: string;
     if (!stream.connected()) {
       next = 'DOWN';
       reason = `WebSocket disconnected; reconnecting (no quote for ${ageText})`;
-    } else if (!lastQuoteAt && since && now.getTime() - since.getTime() < FEED_POLICY.maxQuoteAgeMs) {
+    } else if (!lastQuoteAt && (!since || now.getTime() - since.getTime() < FEED_POLICY.maxQuoteAgeMs)) {
       next = 'STARTING';
       reason = 'subscribed; waiting for the first ticker';
     } else {

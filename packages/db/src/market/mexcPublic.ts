@@ -11,7 +11,7 @@ import { Decimal, type CandleInterval } from '@trendpilot/domain';
 export const MEXC_PUBLIC_DEFAULT_BASE_URL = 'https://contract.mexc.com';
 
 /** The only paths this adapter may request. Everything under /private/ is out of reach. */
-const PUBLIC_PATHS = [/^\/api\/v1\/contract\/ping$/, /^\/api\/v1\/contract\/ticker$/, /^\/api\/v1\/contract\/kline\/[A-Z0-9]+_[A-Z0-9]+$/, /^\/api\/v1\/contract\/detail$/, /^\/api\/v1\/contract\/funding_rate\/history$/];
+const PUBLIC_PATHS = [/^\/api\/v1\/contract\/ping$/, /^\/api\/v1\/contract\/ticker$/, /^\/api\/v1\/contract\/kline\/[A-Z0-9]+_[A-Z0-9]+$/, /^\/api\/v1\/contract\/detail$/, /^\/api\/v1\/contract\/detail\/country$/, /^\/api\/v1\/contract\/funding_rate\/history$/];
 
 export class MexcPublicError extends Error {
   constructor(
@@ -54,6 +54,25 @@ export interface MexcContractDetail {
   /** 0 = enabled on the exchange. */
   state: number;
   apiAllowed: boolean | null;
+}
+
+/**
+ * Get Contract Info (`GET /api/v1/contract/detail/country?symbol=…`): the contract as offered,
+ * with trading rules and leverage limits. Used to validate an admin's new pair.
+ */
+export interface MexcContractInfo extends MexcContractDetail {
+  displayName: string | null;
+  baseCoin: string;
+  quoteCoin: string;
+  settleCoin: string;
+  /** 1 = perpetual, 2 = delivery. */
+  futureType: number | null;
+  minLeverage: number;
+  maxLeverage: number;
+  takerFeeRate: string | null;
+  isHidden: boolean | null;
+  /** Exchange ms; a future value means the contract has not opened yet. */
+  openingTime: number | null;
 }
 
 /** A SETTLED funding rate (public history). The ticker's predicted rate is never used for booking. */
@@ -166,6 +185,39 @@ export function parseContractDetail(body: unknown, exchangeSymbol: string): Mexc
   };
 }
 
+export function parseContractInfo(body: unknown, exchangeSymbol: string): MexcContractInfo {
+  const d = unwrap(body, `contract info ${exchangeSymbol}`) as Record<string, unknown>;
+  if (!d || typeof d !== 'object' || Array.isArray(d) || typeof d.symbol !== 'string' || d.symbol.toUpperCase() !== exchangeSymbol.toUpperCase()) {
+    throw new MexcPublicError(`contract info ${exchangeSymbol}: unexpected response`, 'PARSE');
+  }
+  const str = (v: unknown) => (typeof v === 'string' ? v : '');
+  const int = (v: unknown, field: string) => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new MexcPublicError(`contract info ${exchangeSymbol}: ${field} is missing`, 'PARSE');
+    return v;
+  };
+  const sym = d.symbol;
+  return {
+    exchangeSymbol: sym,
+    displayName: typeof d.displayNameEn === 'string' ? d.displayNameEn : null,
+    baseCoin: str(d.baseCoin),
+    quoteCoin: str(d.quoteCoin),
+    settleCoin: str(d.settleCoin),
+    futureType: typeof d.futureType === 'number' ? d.futureType : null,
+    contractSize: decimalString(d.contractSize, 'contractSize'),
+    priceUnit: decimalString(d.priceUnit, 'priceUnit'),
+    volUnit: decimalString(d.volUnit, 'volUnit'),
+    minVol: decimalString(d.minVol, 'minVol'),
+    maxVol: decimalString(d.maxVol, 'maxVol'),
+    minLeverage: int(d.minLeverage, 'minLeverage'),
+    maxLeverage: int(d.maxLeverage, 'maxLeverage'),
+    takerFeeRate: d.takerFeeRate === undefined || d.takerFeeRate === null ? null : decimalString(d.takerFeeRate, 'takerFeeRate'),
+    state: typeof d.state === 'number' ? d.state : -1,
+    apiAllowed: typeof d.apiAllowed === 'boolean' ? d.apiAllowed : null,
+    isHidden: typeof d.isHidden === 'boolean' ? d.isHidden : null,
+    openingTime: typeof d.openingTime === 'number' ? d.openingTime : null
+  };
+}
+
 export function parseFundingHistory(body: unknown, exchangeSymbol: string): MexcSettledFunding[] {
   const d = unwrap(body, `funding history ${exchangeSymbol}`) as { resultList?: unknown };
   if (!d || !Array.isArray(d.resultList)) throw new MexcPublicError(`funding history ${exchangeSymbol}: missing resultList`, 'PARSE');
@@ -237,6 +289,10 @@ export class MexcPublicClient implements PublicMarketSource {
 
   async fundingHistory(exchangeSymbol: string, pageSize = 10): Promise<MexcSettledFunding[]> {
     return parseFundingHistory(await this.get('/api/v1/contract/funding_rate/history', { symbol: exchangeSymbol, page_num: '1', page_size: String(pageSize) }), exchangeSymbol);
+  }
+
+  async contractInfo(exchangeSymbol: string): Promise<MexcContractInfo> {
+    return parseContractInfo(await this.get('/api/v1/contract/detail/country', { symbol: exchangeSymbol }), exchangeSymbol);
   }
 
   async contractDetail(exchangeSymbol: string): Promise<MexcContractDetail> {

@@ -42,7 +42,7 @@ export const FIXTURE_QUOTES: Record<string, Omit<Quote, 'asOf' | 'source'>> = {
 };
 
 const LEVERAGE_STEPS = [1, 2, 3, 5, 10, 20, 25, 50, 75, 100, 125, 200];
-export const leverageChoicesFor = (maxLeverage: number) => LEVERAGE_STEPS.filter((x) => x <= maxLeverage);
+export const leverageChoicesFor = (maxLeverage: number, minLeverage = 1) => LEVERAGE_STEPS.filter((x) => x >= minLeverage && x <= maxLeverage);
 
 export function lookupFixtureContract(symbol: string): MexcContractFixture | undefined {
   return MEXC_CONTRACT_FIXTURES.find((x) => x.symbol === symbol.trim().toUpperCase());
