@@ -28,7 +28,13 @@
     "dev:demo": "npm --prefix apps/demo install && npm --prefix apps/demo run dev",
     "market:fixture": "npm run market-fixture -w @trendpilot/db --",
     "demo:paper": "npm run demo-paper -w @trendpilot/db --",
-    "market:tick": "npm run market-tick -w @trendpilot/db --"
+    "market:tick": "npm run market-tick -w @trendpilot/db --",
+    "market:feed": "npm run feed -w @trendpilot/worker --",
+    "market:funding": "npm run market-funding -w @trendpilot/db --",
+    "ops:bootstrap-admin": "npm run ops-bootstrap-admin -w @trendpilot/db --",
+    "ops:mail": "npm run ops-mail -w @trendpilot/db --",
+    "staging:smoke": "tsx scripts/staging-smoke.ts",
+    "ops:mexc-readonly-check": "npm run mexc-readonly-check -w @trendpilot/db --"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

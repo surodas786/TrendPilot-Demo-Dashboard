@@ -107,7 +107,19 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
             </Button>
           </>
         ) : (
-          <p className="text-sm text-muted">No webhook configured. Run the seed or create one.</p>
+          <div className="space-y-2">
+            <p className="text-sm text-muted">No TradingView webhook exists yet. Create it to get the webhook URL (shown once).</p>
+            {revealed && (
+              <div className="space-y-2 rounded-lg border border-warn/40 bg-warn/10 p-3" data-testid="revealed-webhook-url">
+                <p className="text-xs font-semibold text-warn">Copy this URL into TradingView now. It will not be shown again.</p>
+                <p className="break-all font-mono text-xs text-ink">{revealed}</p>
+                <CopyButtonInline value={revealed} />
+              </div>
+            )}
+            <Button size="sm" icon={KeyRoundIcon} onClick={() => void rotate()}>
+              Create webhook
+            </Button>
+          </div>
         )}
       </section>
 

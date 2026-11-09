@@ -19,7 +19,10 @@ import { completeJob, enqueueJob, type JobRow } from '../jobs';
 import { fills, instruments, marketQuotes, orderIntents, positionExits, positions, positionTargets } from '../schema';
 import { book } from './accounts';
 import { latestQuote } from './market';
-import { cancelOrder, inspectProtection, listStopFills, lookupCloseOrder, placeReduceOnlyClose, resizeProtection, triggerStops, venuePosition, type CloseResult, type VenueQuote } from './simulator';
+import { paperVenue } from '../venue/paper';
+import { resolveVenue } from '../venue/select';
+import type { ExecutionVenue } from '../venue/types';
+import { listStopFills, triggerStops, type CloseResult, type VenueQuote } from './simulator';
 
 /**
  * Paper exits (EXT-01 stop loss, EXT-02/03 fixed and split TP, EXT-04 trailing stop, EXT-05
@@ -123,9 +126,10 @@ export async function requestExit(
 export async function recordExitFill(
   db: Db,
   tx: Executor,
-  input: { position: PositionRow; fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date }; reason: ExitReason; intentId: string | null; targetLevelId?: string | null; now: Date }
+  input: { position: PositionRow; fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date }; reason: ExitReason; intentId: string | null; targetLevelId?: string | null; now: Date; venue?: ExecutionVenue }
 ): Promise<{ recorded: boolean; remaining: string; closed: boolean }> {
   const p = input.position;
+  const venue = input.venue ?? paperVenue(db);
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, p.instrumentId));
   const before = D(p.contracts);
   const qty = Decimal.min(input.fill.contracts, before); // never more than the managed quantity
@@ -176,20 +180,28 @@ export async function recordExitFill(
 
   let protection: { status: 'PROTECTED' | 'UNPROTECTED' | 'PENDING'; stopContracts: string | null } = { status: p.protectionStatus, stopContracts: p.stopContracts };
   let closed = false;
-  const stopId = await stopOrderIdFor(tx, p);
+  const stopId = p.stopOrderRef ? await venue.stopOrderIdFor(p.stopOrderRef, tx) : null;
+  let newStopRef: string | null = null;
   if (remaining.isZero()) {
     // Confirm zero at the venue before clearing the stop and closing the position.
-    const venue = await venuePosition(tx, p.paperAccountId, p.instrumentId);
-    if (D(venue.contracts).isZero()) {
-      if (stopId) await cancelOrder(db, stopId);
-      const s = stopId ? await inspectProtection(db, stopId) : null;
+    const held = await venue.position(p.paperAccountId, p.instrumentId, tx);
+    if (D(held.contracts).isZero()) {
+      if (stopId) await venue.cancelOrder(stopId, p.instrumentId);
+      const s = stopId ? await venue.inspectProtection(stopId, p.instrumentId) : null;
       closed = !s || s.status !== 'ACTIVE';
       protection = { status: 'PENDING', stopContracts: '0' };
     }
   } else if (stopId) {
-    // Partial: keep stop coverage for exactly the remainder, then verify (EXT-03).
-    await resizeProtection(db, stopId, remaining.toFixed());
-    const s = await inspectProtection(db, stopId);
+    // Partial: keep stop coverage for exactly the remainder, then verify (EXT-03). A live venue may
+    // replace the stop order; the position then follows the new reference.
+    let current = stopId;
+    try {
+      current = await venue.resizeProtection(stopId, remaining.toFixed(), p.instrumentId);
+    } catch {
+      current = stopId; // verified below: a stop that was not resized leaves the position UNPROTECTED
+    }
+    if (current !== stopId) newStopRef = current;
+    const s = await venue.inspectProtection(current, p.instrumentId);
     const ok = !!s && s.status === 'ACTIVE' && D(s.contracts).eq(remaining);
     protection = { status: ok ? 'PROTECTED' : 'UNPROTECTED', stopContracts: s?.contracts ?? null };
   }
@@ -204,6 +216,7 @@ export async function recordExitFill(
       feesUsdt: D(p.feesUsdt).plus(input.fill.fee).toFixed(),
       stopContracts: protection.stopContracts,
       protectionStatus: protection.status,
+      ...(newStopRef ? { stopOrderRef: newStopRef } : {}),
       protectionVerifiedAt: input.now,
       ...(closed ? { status: 'CLOSED' as const, closeReason: input.reason, closedAt: input.fill.filledAt } : {}),
       updatedAt: sql`now()`
@@ -217,12 +230,6 @@ export async function recordExitFill(
       .where(and(eq(positionTargets.positionId, p.id), ne(positionTargets.status, 'DONE')));
   }
   return { recorded: true, remaining: remaining.toFixed(), closed };
-}
-
-async function stopOrderIdFor(tx: Executor, p: PositionRow): Promise<string | null> {
-  if (!p.stopOrderRef) return null;
-  const r = await tx.execute<{ id: string }>(sql`SELECT id FROM sim_orders WHERE client_order_id = ${p.stopOrderRef} LIMIT 1`);
-  return r.rows[0]?.id ?? null;
 }
 
 /** A target whose close ended without a fill returns to PENDING/PARTIAL so it can resume. */
@@ -245,6 +252,8 @@ async function scheduleReversal(tx: Executor, intent: IntentRow, now: Date): Pro
 
 export interface CloseHooks {
   afterSimulatorFill?: () => void | Promise<void>;
+  /** Test seam: execute through this venue (e.g. the MEXC adapter over a mocked exchange). Refused in production. */
+  venue?: ExecutionVenue;
 }
 
 export interface CloseSummary {
@@ -307,17 +316,21 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
   if (step.kind === 'stopped') return { ...base, positionId: step.intent.positionId!, state: step.state, reason: step.reason, reconciled: false, reversalQueued: step.reversalQueued };
 
   const { intent, pos } = step;
+  const venue = resolveVenue(db, intent.mode, hooks.venue);
   let result: CloseResult | null = null;
   let reconciled = false;
   if (step.kind === 'reconcile') {
-    result = await lookupCloseOrder(db, intent.clientOrderId);
+    result = await venue.lookupCloseOrder(intent.clientOrderId, pos.instrumentId);
     reconciled = result !== null;
+    const grace = (venue as { reconcileGraceMs?: number }).reconcileGraceMs ?? 0;
+    const waited = now.getTime() - (intent.submittedAt?.getTime() ?? 0);
+    if (!result && grace > 0 && waited < grace) throw new Error(`Close ${intent.clientOrderId} not visible at the venue yet (${Math.round(waited / 1000)} s); reconciling before any resubmission.`);
   }
   if (!result) {
     const q = await quoteFor(db, pos.instrumentId, now);
     if (!q) throw new Error('No venue quote available for the close.');
     const [inst] = await db.select().from(instruments).where(eq(instruments.id, pos.instrumentId));
-    result = await placeReduceOnlyClose(db, {
+    result = await venue.placeReduceOnlyClose({
       paperAccountId: pos.paperAccountId,
       clientOrderId: intent.clientOrderId,
       instrumentId: pos.instrumentId,
@@ -325,7 +338,8 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
       contracts: intent.contracts,
       contract: { multiplier: inst!.contractMultiplier, qtyStep: inst!.qtyStep, takerFeeRate: inst!.takerFeeRate },
       quote: q,
-      now
+      now,
+      marginMode: pos.marginMode as 'ISOLATED' | 'CROSS'
     });
     if (result.status !== 'REJECTED') await hooks.afterSimulatorFill?.();
   }
@@ -350,7 +364,7 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
       .insert(fills)
       .values({ ownerId: cur!.ownerId, paperAccountId: cur!.paperAccountId, intentId: cur!.id, exchangeFillId: f.fillId, side: cur!.side === 'LONG' ? 'SHORT' : 'LONG', contracts: f.contracts, price: f.price, fee: f.fee, filledAt: f.filledAt })
       .onConflictDoNothing();
-    const rec = await recordExitFill(db, tx, { position: p!, fill: f, reason: cur!.exitReason as ExitReason, intentId: cur!.id, targetLevelId: cur!.targetLevelId, now });
+    const rec = await recordExitFill(db, tx, { position: p!, fill: f, reason: cur!.exitReason as ExitReason, intentId: cur!.id, targetLevelId: cur!.targetLevelId, now, venue });
     const full = result!.status === 'FILLED';
     await tx
       .update(orderIntents)
@@ -485,16 +499,24 @@ export interface TickSummary {
 }
 
 /** Enqueue a replayed price (fixture): the quote and its tick job commit together. */
-export async function recordMarketTick(db: Db, t: { instrumentId: string; asOf: Date; bid: string; ask: string; mark: string; last: string; liquidityContracts?: string | null }): Promise<void> {
+/**
+ * Stores one quote and queues the `market.tick` job that runs stops, targets and trailing on it.
+ * Fixture ticks (CLI, tests) default to source FIXTURE; the public feed passes MEXC_PUBLIC.
+ */
+export async function recordMarketTick(
+  db: Db,
+  t: { instrumentId: string; asOf: Date; bid: string; ask: string; mark: string; last: string; liquidityContracts?: string | null; source?: 'FIXTURE' | 'MEXC_PUBLIC' }
+): Promise<void> {
+  const source = t.source ?? 'FIXTURE';
   await db.transaction(async (tx) => {
     await tx
       .insert(marketQuotes)
-      .values({ instrumentId: t.instrumentId, asOf: t.asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source: 'FIXTURE' })
-      .onConflictDoUpdate({ target: [marketQuotes.instrumentId, marketQuotes.asOf], set: { bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null } });
+      .values({ instrumentId: t.instrumentId, asOf: t.asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source })
+      .onConflictDoUpdate({ target: [marketQuotes.instrumentId, marketQuotes.asOf], set: { bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null, source } });
     await enqueueJob(tx, {
       kind: MARKET_TICK_JOB,
       dedupeKey: `${MARKET_TICK_JOB}:${t.instrumentId}:${t.asOf.toISOString()}:${t.mark}:${t.last}:${t.bid}:${t.ask}`,
-      payload: { instrumentId: t.instrumentId, asOf: t.asOf.toISOString(), quote: { bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null } },
+      payload: { instrumentId: t.instrumentId, asOf: t.asOf.toISOString(), source, quote: { bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: t.liquidityContracts ?? null } },
       runAfter: t.asOf
     });
   });

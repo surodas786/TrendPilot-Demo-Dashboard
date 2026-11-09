@@ -7,6 +7,7 @@ import { SIGNAL_DISPATCH_JOB } from './intake';
 import { ENTRY_STEP, evaluateAndReserveEntry, PAPER_SUBMIT_JOB, processPaperSubmit, type SubmitHooks, type SubmitSummary } from '../paper/entry';
 import { MARKET_TICK_JOB, PAPER_CLOSE_JOB, PAPER_REVERSE_JOB, processMarketTick, processPaperClose, requestExit, type CloseSummary, type TickSummary } from '../paper/exits';
 import { processPaperReverse, type ReverseSummary } from '../paper/reversal';
+import { PAPER_FUNDING_JOB, processPaperFunding, type FundingSummary } from '../paper/funding';
 
 /**
  * Signal routing worker step (SIG-04/05, ARC-01). For one accepted event, every matching Paper
@@ -198,6 +199,7 @@ export interface ProcessResult {
   close?: CloseSummary;
   tick?: TickSummary;
   reverse?: ReverseSummary;
+  funding?: FundingSummary;
   error?: string;
 }
 
@@ -208,7 +210,7 @@ export async function processNextJob(
 ): Promise<ProcessResult> {
   const now = opts.now ?? new Date();
   const leaseNow = opts.leaseNow ?? now;
-  const job = await claimNextJob(db, { workerId: opts.workerId, now, leaseNow, leaseMs: opts.leaseMs ?? 30_000, kinds: [SIGNAL_DISPATCH_JOB, PAPER_SUBMIT_JOB, PAPER_CLOSE_JOB, PAPER_REVERSE_JOB, MARKET_TICK_JOB] });
+  const job = await claimNextJob(db, { workerId: opts.workerId, now, leaseNow, leaseMs: opts.leaseMs ?? 30_000, kinds: [SIGNAL_DISPATCH_JOB, PAPER_SUBMIT_JOB, PAPER_CLOSE_JOB, PAPER_REVERSE_JOB, MARKET_TICK_JOB, PAPER_FUNDING_JOB] });
   if (!job) return { job: null, outcome: 'IDLE' };
   const ref = { id: job.id, kind: job.kind, attempts: job.attempts };
   try {
@@ -223,6 +225,10 @@ export async function processNextJob(
     if (job.kind === PAPER_REVERSE_JOB) {
       const reverse = await processPaperReverse(db, job, now);
       return { job: ref, outcome: 'DONE', reverse };
+    }
+    if (job.kind === PAPER_FUNDING_JOB) {
+      const funding = await processPaperFunding(db, job);
+      return { job: ref, outcome: 'DONE', funding };
     }
     if (job.kind === MARKET_TICK_JOB) {
       const tick = await processMarketTick(db, job, now);

@@ -4,7 +4,7 @@ import type { Db } from '../client';
 import { completeJob, type JobRow } from '../jobs';
 import { orderBlocks, orderIntents, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
 import { ENTRY_STEP, evaluateAndReserveEntry } from './entry';
-import { venuePosition } from './simulator';
+import { resolveVenue } from '../venue/select';
 
 /**
  * STR-06 close and reverse — the opening leg. Runs only after the closing leg is terminal
@@ -77,7 +77,7 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date): Promi
 
     // 1. Confirmed flat, terminal orders, obsolete protection gone (AT-09: partial or unknown cannot reverse).
     if (pos!.status !== 'CLOSED' || !new Decimal(pos!.contracts).isZero()) return withhold('REVERSAL_CLOSE_INCOMPLETE', { remainingContracts: new Decimal(pos!.contracts).toFixed() });
-    const venue = await venuePosition(tx, pos!.paperAccountId, pos!.instrumentId);
+    const venue = await resolveVenue(db, pos!.mode).position(pos!.paperAccountId, pos!.instrumentId, tx);
     if (!new Decimal(venue.contracts).isZero()) return withhold('REVERSAL_NOT_FLAT', { venueContracts: venue.contracts });
     if (pos!.stopOrderRef) {
       const [stop] = await tx.select({ status: simOrders.status }).from(simOrders).where(eq(simOrders.clientOrderId, pos!.stopOrderRef));

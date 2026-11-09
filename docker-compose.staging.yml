@@ -1,0 +1,83 @@
+# TrendPilot PAPER staging: PostgreSQL, web app, worker, public market feed and a TLS front.
+# No exchange credentials exist in this build; LIVE_ORDER_TRANSPORT is pinned to "disabled".
+#
+#   cp .env.staging.example .env.staging     # fill in the secrets (never commit .env.staging)
+#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d --build
+#
+# Services: db (no host port), migrate (one-shot), web, worker, feed, caddy (HTTPS on
+# ${STAGING_HTTPS_PORT:-443}). See docs/STAGING.md for the runbook, smoke test and backup drill.
+name: trendpilot-staging
+
+x-app: &app
+  image: trendpilot:staging
+  build: .
+  env_file: .env.staging
+  environment:
+    NODE_ENV: production
+    LIVE_ORDER_TRANSPORT: disabled
+    DATABASE_URL: postgres://${POSTGRES_USER:-trendpilot}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.staging}@db:5432/${POSTGRES_DB:-trendpilot_staging}
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trendpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.staging}
+      POSTGRES_DB: ${POSTGRES_DB:-trendpilot_staging}
+    volumes:
+      - staging_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["npm", "run", "db:migrate"]
+    restart: "no"
+    depends_on:
+      db: { condition: service_healthy }
+
+  web:
+    <<: *app
+    command: ["npm", "run", "start", "-w", "@trendpilot/web"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    <<: *app
+    command: ["npm", "run", "worker"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  feed:
+    <<: *app
+    command: ["npm", "run", "market:feed"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      STAGING_DOMAIN: ${STAGING_DOMAIN:-localhost}
+    ports:
+      - "${STAGING_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./docker/staging/Caddyfile:/etc/caddy/Caddyfile:ro
+      - staging_caddy:/data
+    depends_on:
+      web: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  staging_pgdata:
+  staging_caddy:

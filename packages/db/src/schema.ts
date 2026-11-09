@@ -818,3 +818,167 @@ export const positionTargets = pgTable(
     check('position_targets_quantities', sql`${t.plannedContracts} >= 0 AND ${t.requestedContracts} >= 0 AND ${t.filledContracts} >= 0 AND ${t.filledContracts} <= ${t.plannedContracts}`)
   ]
 );
+
+/* ─────────────────────── Step 8: MKT-01/02 public market-data feed ─────────────────────── */
+
+/** Per contract and source: the feed's current health. Survives feed-process restarts. */
+export const marketFeedStatus = pgTable(
+  'market_feed_status',
+  {
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    source: text('source').notNull(),
+    exchangeSymbol: text('exchange_symbol').notNull(),
+    state: text('state').notNull().default('STARTING'),
+    stateSince: timestamp('state_since', { withTimezone: true }).notNull().defaultNow(),
+    /** Newest written quote, in the local clock domain. */
+    lastQuoteAt: timestamp('last_quote_at', { withTimezone: true }),
+    /** The exchange's own timestamp of that quote (repeat detection). */
+    lastExchangeTime: timestamp('last_exchange_time', { withTimezone: true }),
+    lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+    /** Newest closed bar open synced, per interval: {"5": iso, "15": iso}. */
+    lastCandleOpen: jsonb('last_candle_open'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    nextRetryAt: timestamp('next_retry_at', { withTimezone: true }),
+    lastError: text('last_error'),
+    clockOffsetMs: integer('clock_offset_ms'),
+    contractCheck: jsonb('contract_check'),
+    contractCheckedAt: timestamp('contract_checked_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    primaryKey({ columns: [t.instrumentId, t.source] }),
+    check('market_feed_status_state_valid', sql`${t.state} IN ('STARTING', 'HEALTHY', 'STALE', 'DOWN', 'CLOCK_SKEW', 'SYMBOL_UNAVAILABLE')`)
+  ]
+);
+
+/** Append-only feed history: state changes, gaps, backfills, revisions, unverifiable windows. */
+export const marketFeedEvents = pgTable(
+  'market_feed_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    source: text('source').notNull(),
+    kind: text('kind').notNull(),
+    message: text('message').notNull(),
+    detail: jsonb('detail').notNull().default({}),
+    windowFrom: timestamp('window_from', { withTimezone: true }),
+    windowTo: timestamp('window_to', { withTimezone: true }),
+    createdAt: createdAt()
+  },
+  (t) => [index('market_feed_events_created_idx').on(t.createdAt), index('market_feed_events_instrument_idx').on(t.instrumentId, t.createdAt)]
+);
+
+/* ───────────────────────── Step 9: settled funding (REP-02) ───────────────────────── */
+
+/** Settled funding rates per contract (public history or fixture). A predicted rate is never stored here. */
+export const fundingRates = pgTable(
+  'funding_rates',
+  {
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    settledAt: timestamp('settled_at', { withTimezone: true }).notNull(),
+    rate: numeric('rate', { precision: 18, scale: 10 }).notNull(),
+    source: text('source').notNull(),
+    createdAt: createdAt()
+  },
+  (t) => [primaryKey({ columns: [t.instrumentId, t.settledAt] })]
+);
+
+/** Simulated funding booked to a paper position at one settlement. Once per position and settlement. */
+export const paperFunding = pgTable(
+  'paper_funding',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    paperAccountId: uuid('paper_account_id')
+      .notNull()
+      .references(() => paperAccounts.id),
+    positionId: uuid('position_id')
+      .notNull()
+      .references(() => positions.id),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    settledAt: timestamp('settled_at', { withTimezone: true }).notNull(),
+    rate: numeric('rate', { precision: 18, scale: 10 }).notNull(),
+    contracts: qty('contracts').notNull(),
+    markPrice: price('mark_price').notNull(),
+    notional: money('notional').notNull(),
+    /** Paid is negative, received positive (REP-02). */
+    amount: money('amount').notNull(),
+    source: text('source').notNull(),
+    createdAt: createdAt()
+  },
+  (t) => [uniqueIndex('paper_funding_once').on(t.positionId, t.settledAt), index('paper_funding_owner_idx').on(t.ownerId, t.settledAt)]
+);
+
+/* ───────────────────────── Step 10: operations (OPS) ───────────────────────── */
+
+/** Liveness of background services (worker, market feed). One row per service instance. */
+export const serviceHeartbeats = pgTable(
+  'service_heartbeats',
+  {
+    service: text('service').notNull(),
+    instance: text('instance').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull(),
+    detail: jsonb('detail').notNull().default({}),
+    stoppedAt: timestamp('stopped_at', { withTimezone: true })
+  },
+  (t) => [primaryKey({ columns: [t.service, t.instance] })]
+);
+
+/* ───────────────────────── Step 12: live pilot scope (OPS-02) ───────────────────────── */
+
+/**
+ * The live pilot allowlist: one investor, one MEXC account (reference only, never credentials),
+ * one contract, operator-approved limits. At most one pilot is open at a time; adds and automatic
+ * reversals are off by constraint.
+ */
+export const livePilots = pgTable(
+  'live_pilots',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    status: text('status').notNull().default('DRAFT'),
+    investorId: uuid('investor_id')
+      .notNull()
+      .references(() => users.id),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    /** Human reference for the verified MEXC account (e.g. UID suffix). Never a key. */
+    exchangeAccountRef: text('exchange_account_ref').notNull(),
+    maxOrderContracts: numeric('max_order_contracts', { precision: 28, scale: 12 }).notNull(),
+    maxOrderNotionalUsdt: numeric('max_order_notional_usdt', { precision: 28, scale: 8 }).notNull(),
+    maxLeverage: integer('max_leverage').notNull(),
+    maxExposureUsdt: numeric('max_exposure_usdt', { precision: 28, scale: 8 }).notNull(),
+    allowAdds: boolean('allow_adds').notNull().default(false),
+    allowReversal: boolean('allow_reversal').notNull().default(false),
+    /** Recorded pre-pilot checks: { CHECK_ID: { passed, evidence, by, at } }. */
+    checks: jsonb('checks').notNull().default({}),
+    approvedBy: uuid('approved_by').references(() => users.id),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    investorActivatedAt: timestamp('investor_activated_at', { withTimezone: true }),
+    entriesHalted: boolean('entries_halted').notNull().default(false),
+    haltReason: text('halt_reason'),
+    haltedAt: timestamp('halted_at', { withTimezone: true }),
+    revision: integer('revision').notNull().default(1),
+    createdBy: uuid('created_by').references(() => users.id),
+    createdAt: createdAt(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp('ended_at', { withTimezone: true })
+  },
+  (t) => [
+    check('live_pilots_status_valid', sql`${t.status} IN ('DRAFT', 'APPROVED', 'ACTIVE', 'ENDED')`),
+    check('live_pilots_no_adds_or_reversal', sql`${t.allowAdds} = false AND ${t.allowReversal} = false`),
+    check('live_pilots_limits_positive', sql`${t.maxOrderContracts} > 0 AND ${t.maxOrderNotionalUsdt} > 0 AND ${t.maxExposureUsdt} > 0 AND ${t.maxLeverage} BETWEEN 1 AND 20`),
+    uniqueIndex('live_pilots_one_open').on(sql`(true)`).where(sql`${t.status} <> 'ENDED'`)
+  ]
+);

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "feed": "tsx src/feedMain.ts"
   },
   "dependencies": {
     "@trendpilot/db": "0.1.0",

@@ -25,7 +25,7 @@ export default async function MyTradesPage() {
     <PageContainer
       title="My Trades"
       description="Paper positions opened from shared signals with your own settings, each with its attached stop loss."
-      scope={`${user.name} · My Account · Paper — simulated orders and fills against fixture market data. No real exchange is involved.`}
+      scope={`${user.name} · My Account · Paper — simulated orders and fills on fixture or public MEXC prices. No order reaches a real exchange.`}
     >
       {account && (
         <dl className="grid gap-3 rounded-xl border border-line bg-surface p-4 text-sm sm:grid-cols-4" data-testid="paper-balance">

@@ -18,10 +18,12 @@ export interface Candle {
   close: string;
   /** Only closed candles may feed EMA; a forming candle never does. */
   closed: boolean;
+  /** Where the candle came from (FIXTURE or MEXC_PUBLIC). EMA never mixes sources. */
+  source?: string;
 }
 
 export type EmaResult =
-  | { ok: true; ema: string; close: string; candlesUsed: number; seedFrom: string; through: string }
+  | { ok: true; ema: string; close: string; candlesUsed: number; seedFrom: string; through: string; source: string | null }
   | { ok: false; reason: 'EMA_UNAVAILABLE'; detail: 'NO_ALIGNED_CANDLE' | 'ALIGNED_CANDLE_NOT_CLOSED' | 'INSUFFICIENT_HISTORY'; candlesAvailable: number };
 
 /**
@@ -36,11 +38,11 @@ export function emaAtSignalBar(candles: Candle[], signalBarOpen: Date, intervalM
   if (!aligned) return { ok: false, reason: 'EMA_UNAVAILABLE', detail: 'NO_ALIGNED_CANDLE', candlesAvailable: 0 };
   if (!aligned.closed) return { ok: false, reason: 'EMA_UNAVAILABLE', detail: 'ALIGNED_CANDLE_NOT_CLOSED', candlesAvailable: 0 };
 
-  // Walk back over consecutive closed candles, newest first.
+  // Walk back over consecutive closed candles from the aligned candle's source, newest first.
   const run: Candle[] = [];
   for (let t = signalBarOpen.getTime(); run.length < maxWindow; t -= intervalMs) {
     const c = byOpen.get(t);
-    if (!c || !c.closed) break;
+    if (!c || !c.closed || (c.source ?? null) !== (aligned.source ?? null)) break;
     run.push(c);
   }
   if (run.length < period) return { ok: false, reason: 'EMA_UNAVAILABLE', detail: 'INSUFFICIENT_HISTORY', candlesAvailable: run.length };
@@ -57,7 +59,8 @@ export function emaAtSignalBar(candles: Candle[], signalBarOpen: Date, intervalM
     close: new D(aligned.close).toFixed(),
     candlesUsed: run.length,
     seedFrom: run[0]!.openTime.toISOString(),
-    through: aligned.openTime.toISOString()
+    through: aligned.openTime.toISOString(),
+    source: aligned.source ?? null
   };
 }
 
@@ -69,7 +72,7 @@ export function applyEmaFilter(filter: 'OFF' | 'EMA200', side: 'LONG' | 'SHORT',
   if (!ema || !ema.ok) return { pass: false, reason: 'EMA_UNAVAILABLE', detail: { emaFilter: 'EMA200', ...(ema && !ema.ok ? { cause: ema.detail, candlesAvailable: ema.candlesAvailable } : { cause: 'NO_CANDLES' }) } };
   const cmp = new Decimal(ema.close).comparedTo(ema.ema);
   const pass = side === 'LONG' ? cmp > 0 : cmp < 0;
-  const detail = { emaFilter: 'EMA200', close: ema.close, ema: ema.ema, candlesUsed: ema.candlesUsed, through: ema.through, relation: cmp > 0 ? 'ABOVE' : cmp < 0 ? 'BELOW' : 'EQUAL' };
+  const detail = { emaFilter: 'EMA200', close: ema.close, ema: ema.ema, candlesUsed: ema.candlesUsed, through: ema.through, source: ema.source, relation: cmp > 0 ? 'ABOVE' : cmp < 0 ? 'BELOW' : 'EQUAL' };
   return pass ? { pass: true, detail } : { pass: false, reason: 'EMA_FILTERED', detail };
 }
 

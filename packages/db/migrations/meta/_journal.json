@@ -78,6 +78,34 @@
       "when": 1794139696085,
       "tag": "0010_m2_split_trailing_reverse",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794158811582,
+      "tag": "0011_m3_market_feed",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794159342103,
+      "tag": "0012_m3_paper_funding",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1794162120081,
+      "tag": "0013_m3_ops_heartbeats",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794188727705,
+      "tag": "0014_m4_live_pilot",
+      "breakpoints": true
     }
   ]
 }

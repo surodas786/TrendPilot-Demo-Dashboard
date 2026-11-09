@@ -78,7 +78,7 @@ const h = createDb(process.env.DEMO_DATABASE_URL ?? requireEnv('DATABASE_URL'), 
 try {
   const db = h.db;
   if (process.argv.includes('--reset-paper')) {
-    await db.execute(sql`TRUNCATE position_targets, position_exits, sim_positions, ledger_entries, fills, positions, sim_fills, sim_orders, order_intents, paper_accounts RESTART IDENTITY CASCADE`);
+    await db.execute(sql`TRUNCATE paper_funding, funding_rates, position_targets, position_exits, sim_positions, ledger_entries, fills, positions, sim_fills, sim_orders, order_intents, paper_accounts RESTART IDENTITY CASCADE`);
     console.log('Reset all paper trading state in this database.');
   }
   const ids: Record<string, string> = {};

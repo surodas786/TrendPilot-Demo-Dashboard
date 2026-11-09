@@ -1,4 +1,5 @@
 import { Decimal } from './decimal';
+import type { MarketSource } from './marketFeed';
 import { applyEmaFilter, type EmaResult } from './market';
 import { PLATFORM_CEILINGS, type OrderBlockSettings } from './orderBlock';
 import { previewOrder, type ContractSpec, type SidePreview } from './preview';
@@ -53,6 +54,8 @@ export interface PaperQuote {
   ask: string;
   mark: string;
   asOf: Date;
+  /** FIXTURE or MEXC_PUBLIC; recorded with every entry decision. Defaults to FIXTURE. */
+  source?: string;
 }
 
 export interface EntryInput {
@@ -100,7 +103,8 @@ export function evaluatePaperEntry(i: EntryInput): EntryEvaluation {
   if (ageMs > PAPER_POLICY.maxQuoteAgeSeconds * 1000 || ageMs < -PAPER_POLICY.quoteClockToleranceSeconds * 1000) {
     return { ok: false, reason: 'FEED_STALE', detail: { quoteAsOf: i.quote.asOf.toISOString(), ageSeconds: Math.round(ageMs / 1000) } };
   }
-  checks.quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString() };
+  const source: MarketSource = i.quote.source === 'MEXC_PUBLIC' ? 'MEXC_PUBLIC' : 'FIXTURE';
+  checks.quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString(), source };
 
   // Spread and price deviation (investor caps never exceed platform ceilings).
   const mid = D(i.quote.bid).plus(i.quote.ask).div(2);
@@ -119,7 +123,7 @@ export function evaluatePaperEntry(i: EntryInput): EntryEvaluation {
   if (!ema.pass) return { ok: false, reason: ema.reason, detail: ema.detail };
 
   // EXE-01 sizing from the executable side of the fresh quote.
-  const quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString(), source: 'FIXTURE' as const };
+  const quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString(), source };
   const preview = previewOrder({ ...i.settings, direction: i.side === 'LONG' ? 'LONG_ONLY' : 'SHORT_ONLY' }, i.spec, quote);
   const s = preview.sides[0]!;
   const codes = s.reasons.map((r) => r.code);

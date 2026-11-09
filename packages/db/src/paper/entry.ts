@@ -19,7 +19,10 @@ import { enqueueJob, completeJob, type JobRow } from '../jobs';
 import { fills, instruments, orderBlocks, orderIntents, positions, positionTargets, signalDecisions, signalEvents, strategyVersions } from '../schema';
 import { availableOf, book, lockPaperAccount } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
-import { inspectProtection, lookupOrder, placeOpeningOrderWithStop, type SimResult } from './simulator';
+import type { SimResult } from './simulator';
+import { resolveVenue } from '../venue/select';
+import type { ExecutionVenue } from '../venue/types';
+import { requestExit } from './exits';
 
 /**
  * STR-01/02 paper entries from a confirmed flat scope (EXE-01…04, ARC-02).
@@ -177,6 +180,16 @@ export async function evaluateAndReserveEntry(
 export interface SubmitHooks {
   /** Test/demo seam: runs after the simulator filled the order, before the platform records it. */
   afterSimulatorFill?: () => void | Promise<void>;
+  /** Test seam: execute through this venue (e.g. the MEXC adapter over a mocked exchange). Refused in production. */
+  venue?: ExecutionVenue;
+}
+
+/** The venue knows nothing about an uncertain submission yet: retry later; never resubmit blind. */
+export class AwaitingReconciliation extends Error {
+  constructor(clientOrderId: string, waitedMs: number) {
+    super(`Order ${clientOrderId} was submitted ${Math.round(waitedMs / 1000)} s ago and is not visible at the venue yet; reconciling before any resubmission.`);
+    this.name = 'AwaitingReconciliation';
+  }
 }
 
 export interface SubmitSummary {
@@ -207,7 +220,7 @@ async function release(tx: Executor, intent: IntentRow, state: 'CANCELLED' | 'EX
   ]);
 }
 
-async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, now: Date, reconciled: boolean): Promise<SubmitSummary> {
+async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, now: Date, reconciled: boolean, venue: ExecutionVenue): Promise<SubmitSummary> {
   return db.transaction(async (tx) => {
     const [cur] = await tx.select().from(orderIntents).where(eq(orderIntents.id, intent.id)).for('update');
     if (cur!.state === 'FILLED' || cur!.state === 'REJECTED') {
@@ -242,7 +255,7 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
     const trailing = tr?.enabled && tr.distancePct ? trailingAtEntry(side, f.price, tr, inst!.priceTick, now) : {};
 
     // EXE-03: verify the venue's resting stop against the filled exposure. Never trust the ack alone.
-    const prot = await inspectProtection(db, sim.stop.orderId);
+    const prot = await venue.inspectProtection(sim.stop.orderId, cur!.instrumentId);
     const covers =
       !!prot &&
       prot.status === 'ACTIVE' &&
@@ -300,6 +313,11 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
       { kind: 'TRADING_FEE', bucket: 'WALLET', amount: new Decimal(f.fee).neg().toFixed(), refType: 'fill', refId: f.fillId, memo: 'Simulated taker fee' }
     ]);
     await tx.update(orderIntents).set({ state: 'FILLED', filledContracts: f.contracts, resolvedAt: now, stateReason: covers ? null : 'PROTECTION_UNVERIFIED', updatedAt: sql`now()` }).where(eq(orderIntents.id, cur!.id));
+    // OPS-03: exposure without a verified stop is closed at once (emergency close, reduce-only).
+    if (pos && !covers) {
+      const [row] = await tx.select().from(positions).where(eq(positions.id, pos.id));
+      await requestExit(tx, { position: row!, reason: 'PROTECTION_FAILURE', now });
+    }
     await completeJob(tx, job);
     const [p] = pos ? [pos] : await tx.select({ id: positions.id }).from(positions).where(eq(positions.openIntentId, cur!.id));
     return { intentId: cur!.id, state: 'FILLED', positionId: p?.id, reconciled, ...(covers ? {} : { reason: 'PROTECTION_FAILED' }) };
@@ -345,18 +363,23 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
   if (step.kind === 'stopped') return { intentId, state: step.intent.state === 'INTENT' ? (step.reason === 'DAY_DISABLED' ? 'CANCELLED' : 'EXPIRED') : step.intent.state, reason: step.reason, reconciled: false };
 
   const intent = step.intent;
+  const venue = resolveVenue(db, intent.mode, hooks.venue);
   let sim: SimResult | null = null;
   let reconciled = false;
   if (step.kind === 'reconcile') {
     // ARC-02: an earlier attempt may have reached the venue. Look it up before sending anything.
-    sim = await lookupOrder(db, intent.clientOrderId);
+    sim = await venue.lookupOrder(intent.clientOrderId, intent.instrumentId);
     reconciled = sim !== null;
+    // A live venue may not show an accepted order at once: absence counts only after its grace period.
+    const grace = (venue as { reconcileGraceMs?: number }).reconcileGraceMs ?? 0;
+    const waited = now.getTime() - (intent.submittedAt?.getTime() ?? 0);
+    if (!sim && grace > 0 && waited < grace) throw new AwaitingReconciliation(intent.clientOrderId, waited);
   }
   if (!sim) {
     const [inst] = await db.select().from(instruments).where(eq(instruments.id, intent.instrumentId));
     const q = step.kind === 'submit' ? step.quote : await latestQuote(db, intent.instrumentId, now);
     if (!q) throw new Error('No quote available for submission.');
-    sim = await placeOpeningOrderWithStop(db, {
+    sim = await venue.placeOpeningOrderWithStop({
       paperAccountId: intent.paperAccountId,
       clientOrderId: intent.clientOrderId,
       instrumentId: intent.instrumentId,
@@ -365,9 +388,11 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
       contract: { multiplier: inst!.contractMultiplier, qtyStep: inst!.qtyStep, minQty: inst!.minQty, takerFeeRate: inst!.takerFeeRate },
       quote: { bid: q.bid, ask: q.ask },
       stop: { price: intent.stopPrice, basis: intent.stopBasis },
-      now
+      now,
+      leverage: intent.leverage,
+      marginMode: intent.marginMode as 'ISOLATED' | 'CROSS'
     });
     if (sim.status === 'FILLED') await hooks.afterSimulatorFill?.();
   }
-  return record(db, job, intent, sim, now, reconciled);
+  return record(db, job, intent, sim, now, reconciled, venue);
 }

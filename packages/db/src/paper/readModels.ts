@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { Decimal } from '@trendpilot/domain';
+import { Decimal, marketSourceLabel, type MarketSource } from '@trendpilot/domain';
 import type { Executor } from '../client';
-import { fills, instruments, ledgerEntries, orderIntents, paperAccounts, positionExits, positions, positionTargets, signalDecisions, signalEvents } from '../schema';
+import { fills, instruments, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions, positionTargets, signalDecisions, signalEvents } from '../schema';
 
 /**
  * Investor read models for paper trading (UI-02 Holdings, UI-04 My Trades, §10.1 /me routes).
@@ -304,6 +304,23 @@ export interface TradeDetailDto extends PositionDto {
   reversal: ReversalDto | null;
   /** On a position opened by a reversal: the position it replaced. */
   reversedFromPositionId: string | null;
+  /** Price data the entry was evaluated on. Fills are always simulated (Paper). */
+  marketData: { source: MarketSource; label: string; quoteAsOf: string | null; emaSource: string | null; execution: 'PAPER_SIMULATOR' };
+  /** REP-02 simulated funding booked to this position, one row per settlement. */
+  funding: FundingDto[];
+  fundingUsdt: string;
+  /** REP-03: gross realized − all fees + booked funding. */
+  netRealizedWithFundingUsdt: string;
+}
+
+export interface FundingDto {
+  settledAt: string;
+  rate: string;
+  contracts: string;
+  markPrice: string;
+  notionalUsdt: string;
+  amountUsdt: string;
+  source: string;
 }
 
 async function reversalOf(db: Executor, ownerId: string, pos: PositionDto): Promise<ReversalDto | null> {
@@ -343,15 +360,23 @@ export async function getMyTrade(db: Executor, ownerId: string, positionId: stri
   }));
   const closeOrders = await hydrateOrders(db, await orderSelect(db).where(and(eq(orderIntents.positionId, pos.id), eq(orderIntents.ownerId, ownerId))).orderBy(orderIntents.createdAt));
   const refs = new Set([order.id, ...order.fills.map((f) => f.exchangeFillId), ...exits.map((x) => x.exchangeFillId)]);
-  const ledger = (await listMyLedger(db, ownerId)).filter((l) => refs.has(l.refId));
+  const ledger = (await listMyLedger(db, ownerId)).filter((l) => refs.has(l.refId) || l.refId.startsWith(`funding:${pos.id}:`));
   const targets = (await targetsByPosition(db, ownerId, [pos.id])).get(pos.id) ?? [];
   const [openDecision] = await db
     .select({ detail: signalDecisions.detail })
     .from(orderIntents)
     .innerJoin(signalDecisions, eq(signalDecisions.id, orderIntents.decisionId))
     .where(and(eq(orderIntents.id, pos.orderId), eq(orderIntents.ownerId, ownerId)));
-  const reversedFromPositionId = (openDecision?.detail as { fromPositionId?: string } | undefined)?.fromPositionId ?? null;
-  return { ...pos, targets, order, exits, closeOrders, ledger, reversal: await reversalOf(db, ownerId, pos), reversedFromPositionId };
+  const openDetail = openDecision?.detail as { fromPositionId?: string; checks?: { quote?: { source?: string; asOf?: string }; ema?: { source?: string | null } } } | undefined;
+  const reversedFromPositionId = openDetail?.fromPositionId ?? null;
+  // Decisions made before Step 8 carry no source: those were always fixtures.
+  const source: MarketSource = openDetail?.checks?.quote?.source === 'MEXC_PUBLIC' ? 'MEXC_PUBLIC' : 'FIXTURE';
+  const marketData = { source, label: marketSourceLabel(source), quoteAsOf: openDetail?.checks?.quote?.asOf ?? null, emaSource: openDetail?.checks?.ema?.source ?? null, execution: 'PAPER_SIMULATOR' as const };
+  const fundingRows = await db.select().from(paperFunding).where(and(eq(paperFunding.positionId, pos.id), eq(paperFunding.ownerId, ownerId))).orderBy(asc(paperFunding.settledAt));
+  const funding = fundingRows.map((f) => ({ settledAt: f.settledAt.toISOString(), rate: n(f.rate)!, contracts: n(f.contracts)!, markPrice: n(f.markPrice)!, notionalUsdt: n(f.notional)!, amountUsdt: n(f.amount)!, source: f.source }));
+  const fundingUsdt = fundingRows.reduce((t, f) => t.plus(f.amount), new Decimal(0)).toFixed();
+  const netRealizedWithFundingUsdt = new Decimal(pos.netRealizedUsdt).plus(fundingUsdt).toFixed();
+  return { ...pos, targets, order, exits, closeOrders, ledger, reversal: await reversalOf(db, ownerId, pos), reversedFromPositionId, marketData, funding, fundingUsdt, netRealizedWithFundingUsdt };
 }
 
 /** GET /v1/me/commands/{id}: status of a close command the investor submitted (owner-scoped). */

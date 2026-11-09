@@ -1,4 +1,4 @@
-import { fixtureQuote, getDb, getInstrument, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
+import { fixtureQuote, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
 import {
   assertModeAllowed,
   catalogIssues,
@@ -11,13 +11,16 @@ import {
   orderBlockSettingsSchema,
   parseWith,
   previewOrder,
+  quoteAgeState,
   settingsOf,
   type OrderPreview,
   type OrderBlockSettings,
   type BlockStatus,
   type Issue,
-  type OrderBlockDto
+  type OrderBlockDto,
+  type Quote
 } from '@trendpilot/domain';
+import { now } from './clock';
 import { validationError } from './http';
 
 /**
@@ -175,8 +178,19 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
 
 /* ───────────── EXE-01 order preview (fixture quote, no orders) ───────────── */
 
-function previewWith(instrument: InstrumentDto, settings: OrderBlockSettings): OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null } } {
-  const quote = fixtureQuote(instrument.symbol);
+/**
+ * A fresh public MEXC quote when the feed is running (MKT-01), otherwise the labelled static
+ * fixture. The preview always says which one it used.
+ */
+async function previewQuote(instrument: InstrumentDto): Promise<Quote | undefined> {
+  const at = now();
+  const q = await latestQuote(getDb(), instrument.id, at);
+  if (q && q.source === 'MEXC_PUBLIC' && quoteAgeState(q.asOf, at) === 'FRESH') return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf.toISOString(), source: 'MEXC_PUBLIC' };
+  return fixtureQuote(instrument.symbol);
+}
+
+async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettings): Promise<OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null } }> {
+  const quote = await previewQuote(instrument);
   if (!quote) throw new DomainError(422, ErrorCode.VALIDATION_FAILED, `No fixture quote is available for ${instrument.symbol}.`);
   const spec = {
     contractMultiplier: instrument.contract.multiplier,
