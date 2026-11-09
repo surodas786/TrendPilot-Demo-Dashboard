@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { DomainError, ErrorCode, type SignalRouteCreate } from '@trendpilot/domain';
 import type { Executor } from '../client';
+import { latestPublishedVersion, openPositionsFor, routeHistory } from './routeAdmin';
 import { instruments, jobs, signalDecisions, signalEvents, signalRejections, signalRoutes, strategyPackages } from '../schema';
 
 /** Operations views for administrators. Aggregates only: no investor identity or private settings. */
@@ -15,11 +16,16 @@ export interface SignalRouteDto {
   action: string;
   kind: 'ACTIONABLE' | 'INFO_ONLY';
   instrument: { id: string; symbol: string };
-  package: { id: string; name: string };
+  /** `latest` = newest published version: its real timeframe, whatever the package name says. */
+  package: { id: string; name: string; latest: { version: number; timeframe: string } | null };
   maxSignalAgeSeconds: number;
   clockToleranceSeconds: number;
   enabled: boolean;
   revision: number;
+  /** Signal history: a route with any cannot be deleted, only disabled. */
+  history: { events: number; rejections: number };
+  /** Open positions on this contract and lineage (their exits arrive through routes). */
+  openPositions: number;
 }
 
 export async function listSignalRoutes(db: Executor): Promise<SignalRouteDto[]> {
@@ -29,6 +35,13 @@ export async function listSignalRoutes(db: Executor): Promise<SignalRouteDto[]> 
     .innerJoin(instruments, eq(instruments.id, signalRoutes.instrumentId))
     .innerJoin(strategyPackages, eq(strategyPackages.id, signalRoutes.packageId))
     .orderBy(signalRoutes.sourceSymbol, signalRoutes.interval, signalRoutes.action);
+  const latest = new Map<string, { version: number; timeframe: string } | null>();
+  for (const pid of new Set(rows.map((x) => x.r.packageId))) {
+    const v = await latestPublishedVersion(db, pid);
+    latest.set(pid, v ? { version: v.version, timeframe: v.timeframe } : null);
+  }
+  const extra = new Map<string, { history: { events: number; rejections: number }; openPositions: number }>();
+  for (const { r } of rows) extra.set(r.id, { history: await routeHistory(db, r.id), openPositions: await openPositionsFor(db, r.instrumentId, r.packageId) });
   return rows.map(({ r, symbol, packageName }) => ({
     id: r.id,
     ingressId: r.ingressId,
@@ -39,11 +52,12 @@ export async function listSignalRoutes(db: Executor): Promise<SignalRouteDto[]> 
     action: r.action,
     kind: r.kind,
     instrument: { id: r.instrumentId, symbol },
-    package: { id: r.packageId, name: packageName },
+    package: { id: r.packageId, name: packageName, latest: latest.get(r.packageId) ?? null },
     maxSignalAgeSeconds: r.maxSignalAgeSeconds,
     clockToleranceSeconds: r.clockToleranceSeconds,
     enabled: r.enabled,
-    revision: r.revision
+    revision: r.revision,
+    ...extra.get(r.id)!
   }));
 }
 

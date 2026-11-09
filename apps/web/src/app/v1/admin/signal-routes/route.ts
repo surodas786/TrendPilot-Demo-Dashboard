@@ -1,7 +1,8 @@
-import { createSignalRoute, getDb, getInstrument, listIngress, listSignalRoutes, recordAudit } from '@trendpilot/db';
+import { createSignalRoute, getDb, listIngress, listSignalRoutes, recordAudit } from '@trendpilot/db';
 import { DomainError, ErrorCode, signalRouteCreateSchema } from '@trendpilot/domain';
-import { json, parseBody, route, validationError } from '@/server/http';
+import { json, parseBody, route } from '@/server/http';
 import { requireAdmin } from '@/server/session';
+import { checkRouteTarget } from '@/server/signalRoutes';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,8 +16,7 @@ export const POST = route(async (req, { correlationId }) => {
   const { user } = await requireAdmin(req);
   const input = await parseBody(req, signalRouteCreateSchema);
   const db = getDb();
-  const inst = await getInstrument(db, input.instrumentId);
-  if (!inst || inst.status !== 'PUBLISHED') throw validationError([{ path: 'instrumentId', message: 'Select a published pair.' }]);
+  await checkRouteTarget(input);
   const [ingress] = await listIngress(db);
   if (!ingress) throw new DomainError(409, ErrorCode.CONFLICT, 'Create the TradingView webhook first.');
   const id = await db.transaction(async (tx) => {

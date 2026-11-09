@@ -40,6 +40,7 @@ export * from './paper/readModels';
 export * from './paper/reversal';
 export * from './paper/simulator';
 export * from './signals/admin';
+export * from './signals/routeAdmin';
 export * from './signals/dispatch';
 export * from './signals/ingress';
 export * from './signals/intake';
