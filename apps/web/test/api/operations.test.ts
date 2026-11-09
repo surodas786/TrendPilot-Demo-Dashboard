@@ -86,7 +86,7 @@ describe('fresh deployment (no seed): the first webhook', () => {
   it('an admin creates the TradingView webhook once; routes can then be added', async () => {
     await direct.db.execute(sql`TRUNCATE webhook_ingress CASCADE`);
     const pkgId = (await direct.db.select({ id: schema.strategyPackages.id }).from(schema.strategyPackages))[0]!.id;
-    const body = { name: 'BTC 5m bullish', sourceExchange: 'MEXC', sourceSymbol: 'BTCUSDT.P', interval: '5', action: 'BULLISH_FLIP', kind: 'ACTIONABLE', instrumentId: BTC, packageId: pkgId, maxSignalAgeSeconds: 120, clockToleranceSeconds: 5 };
+    const body = { name: 'BTC 15m bearish', sourceExchange: 'MEXC', sourceSymbol: 'BTCUSDT.P', interval: '15', action: 'BEARISH_FLIP', kind: 'ACTIONABLE', instrumentId: BTC, packageId: pkgId, maxSignalAgeSeconds: 120, clockToleranceSeconds: 5 };
     expect((await call(routes.POST, { method: 'POST', path: '/x', cookie: admin, body })).status).toBe(409);
     expect((await call(rotate.POST, { method: 'POST', path: '/x', cookie: investor })).status).toBe(403);
     const r = await call(rotate.POST, { method: 'POST', path: '/x', cookie: admin });

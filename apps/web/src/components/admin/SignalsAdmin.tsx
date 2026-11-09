@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { KeyRoundIcon, PlusIcon } from 'lucide-react';
+import { KeyRoundIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react';
 import { toast } from 'sonner';
 import type { InstrumentDto, PackageDto, SignalEventOpsDto, SignalRouteDto } from '@trendpilot/db';
 import { SIGNAL_ACTIONS, type SignalAction } from '@trendpilot/domain';
@@ -35,24 +35,115 @@ interface Props {
   timezone: string;
 }
 
+type RouteForm = {
+  name: string;
+  sourceExchange: string;
+  sourceSymbol: string;
+  interval: '5' | '15';
+  action: SignalAction;
+  kind: 'ACTIONABLE' | 'INFO_ONLY';
+  instrumentId: string;
+  packageId: string;
+  maxSignalAgeSeconds: string;
+  clockToleranceSeconds: string;
+};
+
+const formFrom = (r: SignalRouteDto): RouteForm => ({
+  name: r.name,
+  sourceExchange: r.sourceExchange,
+  sourceSymbol: r.sourceSymbol,
+  interval: r.interval as '5' | '15',
+  action: r.action as SignalAction,
+  kind: r.kind,
+  instrumentId: r.instrument.id,
+  packageId: r.package.id,
+  maxSignalAgeSeconds: String(r.maxSignalAgeSeconds),
+  clockToleranceSeconds: String(r.clockToleranceSeconds)
+});
+
+/** The lineage's real current timeframe, so a package name like "… 15m" cannot hide that v2 runs 5m. */
+const latestOf = (p: PackageDto) => p.versions.find((v) => v.isLatest) ?? null;
+const lineageLabel = (p: PackageDto) => {
+  const v = latestOf(p);
+  return v ? `${p.name} — current v${v.version}: ${v.timeframe}` : `${p.name} — no published version`;
+};
+
+function TimeframeTag({ latest, interval }: { latest: { version: number; timeframe: string } | null; interval: string }) {
+  if (!latest) return <StatusPill tone="warn">no published version</StatusPill>;
+  const match = latest.timeframe === `${interval}m`;
+  return (
+    <StatusPill tone={match ? 'neutral' : 'warn'}>
+      <span data-testid="lineage-timeframe">
+        v{latest.version} · {latest.timeframe}
+        {match ? '' : ` ≠ route ${interval}m`}
+      </span>
+    </StatusPill>
+  );
+}
+
+function RouteFields({ form, setForm, errors, instruments, packages }: { form: RouteForm; setForm: (f: RouteForm) => void; errors: Record<string, string>; instruments: InstrumentDto[]; packages: PackageDto[] }) {
+  const pkg = packages.find((p) => p.id === form.packageId);
+  const latest = pkg ? latestOf(pkg) : null;
+  return (
+    <>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <TextField label="Route name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} error={errors.name} />
+        <TextField label="Source exchange ({{exchange}})" value={form.sourceExchange} onChange={(v) => setForm({ ...form, sourceExchange: v })} error={errors.sourceExchange} />
+        <TextField label="Source ticker ({{ticker}})" placeholder="BTCUSDT.P" value={form.sourceSymbol} onChange={(v) => setForm({ ...form, sourceSymbol: v })} error={errors.sourceSymbol} />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div>
+          <SegmentedControl<'5' | '15'> label="Interval" value={form.interval} onChange={(v) => setForm({ ...form, interval: v })} options={[{ value: '5', label: '5m' }, { value: '15', label: '15m' }]} />
+          {errors.interval && <p className="mt-1 text-xs text-loss">{errors.interval}</p>}
+        </div>
+        <FilterSelect label="Action" value={form.action} onChange={(v) => setForm({ ...form, action: v as SignalAction })} options={SIGNAL_ACTIONS.map((a) => ({ value: a, label: a }))} />
+        <SegmentedControl<'ACTIONABLE' | 'INFO_ONLY'> label="Kind" value={form.kind} onChange={(v) => setForm({ ...form, kind: v })} options={[{ value: 'ACTIONABLE', label: 'Actionable' }, { value: 'INFO_ONLY', label: 'Info only' }]} />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-4">
+        <div>
+          <FilterSelect label="Execution contract" value={form.instrumentId} onChange={(v) => setForm({ ...form, instrumentId: v })} options={instruments.map((i) => ({ value: i.id, label: `${i.symbol} (MEXC ${i.exchangeSymbol})` }))} />
+          {errors.instrumentId && <p className="mt-1 text-xs text-loss">{errors.instrumentId}</p>}
+        </div>
+        <div>
+          <FilterSelect label="Strategy lineage" value={form.packageId} onChange={(v) => setForm({ ...form, packageId: v })} options={packages.map((p) => ({ value: p.id, label: lineageLabel(p) }))} />
+          {latest && (
+            <p className={`mt-1 text-xs ${latest.timeframe === `${form.interval}m` ? 'text-subtle' : 'text-warn'}`} data-testid="form-lineage-timeframe">
+              Current version v{latest.version} uses {latest.timeframe}
+              {latest.timeframe === `${form.interval}m` ? '' : `; this route is ${form.interval}m`}
+            </p>
+          )}
+          {errors.packageId && <p className="mt-1 text-xs text-loss">{errors.packageId}</p>}
+        </div>
+        <TextField label="Max signal age (s)" inputMode="numeric" value={form.maxSignalAgeSeconds} onChange={(v) => setForm({ ...form, maxSignalAgeSeconds: v })} error={errors.maxSignalAgeSeconds} />
+        <TextField label="Clock tolerance (s)" inputMode="numeric" value={form.clockToleranceSeconds} onChange={(v) => setForm({ ...form, clockToleranceSeconds: v })} error={errors.clockToleranceSeconds} />
+      </div>
+    </>
+  );
+}
+
+const bodyOf = (f: RouteForm) => ({ ...f, maxSignalAgeSeconds: Number(f.maxSignalAgeSeconds), clockToleranceSeconds: Number(f.clockToleranceSeconds) });
+const formErrors = (r: { issues: { path: string; message: string }[]; message: string }) => (r.issues.length ? issueMap(r.issues) : { form: r.message });
+
 /** UI-05 TradingView Webhook and Signal Routes, with operations views (counts only, no investor data). */
 export function SignalsAdmin({ ingress, routes, instruments, packages, events, rejections, timezone }: Props) {
   const router = useRouter();
   const [revealed, setRevealed] = useState<string | null>(null);
   const [confirmRotate, setConfirmRotate] = useState(false);
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<RouteForm>({
     name: '',
     sourceExchange: 'MEXC',
     sourceSymbol: '',
-    interval: '15' as '5' | '15',
-    action: 'BULLISH_FLIP' as SignalAction,
-    kind: 'ACTIONABLE' as 'ACTIONABLE' | 'INFO_ONLY',
+    interval: '15',
+    action: 'BULLISH_FLIP',
+    kind: 'ACTIONABLE',
     instrumentId: instruments[0]?.id ?? '',
     packageId: packages[0]?.id ?? '',
     maxSignalAgeSeconds: '120',
     clockToleranceSeconds: '5'
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState<{ route: SignalRouteDto; form: RouteForm; errors: Record<string, string> } | null>(null);
+  const [deleting, setDeleting] = useState<SignalRouteDto | null>(null);
   const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: timezone });
 
   const rotate = async () => {
@@ -65,9 +156,7 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
 
   const createRoute = async (e: React.FormEvent) => {
     e.preventDefault();
-    const r = await request('POST', '/v1/admin/signal-routes', {
-      body: { ...form, maxSignalAgeSeconds: Number(form.maxSignalAgeSeconds), clockToleranceSeconds: Number(form.clockToleranceSeconds) }
-    });
+    const r = await request('POST', '/v1/admin/signal-routes', { body: bodyOf(form) });
     if (!r.ok) {
       setErrors(r.issues.length ? issueMap(r.issues) : { sourceSymbol: r.message });
       return;
@@ -77,10 +166,40 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     router.refresh();
   };
 
+  const saveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    const r = await request('PUT', `/v1/admin/signal-routes/${editing.route.id}`, { body: bodyOf(editing.form), revision: editing.route.revision });
+    if (!r.ok) {
+      setEditing({ ...editing, errors: formErrors(r) });
+      if (r.code === 'REVISION_CONFLICT') router.refresh();
+      return;
+    }
+    toast.success('Route updated');
+    setEditing(null);
+    router.refresh();
+  };
+
   const toggle = async (route: SignalRouteDto) => {
     const r = await request('PATCH', `/v1/admin/signal-routes/${route.id}`, { body: { enabled: !route.enabled }, revision: route.revision });
-    if (!r.ok) toast.error(r.message);
+    if (!r.ok) toast.error(r.message, { duration: 10_000 });
     router.refresh();
+  };
+
+  const remove = async () => {
+    const route = deleting;
+    setDeleting(null);
+    if (!route) return;
+    const r = await request('DELETE', `/v1/admin/signal-routes/${route.id}`, { revision: route.revision });
+    if (!r.ok) toast.error(r.message, { duration: 10_000 });
+    else toast.success('Route deleted');
+    router.refresh();
+  };
+
+  const disableInstead = async () => {
+    const route = deleting;
+    setDeleting(null);
+    if (route) await toggle(route);
   };
 
   return (
@@ -147,6 +266,7 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
                 <th className="px-4 py-2.5 font-medium">Contract · lineage</th>
                 <th className="px-4 py-2.5 font-medium">Max age</th>
                 <th className="px-4 py-2.5 font-medium">State</th>
+                <th className="px-4 py-2.5 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
@@ -161,7 +281,13 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
                     <StatusPill tone={r.kind === 'ACTIONABLE' ? 'accent' : 'neutral'}>{r.kind === 'ACTIONABLE' ? 'Actionable' : 'Information only'}</StatusPill>
                   </td>
                   <td className="px-4 py-2.5 text-xs text-muted">
-                    {r.instrument.symbol} · {r.package.name}
+                    <div>
+                      {r.instrument.symbol} · {r.package.name}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <TimeframeTag latest={r.package.latest} interval={r.interval} />
+                      {r.openPositions > 0 && <span className="text-[11px] text-subtle">{r.openPositions} open position(s)</span>}
+                    </div>
                   </td>
                   <td className="px-4 py-2.5 text-muted">{r.maxSignalAgeSeconds}s</td>
                   <td className="px-4 py-2.5">
@@ -169,29 +295,42 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
                       {r.enabled ? 'Enabled — disable' : 'Disabled — enable'}
                     </Button>
                   </td>
+                  <td className="px-4 py-2.5">
+                    <span className="flex gap-1.5">
+                      <Button size="sm" icon={PencilIcon} onClick={() => setEditing({ route: r, form: formFrom(r), errors: {} })} aria-label={`Edit route ${r.name}`}>
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="ghost" icon={Trash2Icon} onClick={() => setDeleting(r)} aria-label={`Delete route ${r.name}`}>
+                        Delete
+                      </Button>
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {editing && (
+          <form onSubmit={saveEdit} className="space-y-3 rounded-xl border border-accent/40 bg-surface p-4" noValidate data-testid="edit-route-form">
+            <p className="text-sm font-medium text-ink">
+              Edit route “{editing.route.name}”{' '}
+              <span className="text-xs font-normal text-subtle">
+                ({editing.route.history.events} event(s), {editing.route.history.rejections} rejection(s) recorded)
+              </span>
+            </p>
+            <RouteFields form={editing.form} setForm={(f) => setEditing({ ...editing, form: f })} errors={editing.errors} instruments={instruments} packages={packages} />
+            {editing.errors.form && <p className="rounded-lg border border-loss/40 bg-loss/10 p-2 text-xs text-loss">{editing.errors.form}</p>}
+            <span className="flex gap-2">
+              <Button type="submit" variant="primary">
+                Save changes
+              </Button>
+              <Button onClick={() => setEditing(null)}>Cancel</Button>
+            </span>
+          </form>
+        )}
         <form onSubmit={createRoute} className="space-y-3 rounded-xl border border-line bg-surface p-4" noValidate>
           <p className="text-sm font-medium text-ink">Add a route</p>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <TextField label="Route name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} error={errors.name} />
-            <TextField label="Source exchange ({{exchange}})" value={form.sourceExchange} onChange={(v) => setForm({ ...form, sourceExchange: v })} error={errors.sourceExchange} />
-            <TextField label="Source ticker ({{ticker}})" placeholder="BTCUSDT.P" value={form.sourceSymbol} onChange={(v) => setForm({ ...form, sourceSymbol: v })} error={errors.sourceSymbol} />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <SegmentedControl<'5' | '15'> label="Interval" value={form.interval} onChange={(v) => setForm({ ...form, interval: v })} options={[{ value: '5', label: '5m' }, { value: '15', label: '15m' }]} />
-            <FilterSelect label="Action" value={form.action} onChange={(v) => setForm({ ...form, action: v as SignalAction })} options={SIGNAL_ACTIONS.map((a) => ({ value: a, label: a }))} />
-            <SegmentedControl<'ACTIONABLE' | 'INFO_ONLY'> label="Kind" value={form.kind} onChange={(v) => setForm({ ...form, kind: v })} options={[{ value: 'ACTIONABLE', label: 'Actionable' }, { value: 'INFO_ONLY', label: 'Info only' }]} />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-4">
-            <FilterSelect label="Execution contract" value={form.instrumentId} onChange={(v) => setForm({ ...form, instrumentId: v })} options={instruments.map((i) => ({ value: i.id, label: i.symbol }))} />
-            <FilterSelect label="Strategy lineage" value={form.packageId} onChange={(v) => setForm({ ...form, packageId: v })} options={packages.map((p) => ({ value: p.id, label: p.name }))} />
-            <TextField label="Max signal age (s)" inputMode="numeric" value={form.maxSignalAgeSeconds} onChange={(v) => setForm({ ...form, maxSignalAgeSeconds: v })} error={errors.maxSignalAgeSeconds} />
-            <TextField label="Clock tolerance (s)" inputMode="numeric" value={form.clockToleranceSeconds} onChange={(v) => setForm({ ...form, clockToleranceSeconds: v })} error={errors.clockToleranceSeconds} />
-          </div>
+          <RouteFields form={form} setForm={setForm} errors={errors} instruments={instruments} packages={packages} />
           <Button type="submit" icon={PlusIcon} variant="primary" disabled={!form.name || !form.sourceSymbol}>
             Create route
           </Button>
@@ -261,6 +400,27 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
           {rejections.length === 0 && <li className="px-4 py-3 text-subtle">No rejections.</li>}
         </ul>
       </section>
+
+      {deleting && (deleting.history.events > 0 || deleting.history.rejections > 0) ? (
+        <ConfirmDialog
+          open
+          title="This route cannot be deleted"
+          description={`“${deleting.name}” has signal history (${deleting.history.events} accepted event(s), ${deleting.history.rejections} rejection(s)) that must stay traceable. ${deleting.enabled ? 'You can disable it instead: it will stop matching alerts but keep its history.' : 'It is already disabled.'}`}
+          confirmLabel={deleting.enabled ? 'Disable route' : 'Close'}
+          onConfirm={deleting.enabled ? disableInstead : () => setDeleting(null)}
+          onCancel={() => setDeleting(null)}
+        />
+      ) : (
+        <ConfirmDialog
+          open={deleting !== null}
+          title="Delete this route permanently?"
+          description={deleting ? `“${deleting.name}” (${deleting.sourceExchange}:${deleting.sourceSymbol} ${deleting.interval}m ${deleting.action}) has no signal history. Deleting it cannot be undone.` : ''}
+          confirmLabel="Delete route"
+          tone="danger"
+          onConfirm={remove}
+          onCancel={() => setDeleting(null)}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmRotate}
