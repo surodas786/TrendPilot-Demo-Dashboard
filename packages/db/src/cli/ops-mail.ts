@@ -1,7 +1,7 @@
 /**
- * Prints the newest captured email to an address (invite, reset, notices). This build has no SMTP
- * transport: mail is captured in `email_outbox`. On staging, the operator relays invite and reset
- * links from this console. Requires database access; it is not reachable over HTTP.
+ * Prints the newest email stored for an address (invite, reset, notices). Every email is kept in
+ * `email_outbox`; with EMAIL_DELIVERY=capture nothing is sent and the operator relays invite and
+ * reset links from this console. With SMTP (Admin → Settings → Mail Box) it is also sent. Requires database access; it is not reachable over HTTP.
  *
  *   npm run ops:mail -- --to investor@example.com [--template INVITE|RESET]
  */

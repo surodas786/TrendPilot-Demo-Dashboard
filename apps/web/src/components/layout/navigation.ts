@@ -7,7 +7,9 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
+  MailIcon,
   RadioTowerIcon,
+  SettingsIcon,
   ScrollTextIcon,
   SlidersHorizontalIcon,
   UserRoundIcon,
@@ -23,6 +25,8 @@ export interface NavItem {
   icon: LucideIcon;
   /** Shown but not yet built (later milestones). */
   pending?: boolean;
+  /** A menu group: `path` is the group's route prefix; children are its submenu. */
+  children?: NavItem[];
 }
 
 /** PRD §2.2 investor screens (MagicPatterns consolidated navigation). */
@@ -43,11 +47,18 @@ const adminNav: NavItem[] = [
   { path: '/admin/operations', label: 'Operations', icon: ServerCogIcon },
   { path: '/admin/market-data', label: 'Market Data Feed', icon: ActivityIcon },
   { path: '/admin/audit', label: 'Audit Log', icon: ScrollTextIcon },
+  {
+    path: '/admin/settings',
+    label: 'Settings',
+    icon: SettingsIcon,
+    children: [{ path: '/admin/settings/mail-box', label: 'Mail Box', icon: MailIcon }]
+  },
   { path: '/admin/security', label: 'My Security', icon: KeyRoundIcon }
 ];
 
 export const navFor = (role: ShellRole) => (role === 'ADMIN' ? adminNav : investorNav);
 
 export function pageTitle(pathname: string, role: ShellRole): string {
-  return navFor(role).find((i) => i.path === pathname)?.label ?? 'TrendPilot';
+  const flat = navFor(role).flatMap((i) => [i, ...(i.children ?? [])]);
+  return flat.find((i) => i.path === pathname)?.label ?? 'TrendPilot';
 }

@@ -712,3 +712,13 @@ B's Dashboard then shows funding *Booked*, and B's trade lists it.
 - **Readiness:** `GET /v1/admin/live-pilot` lists every item for the first supervised trade and for expansion (today: not ready — see the runbook).
 - **Dry run:** `apps/web/test/api/pilotRehearsal.test.ts` runs the planned flow against mocked MEXC responses and writes `test-results/pilot-rehearsal.md` (redacted requests, results, reconciliation, readiness).
 - **Runbook:** [`docs/LIVE_PILOT_RUNBOOK.md`](docs/LIVE_PILOT_RUNBOOK.md).
+
+## Admin → Settings → Mail Box (outgoing email)
+
+- **Where:** Admin menu → **Settings** → **Mail Box** (`/admin/settings/mail-box`). Administrators only; API `GET|PUT /v1/admin/settings/mail` and `POST /v1/admin/settings/mail/test`.
+- **Settings:** SMTP host, port, security (STARTTLS or implicit TLS; plain SMTP is not offered), username, password or app password, sender name and email, optional Reply-To. Validated server-side; saved with optimistic concurrency (`If-Match`).
+- **Password:** sealed with the platform secret box (AES-256-GCM, `DATA_ENCRYPTION_KEY`) in `mail_settings`. Never returned, logged or audited; the page shows only whether one is configured. A blank password keeps the stored one; **Remove** clears it.
+- **Send Test Email:** sends one message with the saved settings and shows the server's reply or a redacted error, plus the last test time and result. Limited to 5 per admin per 15 minutes. Settings changes and test attempts are audited (`ADMIN_MAIL_SETTINGS_UPDATE`, `ADMIN_MAIL_TEST_SEND`) without credentials.
+- **Delivery:** invitations, password resets and notices are still written to `email_outbox` in the same transaction as the change. `EMAIL_DELIVERY=capture` (default outside production; tests and e2e) stores them only, so `/dev/mail` and `npm run ops:mail` keep working. `EMAIL_DELIVERY=smtp` (default in production) also queues an `email.deliver` job; the worker sends it in a separate loop so mail never delays trading jobs. Results: `SENT`, retried on connection/timeout/4xx, or `FAILED` with the reason (including "SMTP is not configured"), shown under **Delivery** on the Mail Box page.
+- **Migration:** `0015_m5_mail_settings` (new `mail_settings` table; `email_outbox` delivery columns). Run `npm run db:migrate`.
+- **Tests:** `apps/web/test/api/mailBox.test.ts` (mocked SMTP), `apps/web/e2e/8-mail-box-settings.spec.ts`.

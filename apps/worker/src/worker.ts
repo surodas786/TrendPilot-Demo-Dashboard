@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { createDb, heartbeat, markStopped, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
 import { assertLiveTransportDisabled } from '@trendpilot/domain';
 
 /**
@@ -97,7 +97,29 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
     }
   };
 
+  // Mail Box: SMTP delivery runs in its own loop so a slow mail server never delays trading jobs.
+  // Logs carry the outbox id and a redacted result only, never message bodies or credentials.
+  let mailBusy: Promise<void> = Promise.resolve();
+  const pollMail = async () => {
+    if (stopping) return;
+    try {
+      for (;;) {
+        const r = await processNextEmailJob(handle.db, { workerId });
+        if (r.outcome === 'IDLE' || stopping) break;
+        if (r.outcome === 'FAILED' || r.outcome === 'RETRY') {
+          stats.failed += 1;
+          stats.lastError = `${r.job?.kind} ${r.outcome}: ${r.detail ?? ''}`.slice(0, 300);
+        }
+        log(`job ${r.job?.id} ${r.outcome}: email ${r.outboxId}${r.detail ? ` (${r.detail})` : ''}`);
+      }
+    } catch (e) {
+      log(`mail poll failed: ${(e as Error).message}`);
+    }
+  };
+  log(`email delivery: ${emailDeliveryMode(env) === 'smtp' ? 'SMTP (Admin → Settings → Mail Box)' : 'capture only (nothing is sent)'}`);
+
   const pollTimer = opts.processJobs === false ? null : setInterval(() => (busy = busy.then(poll)), opts.pollMs ?? Number(env.WORKER_POLL_MS ?? 1000));
+  const mailTimer = opts.processJobs === false ? null : setInterval(() => (mailBusy = mailBusy.then(pollMail)), Math.max(1000, opts.pollMs ?? Number(env.WORKER_POLL_MS ?? 1000)));
   const beatTimer = setInterval(async () => {
     try {
       await beat();
@@ -123,10 +145,12 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
     stop: async () => {
       stopping = true;
       if (pollTimer) clearInterval(pollTimer);
+      if (mailTimer) clearInterval(mailTimer);
       clearInterval(beatTimer);
       if (pruneStart) clearTimeout(pruneStart);
       if (pruneTimer) clearInterval(pruneTimer);
       await busy;
+      await mailBusy;
       await markStopped(handle.db, 'worker', workerId).catch(() => undefined);
       await handle.close();
       log('stopped');
@@ -150,6 +174,11 @@ export async function runOnce(opts: { env?: Record<string, string | undefined>; 
       if (r.outcome === 'IDLE') break;
       log(describe(r));
       results.push(r);
+    }
+    for (;;) {
+      const m = await processNextEmailJob(handle.db, { workerId: workerIdentity() });
+      if (m.outcome === 'IDLE') break;
+      log(`job ${m.job?.id} ${m.outcome}: email ${m.outboxId}${m.detail ? ` (${m.detail})` : ''}`);
     }
     log(results.length ? `processed ${results.length} job(s)` : 'no runnable jobs');
     return results;

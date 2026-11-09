@@ -36,6 +36,8 @@ export default defineConfig({
       SIGNAL_TEST_CLOCK: '2026-11-08T09:30:03Z',
       ALLOW_SIGNAL_TEST_CLOCK: 'true',
       LIVE_ORDER_TRANSPORT: 'disabled',
+      // Production build, but email stays captured in the outbox: e2e never sends real mail.
+      EMAIL_DELIVERY: 'capture',
       NEXT_TELEMETRY_DISABLED: '1'
     }
   }

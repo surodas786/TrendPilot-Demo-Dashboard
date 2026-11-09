@@ -24,9 +24,11 @@
     "@node-rs/argon2": "^2.0.2",
     "@trendpilot/domain": "0.1.0",
     "drizzle-orm": "^0.45.4",
+    "nodemailer": "10.2.1",
     "pg": "^8.16.3"
   },
   "devDependencies": {
+    "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.15.5",
     "drizzle-kit": "^0.31.4"
   }

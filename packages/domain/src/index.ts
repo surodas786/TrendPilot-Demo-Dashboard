@@ -3,6 +3,7 @@ export * from './decimal';
 export * from './errors';
 export * from './exits';
 export * from './liveTransport';
+export * from './mailSettings';
 export * from './market';
 export * from './marketFeed';
 export * from './orderBlock';

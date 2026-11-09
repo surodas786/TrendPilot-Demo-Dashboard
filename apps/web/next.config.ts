@@ -6,7 +6,7 @@ const config: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   transpilePackages: ['@trendpilot/domain', '@trendpilot/db'],
-  serverExternalPackages: ['pg', '@node-rs/argon2'],
+  serverExternalPackages: ['pg', '@node-rs/argon2', 'nodemailer'],
   // SIG-01: the webhook URL contains the ingress token. Never print it in the dev request log.
   // (Production builds do not log incoming requests.)
   logging: { incomingRequests: { ignore: [/\/v1\/webhooks\//] } },
