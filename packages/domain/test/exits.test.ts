@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceTrailing, basisPrice, decideSignalExit, marginRelease, planTargets, realizedPnl, stopReached, takeProfitPrice, takeProfitReached, targetStatusAfter, trailingActivationPrice, trailingLevelFrom, type TrailingState } from '../src';
+import { advanceTrailing, basisPrice, decideSignalExit, marginRelease, planTargets, realizedPnl, stopReached, takeProfitPrice, takeProfitReached, targetStatusAfter, trailingActivationPrice, trailingLevelFrom, trailingTakeProfitContracts, type TrailingState } from '../src';
 
 describe('fixed take profit', () => {
   it('targets the configured move from the confirmed entry, rounded toward entry', () => {
@@ -119,5 +119,89 @@ describe('trailing stop (EXT-04)', () => {
     expect(advanceTrailing('SHORT', s, '64500', cfg).state).toBe(s);
     expect(advanceTrailing('SHORT', s, '64639.9', cfg).triggered).toBe(false);
     expect(advanceTrailing('SHORT', s, '64640', cfg).triggered).toBe(true);
+  });
+});
+
+describe('Trailing Take Profit — BTC example (entry 74788.4, activation 0.3 %, trail 0.1 %, tick 0.1)', () => {
+  const tick = '0.1';
+  const cfg = { distancePct: '0.1', tick };
+  const start = (side: 'LONG' | 'SHORT'): TrailingState => ({ status: 'WAITING', activationPrice: trailingActivationPrice(side, '74788.4', '0.3', tick), watermark: null, level: null });
+  const walk = (side: 'LONG' | 'SHORT', prices: string[]) => {
+    let s = start(side);
+    return prices.map((p) => {
+      const step = advanceTrailing(side, s, p, cfg);
+      s = step.state;
+      return { price: p, status: s.status, watermark: s.watermark, level: s.level, triggered: step.triggered };
+    });
+  };
+
+  it('arms only after the activation move from the confirmed average entry, never closer than configured', () => {
+    expect(trailingActivationPrice('SHORT', '74788.4', '0.3', tick)).toBe('74564'); // 74564.0348 rounded down
+    expect(trailingActivationPrice('LONG', '74788.4', '0.3', tick)).toBe('75012.8'); // 75012.7652 rounded up
+  });
+
+  it('Short: a direct adverse move to 74863.2 does not trigger it (the old from-entry trailing stop would have)', () => {
+    expect(walk('SHORT', ['74863.2'])).toEqual([{ price: '74863.2', status: 'WAITING', watermark: null, level: null, triggered: false }]);
+    // The legacy behaviour this replaces: active from entry, level = entry + 0.1 % = 74863.2 → a losing exit.
+    const legacy = advanceTrailing('SHORT', { status: 'ACTIVE', activationPrice: null, watermark: '74788.4', level: trailingLevelFrom('SHORT', '74788.4', '0.1', tick) }, '74863.2', cfg);
+    expect(legacy.triggered).toBe(true);
+  });
+
+  it('Short: a favourable move short of activation, then a rebound, never arms or triggers', () => {
+    const r = walk('SHORT', ['74700', '74600', '74564.1', '74700', '74800', '74863.2']);
+    expect(r.every((x) => x.status === 'WAITING' && !x.triggered)).toBe(true);
+  });
+
+  it('Short: arms at the activation price, tracks the lowest price, closes on a 0.1 % pullback from it', () => {
+    const r = walk('SHORT', ['74600', '74564', '74520', '74500', '74560', '74574.4', '74574.5']);
+    expect(r.map((x) => [x.status, x.watermark, x.level, x.triggered])).toEqual([
+      ['WAITING', null, null, false],
+      ['ACTIVE', '74564', '74638.6', false], // armed: 74564 × 1.001 rounded up
+      ['ACTIVE', '74520', '74594.6', false],
+      ['ACTIVE', '74500', '74574.5', false],
+      ['ACTIVE', '74500', '74574.5', false], // a bounce never loosens the level
+      ['ACTIVE', '74500', '74574.5', false],
+      ['ACTIVE', '74500', '74574.5', true] // 0.1 % above the low → market close
+    ]);
+  });
+
+  it('Long (mirror): no trigger below activation or after a rebound; arms, tracks the high, closes on a 0.1 % pullback', () => {
+    const r = walk('LONG', ['74713.6', '74900', '75012.7', '74800', '75012.8', '75100', '75025', '75024.8']);
+    expect(r.map((x) => [x.status, x.watermark, x.level, x.triggered])).toEqual([
+      ['WAITING', null, null, false], // a direct adverse move of 0.1 %
+      ['WAITING', null, null, false],
+      ['WAITING', null, null, false], // one tick short of activation
+      ['WAITING', null, null, false], // rebound
+      ['ACTIVE', '75012.8', '74937.7', false], // 75012.8 × 0.999 rounded down
+      ['ACTIVE', '75100', '75024.9', false],
+      ['ACTIVE', '75100', '75024.9', false],
+      ['ACTIVE', '75100', '75024.9', true]
+    ]);
+  });
+});
+
+describe('Trailing Take Profit quantity', () => {
+  const t = (status: string, planned: string, filled: string) => ({ status, plannedContracts: planned, filledContracts: filled });
+
+  it('manages only what no unfinished target reserves', () => {
+    // 153 contracts, targets 76 + 45 planned: Trailing Take Profit manages 32.
+    expect(trailingTakeProfitContracts('153', [t('PENDING', '76', '0'), t('PENDING', '45', '0')])).toBe('32');
+    // Target 1 partly filled (50 of 76): 103 open, 26 + 45 still reserved → still 32.
+    expect(trailingTakeProfitContracts('103', [t('PARTIAL', '76', '50'), t('PENDING', '45', '0')])).toBe('32');
+    // Both targets done: whatever is open is its own.
+    expect(trailingTakeProfitContracts('32', [t('DONE', '76', '76'), t('DONE', '45', '45')])).toBe('32');
+    // No targets (take profit off): the whole position.
+    expect(trailingTakeProfitContracts('153', [])).toBe('153');
+    // After it closed its own share, only target quantity remains: nothing left for it.
+    expect(trailingTakeProfitContracts('121', [t('PENDING', '76', '0'), t('PENDING', '45', '0')])).toBe('0');
+    // A cancelled target reserves nothing.
+    expect(trailingTakeProfitContracts('77', [t('DONE', '76', '76'), t('CANCELLED', '77', '0')])).toBe('77');
+  });
+
+  it('a fixed target closes its saved share when Trailing Take Profit manages the rest', () => {
+    const [x] = planTargets('LONG', '74788.4', '133', { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '1', closePct: '60' }] }, { priceTick: '0.1', qtyStep: '1' });
+    expect(x).toMatchObject({ closePct: '60', plannedContracts: '79' }); // 79.8 → 79; Trailing Take Profit manages 54
+    const [all] = planTargets('LONG', '74788.4', '133', { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '1', closePct: '100' }] }, { priceTick: '0.1', qtyStep: '1' });
+    expect(all!.plannedContracts).toBe('133');
   });
 });

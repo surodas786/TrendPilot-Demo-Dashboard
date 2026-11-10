@@ -23,6 +23,7 @@ export const PAPER_POLICY = {
 } as const;
 
 export type EntryReason =
+  | 'TRAILING_CONVERSION_REQUIRED'
   | 'POSITION_NOT_FLAT'
   | 'ORDER_UNCERTAIN'
   | 'FEED_STALE'
@@ -36,6 +37,8 @@ export type EntryReason =
   | 'INSUFFICIENT_MARGIN';
 
 export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
+  TRAILING_CONVERSION_REQUIRED:
+    'This order block still uses the old Trailing Stop. New entries are held until you open Trade Settings, enter Activate after profit (%) for Trailing Take Profit (or turn it off) and save.',
   POSITION_NOT_FLAT: 'A position is already open on this pair; adds and reversals are not enabled yet.',
   ORDER_UNCERTAIN: 'An earlier order on this pair is still unresolved.',
   FEED_STALE: 'No fresh price was available when the signal was evaluated.',
@@ -68,6 +71,8 @@ export interface EntryInput {
   spec: ContractSpec;
   account: { availableUsdt: string };
   exposure: { openPositionInScope: boolean; unresolvedIntentInScope: boolean; openPositionsForOwner: number };
+  /** The block still holds unconverted legacy trailing-stop settings: entries are held. */
+  trailingConversionRequired?: boolean;
   now: Date;
 }
 
@@ -92,6 +97,9 @@ export function estimateLiquidation(side: 'LONG' | 'SHORT', entry: string, lever
 
 export function evaluatePaperEntry(i: EntryInput): EntryEvaluation {
   const checks: Record<string, unknown> = {};
+
+  // A legacy trailing stop is never opened again; the investor converts it explicitly first.
+  if (i.trailingConversionRequired) return { ok: false, reason: 'TRAILING_CONVERSION_REQUIRED', detail: {} };
 
   // STR-07 / ARC-02: only a confirmed flat scope with no unresolved order may open.
   if (i.exposure.unresolvedIntentInScope) return { ok: false, reason: 'ORDER_UNCERTAIN', detail: {} };

@@ -63,7 +63,12 @@ export const newTargetId = () => `tp${Date.now().toString(36)}${(seq++).toString
 
 export const pairLabel = (i: Pick<InstrumentDto, 'base' | 'quote'>) => `${i.base}/${i.quote}`;
 
-/** Exit fields prefilled from the administrator's published pair suggestions (CFG-05). */
+/**
+ * Exit fields prefilled from the administrator's published pair suggestions (CFG-05).
+ * Trailing Take Profit starts off: it needs an explicit activation value and a quantity left
+ * by the targets, neither of which a suggestion can choose. Its trail distance is prefilled
+ * from the suggestion for when the investor turns it on.
+ */
 export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tpMode' | 'targets' | 'trailingEnabled' | 'trailingPct' | 'trailingActivationPct'> {
   return {
     stopType: 'PERCENT',
@@ -71,7 +76,7 @@ export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopTyp
     trailingActivationPct: '',
     tpMode: 'FIXED',
     targets: [{ id: newTargetId(), movePct: i?.suggested.takeProfitPct ?? '', closePct: '100' }],
-    trailingEnabled: i?.suggested.trailingEnabled ?? false,
+    trailingEnabled: false,
     trailingPct: i?.suggested.trailingPct ?? ''
   };
 }
@@ -125,7 +130,8 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
 
 /** The settings payload sent to the API (PATCH body; POST adds instrumentId and mode). */
 export function settingsPayload(d: Draft) {
-  const levels = d.tpMode === 'OFF' ? [] : d.tpMode === 'FIXED' ? [{ ...d.targets[0]!, closePct: '100' }] : d.targets;
+  // A fixed target closes 100% unless Trailing Take Profit manages part of the position.
+  const levels = d.tpMode === 'OFF' ? [] : d.tpMode === 'FIXED' ? [{ ...d.targets[0]!, closePct: d.trailingEnabled ? d.targets[0]!.closePct : '100' }] : d.targets;
   return {
     strategyVersionId: d.strategyVersionId,
     direction: d.direction,
@@ -137,7 +143,7 @@ export function settingsPayload(d: Draft) {
     trailing: {
       enabled: d.trailingEnabled,
       activationPct: d.trailingEnabled && d.trailingActivationPct.trim() ? d.trailingActivationPct.trim() : null,
-      distancePct: d.trailingEnabled ? d.trailingPct.trim() : null,
+      distancePct: d.trailingEnabled && d.trailingPct.trim() ? d.trailingPct.trim() : null,
       basis: d.trailingBasis
     },
     weekdays: d.weekdays,

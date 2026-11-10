@@ -268,6 +268,11 @@ export const orderBlocks = pgTable(
     maxAdds: integer('max_adds'),
     risk: jsonb('risk').notNull().default({}),
     status: blockStatus('status').notNull().default('PAUSED'),
+    /**
+     * Saved before Trailing Take Profit, with the old trailing stop on. New entries are held
+     * until the investor saves trailing settings again with an explicit activation value.
+     */
+    trailingConversionRequired: boolean('trailing_conversion_required').notNull().default(false),
     revision: integer('revision').notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt()
@@ -731,11 +736,15 @@ export const positions = pgTable(
     takeProfitPrice: price('take_profit_price'),
     takeProfitBasis: text('take_profit_basis'),
     /**
-     * EXT-04 trailing stop, persisted so it survives restarts: OFF, WAITING (not yet activated)
-     * or ACTIVE. Watermark = highest (Long) / lowest (Short) basis price since activation; the
-     * level only tightens. A software trigger: the original venue stop stays in place.
+     * EXT-04 trailing exit, persisted so it survives restarts: OFF, WAITING (not yet activated),
+     * ACTIVE, or DONE (Trailing Take Profit has closed all the quantity it manages). Watermark =
+     * highest (Long) / lowest (Short) basis price since activation; the level only tightens. A
+     * software trigger: the fixed venue stop stays in place for the whole open quantity.
+     * `trailingKind` is saved at entry: TAKE_PROFIT (Trailing Take Profit) or STOP (legacy
+     * trailing stop of positions opened before it; their saved behaviour is kept).
      */
     trailingStatus: text('trailing_status').notNull().default('OFF'),
+    trailingKind: text('trailing_kind').notNull().default('TAKE_PROFIT'),
     trailingBasis: text('trailing_basis'),
     trailingDistancePct: numeric('trailing_distance_pct', { precision: 10, scale: 4 }),
     trailingActivationPrice: price('trailing_activation_price'),
@@ -758,7 +767,8 @@ export const positions = pgTable(
     uniqueIndex('positions_open_intent_key').on(t.openIntentId),
     uniqueIndex('positions_one_open_per_scope').on(t.paperAccountId, t.instrumentId, t.mode).where(sql`${t.status} = 'OPEN'`),
     index('positions_owner_idx').on(t.ownerId, t.openedAt),
-    check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE')`)
+    check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE', 'DONE')`),
+    check('positions_trailing_kind_valid', sql`${t.trailingKind} IN ('TAKE_PROFIT', 'STOP')`)
   ]
 );
 

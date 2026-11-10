@@ -1,8 +1,12 @@
-// M2 slice 4: split take profit (EXT-03), trailing stop (EXT-04) and competing exit triggers
-// (EXT-06) on paper positions, using each position's saved exit plan. Deterministic fixture ticks.
+// M2 slice 4: split take profit (EXT-03), Trailing Take Profit on the remainder (EXT-04) and
+// competing exit triggers (EXT-06) on paper positions, using each position's saved exit plan.
+// The legacy trailing stop (positions opened before Trailing Take Profit) keeps its saved
+// behaviour: those scenarios start from the exact state the old code persisted.
+// Deterministic fixture ticks.
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, schema } from '@trendpilot/db';
+import { trailingLevelFrom } from '@trendpilot/domain';
 import { testDatabaseUrl } from '../testDb';
 import * as closePos from '@/app/v1/me/positions/[id]/close/route';
 import * as trade from '@/app/v1/me/trades/[id]/route';
@@ -14,9 +18,32 @@ const A = USERS.investorA.email;
 const B = USERS.investorB.email;
 const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '2', closePct: '50' }, { id: 'tp2', movePct: '4', closePct: '30' }] };
 const TRAIL = (activationPct: string | null, distancePct: string, basis = 'MARK') => ({ enabled: true, activationPct, distancePct, basis });
+const off = { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' };
 /** A slow venue queue: pending close jobs wait until released. */
 const holdCloses = () => direct.db.update(schema.jobs).set({ runAfter: new Date('2100-01-01') }).where(and(eq(schema.jobs.kind, 'paper.close'), eq(schema.jobs.status, 'PENDING')));
 const releaseCloses = () => direct.db.update(schema.jobs).set({ runAfter: new Date(0) }).where(and(eq(schema.jobs.kind, 'paper.close'), eq(schema.jobs.status, 'PENDING')));
+/**
+ * Turns an open position into one opened before Trailing Take Profit with the old "trailing
+ * from entry" plan: legacy kind, active from entry, no activation price, level from the entry.
+ * This is exactly what the previous code persisted and migration 0018 keeps.
+ */
+async function asLegacyTrailingStop(positionId: string, distancePct: string, basis: 'MARK' | 'LAST') {
+  const [p] = await direct.db.select().from(schema.positions).where(eq(schema.positions.id, positionId));
+  await direct.db
+    .update(schema.positions)
+    .set({
+      trailingKind: 'STOP',
+      trailingStatus: 'ACTIVE',
+      trailingBasis: basis,
+      trailingDistancePct: distancePct,
+      trailingActivationPrice: null,
+      trailingActivatedAt: p!.openedAt,
+      trailingWatermark: p!.avgEntryPrice,
+      trailingStopPrice: trailingLevelFrom(p!.side as 'LONG' | 'SHORT', p!.avgEntryPrice, distancePct, '0.1'),
+      trailingUpdatedAt: p!.openedAt
+    })
+    .where(eq(schema.positions.id, positionId));
+}
 const manualClose = (cookie: string, id: string) => call(closePos.POST, { method: 'POST', path: '/x', cookie, params: { id }, headers: { 'idempotency-key': `k-${Math.random().toString(36).slice(2)}` } });
 
 afterAll(async () => {
@@ -24,7 +51,7 @@ afterAll(async () => {
   await teardown();
 });
 
-describe('Long: split TP (50 % / 30 %) with the 20 % remainder on a trailing stop', () => {
+describe('Long: split TP (50 % / 30 %) with the 20 % remainder on Trailing Take Profit', () => {
   beforeAll(() => openFromAlert({ a: { takeProfit: SPLIT, trailing: TRAIL('3', '1') }, b: null }));
 
   it('targets come from the confirmed fill: immutable level IDs, planned share of the base quantity', async () => {
@@ -123,14 +150,14 @@ describe('Long: split TP (50 % / 30 %) with the 20 % remainder on a trailing sto
     const id = (await openPositionOf(A))!.id;
     await tick('67000');
     const r = await drain();
-    expect(r.find((x) => x.tick)?.tick).toMatchObject({ trailingStopsRequested: 1 });
+    expect(r.find((x) => x.tick)?.tick).toMatchObject({ trailingTakeProfitsRequested: 1, trailingStopsRequested: 0 });
     const [p] = await positionsOf(A);
-    expect(p).toMatchObject({ id, status: 'CLOSED', closeReason: 'TRAILING_STOP' });
+    expect(p).toMatchObject({ id, status: 'CLOSED', closeReason: 'TRAILING_TAKE_PROFIT', trailingKind: 'TAKE_PROFIT' });
     expect((await exitsOf(id)).map((x) => [x.reason, n(x.contracts), n(x.remainingContracts)])).toEqual([
       ['TAKE_PROFIT', '50', '103'],
       ['TAKE_PROFIT', '26', '77'],
       ['TAKE_PROFIT', '45', '32'],
-      ['TRAILING_STOP', '32', '0']
+      ['TRAILING_TAKE_PROFIT', '32', '0']
     ]);
     expect((await stopOf(p!)).status).toBe('CANCELLED');
     expect(await venue()).toEqual([{ side: 'LONG', contracts: '0' }]);
@@ -146,17 +173,20 @@ describe('Long: split TP (50 % / 30 %) with the 20 % remainder on a trailing sto
       ['tp1', 'DONE', '76', '102', '76'],
       ['tp2', 'DONE', '45', '45', '45']
     ]);
-    expect(t.body.trailing).toMatchObject({ status: 'ACTIVE', watermark: '67700', level: '67023', basis: 'MARK', distancePct: '1' });
+    expect(t.body.trailing).toMatchObject({ kind: 'TAKE_PROFIT', status: 'ACTIVE', watermark: '67700', level: '67023', basis: 'MARK', distancePct: '1' });
     expect((await call(trade.GET, { path: '/x', cookie: cookies.b, params: { id: p!.id } })).status).toBe(404);
   });
 });
 
-describe('Short: trailing from entry on the LAST basis tracks the low and only tightens', () => {
-  beforeAll(() => openFromAlert({ side: 'SHORT', a: null, b: { takeProfit: { mode: 'OFF', levels: [] }, trailing: TRAIL(null, '1', 'LAST') } }));
+describe('legacy Short position: the trailing stop from entry it was opened with keeps working (LAST basis)', () => {
+  beforeAll(async () => {
+    await openFromAlert({ side: 'SHORT', a: null, b: { takeProfit: { mode: 'OFF', levels: [] }, trailing: off } });
+    await asLegacyTrailingStop((await openPositionOf(B))!.id, '1', 'LAST');
+  });
 
   it('is active from entry: watermark = average entry, level above it', async () => {
     const p = (await openPositionOf(B))!;
-    expect(p).toMatchObject({ side: 'SHORT', trailingStatus: 'ACTIVE' });
+    expect(p).toMatchObject({ side: 'SHORT', trailingStatus: 'ACTIVE', trailingKind: 'STOP', trailingActivationPrice: null });
     expect(n(p.trailingWatermark)).toBe('64999.5');
     expect(n(p.trailingStopPrice)).toBe('65649.5'); // 64999.5 × 1.01, rounded up
     expect(await targetsOf(p.id)).toHaveLength(0);
@@ -174,8 +204,9 @@ describe('Short: trailing from entry on the LAST basis tracks the low and only t
     expect(n(p.trailingStopPrice)).toBe('64640'); // a bounce never loosens it
   });
 
-  it('a rise to the level buys back the Short at the ask with a profit', async () => {
+  it('a rise to the level buys back the Short at the ask with a profit, recorded as the legacy TRAILING_STOP', async () => {
     await tick('64640');
+    expect((await work()).tick).toMatchObject({ trailingStopsRequested: 1, trailingTakeProfitsRequested: 0 });
     await drain();
     const [p] = await positionsOf(B);
     expect(p).toMatchObject({ status: 'CLOSED', closeReason: 'TRAILING_STOP' });
@@ -186,8 +217,11 @@ describe('Short: trailing from entry on the LAST basis tracks the low and only t
   });
 });
 
-describe('competing exit triggers are serialised and cannot over-close or flip', () => {
-  beforeAll(() => openFromAlert({ a: { takeProfit: { mode: 'SPLIT', levels: [{ id: 'first', movePct: '2', closePct: '50' }, { id: 'second', movePct: '5', closePct: '50' }] }, trailing: TRAIL(null, '0.5') }, b: null }));
+describe('competing exit triggers are serialised and cannot over-close or flip (legacy trailing stop: closes everything left)', () => {
+  beforeAll(async () => {
+    await openFromAlert({ a: { takeProfit: { mode: 'SPLIT', levels: [{ id: 'first', movePct: '2', closePct: '50' }, { id: 'second', movePct: '5', closePct: '50' }] } }, b: null });
+    await asLegacyTrailingStop((await openPositionOf(A))!.id, '0.5', 'MARK');
+  });
 
   it('a target close in flight; trailing, a manual close and a venue stop compete', async () => {
     const id = (await openPositionOf(A))!.id;

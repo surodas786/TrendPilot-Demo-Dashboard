@@ -127,6 +127,13 @@
       "when": 1794237501462,
       "tag": "0017_m7_package_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794289326562,
+      "tag": "0018_m8_trailing_take_profit",
+      "breakpoints": true
     }
   ]
 }

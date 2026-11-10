@@ -5,7 +5,6 @@ import {
   takeProfitPrice,
   planTargets,
   trailingActivationPrice,
-  trailingLevelFrom,
   ENTRY_REASON_TEXT,
   evaluatePaperEntry,
   isEntryDay,
@@ -119,6 +118,7 @@ export async function evaluateAndReserveEntry(
     spec: { contractMultiplier: inst!.contractMultiplier, qtyStep: inst!.qtyStep, minQty: inst!.minQty, maxQty: inst!.maxQty, priceTick: inst!.priceTick, takerFeeRate: inst!.takerFeeRate },
     account: { availableUsdt: availableOf(account) },
     exposure: { openPositionInScope: Number(openInScope!.n) > 0, unresolvedIntentInScope: Number(unresolved!.n) > 0, openPositionsForOwner: Number(openForOwner!.n) },
+    trailingConversionRequired: block.trailingConversionRequired,
     now
   });
 
@@ -204,13 +204,21 @@ type IntentRow = typeof orderIntents.$inferSelect;
 type ExitPlanTp = { mode: 'FIXED' | 'SPLIT' | 'OFF'; levels: { id: string; movePct: string; closePct: string }[] };
 type ExitPlanTrailing = { enabled: boolean; activationPct: string | null; distancePct: string | null; basis: string } | undefined;
 
-/** Trailing columns for a new position: active from entry when no activation move is set. */
+/**
+ * Trailing Take Profit columns for a new position. It always waits for the activation move,
+ * measured from the confirmed average entry on the saved basis; it is never active from entry.
+ * A plan without an activation value (only possible in a legacy snapshot) gets no trailing exit.
+ */
 export function trailingAtEntry(side: 'LONG' | 'SHORT', entry: string, tr: NonNullable<ExitPlanTrailing>, tick: string, now: Date) {
-  const activationPrice = trailingActivationPrice(side, entry, tr.activationPct, tick);
-  const base = { trailingBasis: tr.basis, trailingDistancePct: tr.distancePct!, trailingActivationPrice: activationPrice, trailingUpdatedAt: now };
-  return activationPrice === null
-    ? { ...base, trailingStatus: 'ACTIVE', trailingActivatedAt: now, trailingWatermark: entry, trailingStopPrice: trailingLevelFrom(side, entry, tr.distancePct!, tick) }
-    : { ...base, trailingStatus: 'WAITING' };
+  if (!tr.activationPct || !tr.distancePct) return {};
+  return {
+    trailingKind: 'TAKE_PROFIT' as const,
+    trailingStatus: 'WAITING' as const,
+    trailingBasis: tr.basis,
+    trailingDistancePct: tr.distancePct,
+    trailingActivationPrice: trailingActivationPrice(side, entry, tr.activationPct, tick),
+    trailingUpdatedAt: now
+  };
 }
 
 async function release(tx: Executor, intent: IntentRow, state: 'CANCELLED' | 'EXPIRED' | 'REJECTED', reason: string, now: Date) {

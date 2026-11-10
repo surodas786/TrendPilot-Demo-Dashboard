@@ -1,10 +1,184 @@
 # TrendPilot build checkpoint
 
-**DEVELOPMENT PAUSED: 2026-11-09, after Step 12.** Live order submission is disabled. No live account is activated and no real order was ever submitted. The working tree and all Paper data are preserved: nothing was reset, committed, pushed or deployed for this pause.
+**DEVELOPMENT PAUSED: 2026-11-09 (evening), after the post-Step-12 Paper fixes:** MEXC WebSocket feed, XAU_USDT onboarding, route Edit/Delete, and strategy package controls.
+- Live order submission is disabled. No live account is activated, and no real order was ever submitted.
+- For this pause nothing was reset, committed, pushed, deployed or reconfigured; only this file was edited.
+- The working tree and all Paper data are preserved.
 
-## Pause record
+## Pause record — 2026-11-09 evening
 
-### Git state (checked 2026-11-09)
+### Git state (checked at pause)
+- **Branch:** `feature/admin-mailbox-settings`, tracking `origin/feature/admin-mailbox-settings`, **in sync** (not ahead or behind).
+- **HEAD:** `eaf93d95623f6092c475cd4d142cd873a31eb076`, "Add Create, Edit, and Delete controls to Admin → Strategy Package".
+  - 9 commits ahead of `main`.
+  - `origin/main` is `4a5e703`.
+- **Uncommitted changes:** none. `git status` is clean apart from this checkpoint edit.
+- **Ignored, local only:** `.env`, `.env.staging`, `backups/`, `database-export/`, `test-results/`, `apps/web/.next/`, `apps/web/server-*.log`. Never commit `.env*`, `database-export/` or `backups/`.
+- **Commits for this session's work** (all on the branch above):
+
+| Commit | Content |
+| --- | --- |
+| `01fcfde` "Fixed bugs for websokcet" | MEXC WebSocket feed, SSE live quotes, migration `0016`, Caddy SSE route, `docs/STAGING.md` updates. It also carries `scripts/db-import.sh` and the STAGING import section. |
+| `b919569` "Live Validation added" | XAU_USDT / MEXC Get Contract Info pair validation. |
+| `93029ec` "Edit/Delete actions to Admin" | Signal route Edit and Delete. |
+| `eaf93d9` | Strategy package Create, Edit, Delete and Archive, plus migration `0017`. |
+
+### Deployed revision: partly verified (2026-11-10)
+- **The deployed server is the Ubuntu host at `192.168.91.16`**, using PM2 and standalone PostgreSQL. The web app is served directly on port **3000** (`http://192.168.91.16:3000`).
+  - Earlier records named `192.168.1.230`; that address was wrong. It never answered from this workstation (ping, SSH and HTTP all timed out).
+- **Checked from this workstation on 2026-11-10:**
+  - Ping: replies, about 34 ms.
+  - `GET http://192.168.91.16:3000/v1/health` → `200 {"status":"ok","web":"up","database":"up","mode":"PAPER","liveOrderTransport":"disabled"}`.
+  - Ports 80, 443 and 8080: connection refused. No reverse proxy answers on this host, so the "proxy does not buffer `/v1/market/quotes/stream`" check applies only if a proxy is added in front of port 3000.
+  - **Build fingerprint**, from unauthenticated route probes (401 = route exists, 404 = it does not; the control path returned 404):
+    - `/v1/market/quotes/stream` (`01fcfde`) → 401;
+    - `/v1/admin/strategy-packages/{id}/archive` and `/restore` (added in `eaf93d9`) → 401.
+    - So the running build **includes `eaf93d9`**, the newest fix commit.
+  - SSH: the port answers, but `ssh pms@192.168.91.16` is refused (`Permission denied (publickey,password)`). The user name `pms` comes from the old SSH config entry for `192.168.1.230` and may not be right for this host.
+- **Still not verified (needs SSH or admin sign-in on the server):**
+  - git HEAD;
+  - whether migrations `0016` and `0017` were applied;
+  - `pm2 list`, including exactly one `market:feed`;
+  - feed logs;
+  - the server's routes, strategy versions and investor blocks.
+- The only other deployed facts in this file are the ones the operator reported: the REST 510 feed log, the XAUUSDT rejection, and the 5m alert answered with `422 ROUTE_NOT_FOUND`.
+- **Required on deploy:** `npm ci && npm run db:migrate && npm run build && pm2 restart all`.
+  - It applies migrations `0016` (quote channel columns) and `0017` (package archive and revision).
+  - The `market:feed` process must run under PM2, with exactly one instance.
+
+### Local environment at pause (this workstation)
+- **Local staging stack `trendpilot-staging`: running.**
+  - web, worker, feed, caddy, db.
+  - Its image was built 2026-11-09 13:36 UTC from the WebSocket-feed working tree, so it does **not** include the XAU, route or package changes.
+  - Its database is at migration `0016`, with 0 users and 0 instruments.
+  - It is a rehearsal stack, not the deployment. `LIVE_ORDER_TRANSPORT=disabled` was confirmed inside the web container.
+  - Left running and unchanged.
+- **Dev database `trendpilot`** (container `trendpilot-demo-dashboard-db-1`): migration level `0016`. `0017` is **not** applied there. It holds local Paper verification data:
+  - **Instruments:** BTCUSDT (fixture) and XAUUSDT → XAU_USDT (MEXC-verified, not fixture).
+  - **Strategy:** "Supertrend 15m — paper fixture" v1 15m and **v2 15m**. That local v2 was published during the XAU check and is **not** the deployed v2, which runs at 5m.
+  - **Routes:** two enabled 15m routes for `BTCUSDT.P`, bullish and bearish.
+  - **Activity:** no order blocks; 2 `SIGNAL_STALE` rejections.
+- **Other databases:** `trendpilot_test` and `trendpilot_e2e` hold the last test runs.
+- **No local web, worker or feed processes are running.** The ones started for verification were stopped. The unrelated `penta-crm-postgres` container was not touched.
+
+### Work items: observed / implemented locally / deployed / still to test
+
+**1. MEXC market feed (REST ticker rate limit)**
+- **Observed (deployed, operator report):** the Market Data Feed log showed BTC_USDT going HEALTHY → DOWN after `GET /api/v1/contract/ticker` returned MEXC code 510 (IP rate limit). In that build, REST polling was the only ticker source.
+- **Implemented locally (committed in `01fcfde`):**
+  - One public WebSocket (`wss://contract.mexc.com/edge`, `sub.ticker`) is the primary source, shared by all users.
+  - Ping every 15 s, with the pong used as the clock sample. Reconnect backs off from 1 s to 30 s, then resubscribes.
+  - Freshness is tracked per contract, separately from socket state.
+  - No routine REST ticker calls. REST is kept for candles, contract detail and funding.
+  - A 510 or 429 pauses all REST calls for about 60 s.
+  - A REST error never marks a contract DOWN while WebSocket quotes are fresh.
+  - REST ticker fallback is optional and off by default (`MARKET_FEED_REST_FALLBACK`). Rollback switch: `MARKET_FEED_TICKER_SOURCE=rest`.
+  - A database lock keeps exactly one feed active.
+  - Postgres NOTIFY feeds an SSE endpoint, `/v1/market/quotes/stream`.
+  - The Dashboard and Market Data Feed pages update live, showing bid, ask, mark, source and last update. Refresh reads the database only.
+- **Verified locally against live MEXC** (dev DB, real feed process, production web build):
+  - Log sequence: `→ sub.ticker BTC_USDT` → `rs.sub.ticker success` → `push.ticker` about every 2.5 s.
+  - **REST ticker calls = 0** over about 9.5 min.
+  - A forced disconnect reconnected in 937 ms and resubscribed. BTC stayed HEALTHY throughout.
+  - SSE latency from feed receipt to the client was 19–37 ms.
+  - In headless Chromium, the dashboard prices changed with no reload.
+- **Deployed:** unknown (see above).
+- **Still to test on the deployed server:**
+  - The PM2 feed log shows the subscription and push.ticker lines.
+  - Market Data Feed shows REST ticker 0 and no 510 errors.
+  - BTC_USDT updates on the dashboard without Refresh.
+  - The proxy or Nginx does not buffer `/v1/market/quotes/stream`.
+  - Only one feed runs per public IP.
+
+**2. XAU_USDT onboarding**
+- **Observed (deployed, operator report):** Validate rejected XAUUSDT because it only checked the local fixtures.
+- **Implemented locally (`b919569`):**
+  - In production, Validate and Publish use MEXC `GET /api/v1/contract/detail/country`. Tests and local dev or demo use fixtures; `PAIR_VALIDATION_SOURCE` overrides.
+  - `XAUUSDT` and `XAU_USDT` both resolve to XAU_USDT.
+  - The contract must be an enabled, USDT-settled perpetual.
+  - Size, tick, step, min, max, fee and leverage limits are read from MEXC.
+  - Errors are distinct: unknown symbol (400), rate limit (429), timeout or exchange error (503).
+  - The feed subscribes newly published pairs on the running socket, with no restart.
+- **Verified locally against live MEXC:**
+  - Validate returned 200: size 0.001, tick 0.01, leverage 1–1000×.
+  - Publish succeeded, with `isFixture` false.
+  - The running feed sent `sub.ticker XAU_USDT` and reached HEALTHY with no spec mismatch.
+  - After approving XAUUSDT in a strategy version, the order preview computed 242 contracts with the XAU spec.
+- **Deployed:** unknown.
+- **Still to test on the deployed server:**
+  - Validate XAUUSDT once. `curl` gets a 403 from MEXC's edge on this endpoint while Node `fetch` gets 200, so confirm the server is not blocked.
+  - Publish it.
+  - Check XAU appears in Market Data Feed with live WebSocket prices.
+  - Approve it in a strategy version if investors should trade it.
+
+**3. BTCUSDT.P 5m webhook**
+- **Observed (deployed, operator report):**
+  - A 5m alert reached TrendPilot and got `422 ROUTE_NOT_FOUND`; only 15m routes were enabled.
+  - Strategy v2 is published at **5m**, although the package name says 15m.
+- **Implemented locally (`93029ec`, `eaf93d9`):**
+  - Route Edit and Delete exist.
+  - Edit checks that the lineage's newest published version matches the route's interval and contract.
+  - Every route row and the route form show the real "v2 · 5m".
+  - Trade Settings labels read "Package · vN · timeframe".
+- **Verified locally (automated test only):** after editing the fixture route to 5m against a 5m v2, a fresh 5m `BTCUSDT.P` alert was **accepted** (202) and dispatched, and the old 15m tuple then returned `ROUTE_NOT_FOUND`.
+- **On the deployed server: NOT done and NOT verified:**
+  - **Both 5m routes** (BULLISH_FLIP and BEARISH_FLIP, `MEXC:BTCUSDT.P` → BTCUSDT, this lineage): existence unknown. Nothing was created on the server from here.
+  - **The investor's Paper settings on v2:** unknown. Order blocks stay pinned to their version until the investor switches.
+  - **A fresh 5m alert accepted on the server:** not verified.
+
+**4. Admin controls**
+- **Webhook routes (`93029ec`), implemented and tested locally:**
+  - Edit uses a prefilled form, a revision check, a uniqueness check and the strategy interval and contract check.
+  - Delete asks for confirmation and works only with no signal history. A route with history is refused and the dialog offers **Disable**.
+  - Enable and disable kept.
+  - Disabling, deleting or changing the routing of a route open positions depend on is blocked unless another enabled route covers the same contract, lineage and action.
+  - Admin-only on the server. Changes are audited, and blocked attempts are logged as `DENIED`.
+  - Create is now held to the same strategy check.
+- **Strategy packages (`eaf93d9`), implemented and tested locally:**
+  - Create package opens its first draft. Save draft and Publish are separate.
+  - **Edit package** renames only: the ID, versions, routes and investor references are unchanged.
+  - **Edit draft** for unpublished versions. A published version offers **Create draft from this version**, prefilled; publishing makes a new version, and blocks stay pinned.
+  - Delete works only for an unused draft or a never-published package.
+  - Deleting a **published version is refused** (409 IMMUTABLE), backed by the existing DB trigger.
+  - **Archive** (with restore) hides a package from routes, new drafts and Trade Settings, and the server enforces this. It is blocked while an enabled route, an investor block or an open position depends on the package.
+  - Renames, publishes, deletions, archives and restores are audited.
+  - Migration `0017` adds `archived_at`, `archived_by` and `revision`.
+- **Deployed:** unknown.
+- **Still to test:** use the deployed UI for item 3 (edit the routes to 5m, rename the package if wanted) and confirm the audit log entries.
+
+### Last test results (final code, 2026-11-09 evening)
+
+| Check | Result |
+| --- | --- |
+| `npm run lint`, `npm run typecheck` | Clean |
+| `npm test` (vitest) | **41 files, 561 tests passed** |
+| `npm run test:e2e` | **46/46 passed** (5.7 min), run after the final UI fixes. The `npm error … start failed` lines are the intentional crash drills |
+| `npm run build` | Succeeded (production build) |
+
+- **Added this session:** `packages/db/test/mexcWs.test.ts`, `packages/db/test/contractCatalog.test.ts`, and these in `apps/web/test/api/`: `marketFeedStream.test.ts`, `xauPair.test.ts`, `signalRouteAdmin.test.ts`, `strategyPackageAdmin.test.ts`.
+- **Tests changed on purpose:**
+  - `operations.test.ts`: a 15m route on the 15m fixture.
+  - The e2e package flow: the draft auto-opens, a single "Publish" button, and labels include the timeframe.
+
+### First action when resuming
+1. **Verify the deployed revision on the server** (`192.168.91.16`; needs SSH access with a valid user and key, or a session on that host):
+   - `git log -1` should be `eaf93d9`, or the merge `4a945b4` on `main`. The route fingerprint already shows the `eaf93d9` code is running;
+   - the migration level should include `0017`;
+   - `pm2 list` should show web, worker and exactly one `market:feed`;
+   - `/v1/health` should show `liveOrderTransport: disabled`. This was confirmed on 2026-11-10 at `http://192.168.91.16:3000/v1/health`.
+   - If it is behind, deploy with `npm ci && npm run db:migrate && npm run build && pm2 restart all`.
+2. **Then the first unresolved item: item 3 on the deployed server.**
+   - In Admin → TradingView Webhook & Routes, edit the two 15m `BTCUSDT.P` routes to 5m. The edit is blocked while open positions depend on them; if so, add the 5m routes first, then disable the 15m ones.
+   - Have the investor move the Paper block to v2 (5m).
+   - Confirm the next 5m alert is accepted (202) rather than `ROUTE_NOT_FOUND`.
+3. **Then check items 1 and 2 on the server** as listed under "Still to test".
+4. Keep live order submission disabled throughout. No commit, push or deploy without an explicit request.
+
+---
+
+## Earlier pause record — Step 12 (2026-11-09, earlier; Git and environment facts below are superseded by the record above)
+
+### Git state at that pause (superseded)
 - **Current branch:** `feature/m3-market-data-and-reporting`.
   - It has no upstream; it was never pushed.
   - HEAD is `b3fc634b492b086cce1c4c9cd5038e62a251cd7a` ("Update build checkpoint after committing M2 slices 2-4"), the same commit as `origin/feature/m1-m2-signal-intake`.
@@ -55,8 +229,8 @@
 - **Tests:** the database-free guard suites ran at pause time and passed **33/33**: `mexcPrivate.test.ts`, `liveGuard.test.ts`, `feedGuard.test.ts`, `liveTransport.test.ts`. They prove that 9 environment variants (development, Paper staging, Demo, replay, e2e, CI, test, even a fully "live" production configuration) cannot open the order transport. The last full regression (2026-11-09) passed: unit 481/481, e2e 44/44, lint, typecheck and build clean.
 - **Data:** no `live_pilots` row exists in any local database. Dev `trendpilot` predates the table (migrations through `0010`). `trendpilot_test` and `trendpilot_e2e` (through `0014`) have none. The restore-drill database predates the table.
 
-### Running deployment: what could not be verified
-- **No remote deployment exists.** Nothing was ever deployed to a staging or production host, so no remote configuration could be checked. Remote HTTPS staging is pending its inputs (`docs/STAGING.md` §2).
+### Running deployment at that pause (superseded: a server deployment now exists, see above)
+- **No remote deployment existed then.** Nothing was ever deployed to a staging or production host, so no remote configuration could be checked. Remote HTTPS staging is pending its inputs (`docs/STAGING.md` §2).
 - **Local staging stack** (`trendpilot-staging`): all containers are stopped. `db`, `caddy` and `migrate` exited with code 0; `web`, `worker` and `feed` exited with code 1, which is consistent with `docker compose stop` stopping npm processes. I did not restart them, to preserve state, so its live settings were not re-checked while running. Its database volume holds the smoke-test data (admin `ops-admin@paper-smoke.invalid`, two smoke investors) at migration `0013`. It has no `live_pilots` table, which arrived in `0014`.
 - **Local processes:** nothing listens on ports 3000, 3100, 3101, 443 or 8443. The running containers are the dev database (`trendpilot-demo-dashboard-db-1`, healthy) and an unrelated `penta-crm-postgres` container, which was not inspected or touched.
 - **Paper data preserved:**
@@ -66,7 +240,7 @@
   - the staging volume;
   - `backups/trendpilot_staging_20261108T184356Z.dump`.
 
-### First action when resuming
+### First action when resuming (Step 12 live-pilot track; superseded for Paper work by the record above)
 1. **Read the runbook:** `docs/LIVE_PILOT_RUNBOOK.md` (§0 scope, §1 preconditions, §5 abort criteria, §6 manual protection and close).
 2. **Recheck the planned pilot scope against current facts:**
    - the investor (active, consenting, the only allowlisted account);

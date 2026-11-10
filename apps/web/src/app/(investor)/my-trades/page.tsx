@@ -5,7 +5,7 @@ import { PageContainer } from '@/components/layout/PageContainer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
-import { EXIT_LABEL, signedUsdt as signed, TARGET_STATUS_LABEL, targetSummary } from '@/lib/exitLabels';
+import { EXIT_LABEL, signedUsdt as signed, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, targetSummary, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
 
 export const dynamic = 'force-dynamic';
@@ -62,7 +62,7 @@ export default async function MyTradesPage() {
                 <th className="px-4 py-2.5 font-medium">Avg entry</th>
                 <th className="px-4 py-2.5 font-medium">Margin · lev</th>
                 <th className="px-4 py-2.5 font-medium">Stop loss</th>
-                <th className="px-4 py-2.5 font-medium">Take profit · trailing</th>
+                <th className="px-4 py-2.5 font-medium">Take profit · trailing take profit</th>
                 <th className="px-4 py-2.5 font-medium">Liq. (est.)</th>
                 <th className="px-4 py-2.5 font-medium" />
               </tr>
@@ -120,12 +120,18 @@ export default async function MyTradesPage() {
                       </span>
                     )}
                     {p.trailing && (
-                      <span className="block text-xs" data-testid="trailing" data-status={p.trailing.status}>
+                      <span className="block text-xs" data-testid="trailing" data-status={p.trailing.status} data-kind={p.trailing.kind}>
+                        <span className="text-subtle">{trailingName(p.trailing.kind)}: </span>
                         {p.trailing.status === 'ACTIVE' ? (
-                          <span className="text-ink">Trailing {p.trailing.level} (best {p.trailing.watermark})</span>
+                          <span className="text-ink">
+                            Active · closes at {p.trailing.level} (best {p.trailing.watermark})
+                          </span>
+                        ) : p.trailing.status === 'WAITING' ? (
+                          <span className="text-ink">{p.trailing.activationPrice ? `Waiting for activation at ${p.trailing.activationPrice}` : 'Waiting for activation'}</span>
                         ) : (
-                          <span className="text-subtle">Trailing from {p.trailing.activationPrice}</span>
+                          <span className="text-ink">{TRAILING_STATUS_LABEL[p.trailing.status] ?? p.trailing.status}</span>
                         )}
+                        {p.trailing.contracts !== null && <span className="text-subtle"> · {p.trailing.contracts} contracts</span>}
                       </span>
                     )}
                   </td>

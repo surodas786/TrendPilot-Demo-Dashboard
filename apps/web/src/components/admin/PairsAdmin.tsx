@@ -39,7 +39,7 @@ function SuggestFields({ value, onChange, errors }: { value: Suggest; onChange: 
     <div className="grid gap-3 sm:grid-cols-4 sm:items-start">
       <TextField label="Suggested stop" inputMode="decimal" value={value.suggestedStopPct} onChange={(v) => onChange({ ...value, suggestedStopPct: v })} error={errors.suggestedStopPct} trailing={pct} />
       <TextField label="Suggested take profit" inputMode="decimal" value={value.suggestedTakeProfitPct} onChange={(v) => onChange({ ...value, suggestedTakeProfitPct: v })} error={errors.suggestedTakeProfitPct} trailing={pct} />
-      <TextField label="Suggested trailing" inputMode="decimal" value={value.suggestedTrailingPct} onChange={(v) => onChange({ ...value, suggestedTrailingPct: v })} error={errors.suggestedTrailingPct} trailing={pct} />
+      <TextField label="Suggested trail distance" inputMode="decimal" value={value.suggestedTrailingPct} onChange={(v) => onChange({ ...value, suggestedTrailingPct: v })} error={errors.suggestedTrailingPct} trailing={pct} />
       <div className="sm:pt-7">
         <Switch label="Trailing on by default" checked={value.suggestedTrailingEnabled} onChange={(v) => onChange({ ...value, suggestedTrailingEnabled: v })} />
       </div>

@@ -12,7 +12,7 @@ const settings = (o: Record<string, unknown> = {}) =>
     direction: 'BOTH',
     stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' },
     takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] },
-    trailing: { enabled: true, activationPct: '1', distancePct: '0.5', basis: 'LAST' },
+    trailing: { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' },
     risk: EMPTY_RISK,
     ...o
   }) as Parameters<typeof previewOrder>[0];
@@ -37,8 +37,22 @@ describe('previewOrder', () => {
     });
     // 0.0153 × 975 + entry fee 0.3978 + exit fee at stop 0.0153 × 64025 × 0.0004
     expect(long.lossToStopUsdt).toBe('15.71');
-    expect(long.takeProfits).toEqual([{ id: 'tp1', price: '66950', closePct: '100' }]);
-    expect(long.trailing).toEqual({ activationPrice: '65650', distancePct: '0.5' });
+    expect(long.takeProfits).toEqual([{ id: 'tp1', price: '66950', closePct: '100', contracts: '153' }]);
+    expect(long.trailing).toBeNull();
+  });
+
+  it('shows which quantity each exit manages: the fixed target its share, Trailing Take Profit the rest', () => {
+    const p = previewOrder(settings({ takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '60' }] }, trailing: { enabled: true, activationPct: '1', distancePct: '0.5', basis: 'LAST' } }), BTC, quote);
+    const long = p.sides.find((s) => s.side === 'LONG')!;
+    const short = p.sides.find((s) => s.side === 'SHORT')!;
+    // 153 × 60 % = 91.8 → 91 contracts (rounded down to the step); the other 62 trail.
+    expect(long.takeProfits).toEqual([{ id: 'tp1', price: '66950', closePct: '60', contracts: '91' }]);
+    // Activation is never closer than configured: Long 65000 × 1.01 rounded up, Short 64990.5 × 0.99 rounded down.
+    expect(long.trailing).toEqual({ activationPrice: '65650', distancePct: '0.5', managesPct: '40', contracts: '62' });
+    expect(short.trailing).toMatchObject({ activationPrice: '64340.5', managesPct: '40' });
+    // Take profit off: Trailing Take Profit manages the whole position.
+    const all = previewOrder(settings({ takeProfit: { mode: 'OFF', levels: [] }, trailing: { enabled: true, activationPct: '1', distancePct: '0.5', basis: 'LAST' } }), BTC, quote).sides[0]!;
+    expect(all.trailing).toMatchObject({ managesPct: '100', contracts: all.contracts });
   });
 
   it('sizes a short from the bid and puts its stop above entry', () => {
