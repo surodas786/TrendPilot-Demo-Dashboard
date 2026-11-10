@@ -109,8 +109,12 @@ export async function updateBlock(owner: PublicUser, id: string, revision: numbe
   const issues = await catalogCheck(db, current.instrumentId, merged.value);
   if (issues.length) throw validationError(issues);
 
+  // A legacy trailing stop converts only when this save carries trailing settings, which the
+  // merged validation above held to Trailing Take Profit rules (explicit activation value).
+  const trailingConverted = current.trailingConversionRequired && patch.value.trailing !== undefined;
+
   return db.transaction(async (tx) => {
-    const result = await orderBlocksFor(tx, owner.id).update(id, revision, merged.value);
+    const result = await orderBlocksFor(tx, owner.id).update(id, revision, merged.value, { trailingConverted });
     if (!result.ok) {
       if (result.reason === 'REVISION_CONFLICT') throw conflict();
       throw notFound();
@@ -124,7 +128,7 @@ export async function updateBlock(owner: PublicUser, id: string, revision: numbe
       result: 'SUCCESS',
       before: diff.before,
       after: diff.after,
-      metadata: { revision: result.block.revision },
+      metadata: { revision: result.block.revision, ...(trailingConverted ? { trailingConvertedToTakeProfit: true } : {}) },
       correlationId
     });
     return result.block;

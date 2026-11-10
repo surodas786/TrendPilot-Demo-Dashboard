@@ -1,5 +1,5 @@
 // M2 slice 4 end to end through the local replay: split TP with a partially filled target and
-// a trailing remainder (A), trailing from entry (B), then close-and-reverse (A reverses into a
+// Trailing Take Profit on the remainder (A) and on the whole position (B), then close-and-reverse (A reverses into a
 // protected Short, B stays flat). Every `worker:once` is a new process, so persisted trailing
 // state across runs is a real restart.
 import { execFileSync } from 'node:child_process';
@@ -50,7 +50,7 @@ async function signIn(page: Page, email: string) {
 test('split profile: both investors open a Long from the shared alert', async ({ baseURL }) => {
   await sql(RESET);
   const out = run(['run', 'demo:paper', '--', '--at', CLOCK, '--profile', 'split']);
-  expect(out).toContain('split TP 50% @ +2% and 30% @ +4%, trailing 1% from +3% (mark)');
+  expect(out).toContain('split TP 50% @ +2% and 30% @ +4%, trailing take profit on 20%: trail 1% after +3% (mark)');
   expect(run(['run', 'replay', '--', '--url', baseURL!])).toMatch(/→ 202 \{"status":"accepted"/);
   expect(run(['run', 'worker:once'])).toMatch(/entriesApproved=2/);
   const targets = await sql<{ level_id: string; trigger_price: string; planned_contracts: string }>(
@@ -93,18 +93,20 @@ test('A sees target progress, remaining stop coverage and the trailing level', a
   const row = page.getByTestId('position-BTCUSDT');
   await expect(row.getByTestId('target-progress')).toContainText('2 of 2 targets filled');
   await expect(row.getByTestId('stop')).toContainText('Protected · covers 32');
-  await expect(row.getByTestId('trailing')).toContainText('Trailing 67023 (best 67700)');
+  await expect(row.getByTestId('trailing')).toContainText('Trailing take profit: Active · closes at 67023 (best 67700) · 32 contracts');
   await row.getByRole('link', { name: 'Details' }).click();
   await expect(page.locator('[data-testid="target"][data-level="tp1"]')).toHaveAttribute('data-status', 'DONE');
   await expect(page.locator('[data-testid="target"][data-level="tp1"]')).toContainText('102'); // requested 76 + 26
   await expect(page.getByTestId('trailing-level')).toHaveText('67023');
+  await expect(page.getByTestId('trailing-state')).toHaveText('Active');
+  await expect(page.getByTestId('trailing-contracts')).toHaveText('32 contracts');
   await expect(page.getByTestId('remaining')).toHaveText('32 of 153');
 });
 
-test('the price falls back to the trailing levels: A and B close by TRAILING_STOP', async () => {
+test('the price falls back to the trailing levels: A and B close by TRAILING_TAKE_PROFIT', async () => {
   const out = priceThenWorker('67000', '2026-11-08T09:31:00Z');
-  expect(out).toMatch(/trailingStopsRequested=2/);
-  expect(await count(`SELECT count(*) AS n FROM positions WHERE status = 'CLOSED' AND close_reason = 'TRAILING_STOP'`)).toBe(2);
+  expect(out).toMatch(/trailingTakeProfitsRequested=2/);
+  expect(await count(`SELECT count(*) AS n FROM positions WHERE status = 'CLOSED' AND close_reason = 'TRAILING_TAKE_PROFIT'`)).toBe(2);
   expect(await count('SELECT count(*) AS n FROM sim_positions WHERE contracts <> 0')).toBe(0);
   const rec = await sql<{ ok: boolean }>('SELECT bool_and(wallet_balance = ledger_wallet AND position_margin = ledger_position_margin AND order_reserve = ledger_order_reserve) AS ok FROM paper_account_reconciliation');
   expect(rec[0]!.ok).toBe(true);

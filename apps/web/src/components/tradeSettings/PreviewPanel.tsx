@@ -57,9 +57,14 @@ export function PreviewPanel({ preview }: { preview: PreviewResult }) {
               <Row label={`Stop (${s.stopBasis.toLowerCase()})`} value={`${s.stopPrice} (${s.stopDistancePct}%)`} />
               <Row label="Loss to stop incl. fees" value={<span data-testid={`preview-${s.side}-loss`}>{s.lossToStopUsdt} USDT</span>} />
               {s.takeProfits.map((t, i) => (
-                <Row key={t.id} label={`Target ${i + 1} (${t.closePct}%)`} value={t.price} />
+                <Row key={t.id} label={`Target ${i + 1} (${t.closePct}%)`} value={`${t.price} · ${t.contracts} contracts`} />
               ))}
-              {s.trailing && <Row label="Trailing" value={`${s.trailing.distancePct}% from ${s.trailing.activationPrice ?? 'entry'}`} />}
+              {s.trailing && (
+                <Row
+                  label={`Trailing take profit (${s.trailing.managesPct}%)`}
+                  value={<span data-testid={`preview-${s.side}-trailing`}>{`${s.trailing.contracts} contracts · activates at ${s.trailing.activationPrice ?? '—'} · trail ${s.trailing.distancePct}%`}</span>}
+                />
+              )}
             </dl>
             {s.reasons.length > 0 && (
               <ul className="mt-2 space-y-1 text-loss">

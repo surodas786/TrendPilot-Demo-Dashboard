@@ -40,6 +40,9 @@ export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props)
   };
 
   const total = allocated(draft);
+  const trailing = draft.trailingEnabled;
+  const remainder = isDecimalString(total) ? Decimal.max(0, new Decimal(100).minus(total)).toFixed() : '0';
+  const splitOk = trailing ? new Decimal(total).lt(100) && new Decimal(total).gt(0) : total === '100';
 
   return (
     <div className="space-y-3">
@@ -52,20 +55,44 @@ export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props)
           { value: 'SPLIT', label: 'Split' },
           { value: 'OFF', label: 'Off' }
         ]}
-        hint={draft.tpMode === 'OFF' ? 'No take-profit target. Stop loss and any trailing stop still apply.' : 'A target crossing submits a market close; fill price may differ.'}
+        hint={
+          draft.tpMode === 'OFF'
+            ? trailing
+              ? 'No fixed target: Trailing take profit manages 100% of the position. The stop loss still applies.'
+              : 'No take-profit target. The stop loss still applies.'
+            : 'A target crossing submits a market close for its share; fill price may differ.'
+        }
       />
 
-      {draft.tpMode === 'FIXED' && (
-        <TextField
-          label="Target — price move"
-          inputMode="decimal"
-          value={draft.targets[0]?.movePct ?? ''}
-          onChange={(v) => setTarget(0, { movePct: v })}
-          error={err('takeProfit.levels.0.movePct') ?? err('takeProfit.levels')}
-          hint="Single target closing 100% of the position."
-          trailing={pct}
-        />
-      )}
+      {draft.tpMode === 'FIXED' &&
+        (trailing ? (
+          <div className="space-y-1">
+            <div className="grid grid-cols-2 gap-2">
+              <TextField
+                label="Target — price move"
+                inputMode="decimal"
+                value={draft.targets[0]?.movePct ?? ''}
+                onChange={(v) => setTarget(0, { movePct: v })}
+                error={err('takeProfit.levels.0.movePct') ?? err('takeProfit.levels')}
+                trailing={pct}
+              />
+              <TextField label="Target closes" inputMode="decimal" value={draft.targets[0]?.closePct ?? ''} onChange={(v) => setTarget(0, { closePct: v })} error={err('takeProfit.levels.0.closePct')} trailing={pct} />
+            </div>
+            <p className="text-xs text-subtle" data-testid="exit-allocation" aria-live="polite">
+              The fixed target closes {total}% of the position · Trailing take profit manages the remaining {remainder}%.
+            </p>
+          </div>
+        ) : (
+          <TextField
+            label="Target — price move"
+            inputMode="decimal"
+            value={draft.targets[0]?.movePct ?? ''}
+            onChange={(v) => setTarget(0, { movePct: v })}
+            error={err('takeProfit.levels.0.movePct') ?? err('takeProfit.levels')}
+            hint="Single target closing 100% of the position."
+            trailing={pct}
+          />
+        ))}
 
       {draft.tpMode === 'SPLIT' && (
         <>
@@ -90,8 +117,8 @@ export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props)
             <Button size="sm" icon={PlusIcon} disabled={draft.targets.length >= MAX_TARGETS} onClick={() => onChange({ targets: [...draft.targets, { id: newTargetId(), movePct: '', closePct: '' }] })}>
               Add target
             </Button>
-            <p className={cn('text-sm tabular-nums', total === '100' ? 'text-gain' : 'text-warn')} aria-live="polite">
-              Allocated {total}% of 100%
+            <p className={cn('text-sm tabular-nums', splitOk ? 'text-gain' : 'text-warn')} aria-live="polite" data-testid="exit-allocation">
+              {trailing ? `Targets close ${total}% · Trailing take profit manages ${remainder}%` : `Allocated ${total}% of 100%`}
             </p>
           </div>
           {(err('takeProfit') ?? err('takeProfit.levels')) && <p className="text-xs text-loss">{err('takeProfit') ?? err('takeProfit.levels')}</p>}

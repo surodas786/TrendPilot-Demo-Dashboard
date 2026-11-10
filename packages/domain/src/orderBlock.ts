@@ -68,7 +68,13 @@ export const takeProfitSchema = z
   })
   .strict();
 
-/** EXT-04: activation threshold (favourable move from entry, null = immediately), distance and trigger basis. */
+/**
+ * EXT-04 Trailing Take Profit. When enabled, both values are required (refineSettings):
+ * - activationPct: favourable price move from the confirmed average entry before it arms;
+ * - distancePct: pullback from the best price since activation that closes its quantity.
+ * Both are price movement, before fees and leverage. `basis` is the trigger price stream. The
+ * field is nullable only so that old saved blocks still parse; a save never accepts null.
+ */
 export const trailingSchema = z
   .object({
     enabled: z.boolean(),
@@ -143,9 +149,17 @@ function refineSettings(s: SettingsBase, ctx: IssueSink): void {
   const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
 
   if (tp.mode === 'OFF' && tp.levels.length > 0) add(['takeProfit', 'levels'], 'Remove targets when take profit is off.');
+  const trailingOn = s.trailing.enabled;
   if (tp.mode === 'FIXED') {
     if (tp.levels.length !== 1) add(['takeProfit', 'levels'], 'Fixed take profit has exactly one target.');
-    else if (!new Decimal(tp.levels[0]!.closePct).eq(100)) add(['takeProfit', 'levels', 0, 'closePct'], 'A fixed target closes 100%.');
+    else {
+      const close = new Decimal(tp.levels[0]!.closePct);
+      // Without Trailing Take Profit the target closes everything. With it, the target closes
+      // its share and Trailing Take Profit manages the rest, so 100 % would leave it nothing.
+      if (!trailingOn && !close.eq(100)) add(['takeProfit', 'levels', 0, 'closePct'], 'A fixed target closes 100% unless Trailing Take Profit manages the rest.');
+      if (trailingOn && close.eq(100))
+        add(['takeProfit', 'levels', 0, 'closePct'], 'The fixed target closes 100%, so nothing is left for Trailing Take Profit. Close less than 100% here, or turn Trailing Take Profit off.');
+    }
   }
   if (tp.mode === 'SPLIT') {
     if (tp.levels.length < 2) add(['takeProfit', 'levels'], 'Split take profit needs 2 or 3 targets.');
@@ -154,17 +168,23 @@ function refineSettings(s: SettingsBase, ctx: IssueSink): void {
       if (prev && !new Decimal(l.movePct).gt(prev.movePct)) add(['takeProfit', 'levels', i, 'movePct'], 'Must be further than the previous target.');
     });
     const total = tp.levels.reduce((sum, l) => sum.plus(l.closePct), new Decimal(0));
-    // EXT-07: a full split allocates 100%. Otherwise the remainder goes to an enabled trailing stop.
+    // EXT-07: targets close their shares; any remainder belongs to Trailing Take Profit, which
+    // must then exist, and must be left something to manage.
     if (total.gt(100)) add(['takeProfit'], `Close allocations total ${total.toFixed()}% — they cannot exceed 100%.`);
-    else if (total.lt(100) && !s.trailing.enabled)
-      add(['takeProfit'], `Close allocations total ${total.toFixed()}% — allocate exactly 100%, or enable the trailing stop to manage the remaining ${new Decimal(100).minus(total).toFixed()}%.`);
+    else if (total.lt(100) && !trailingOn)
+      add(['takeProfit'], `Close allocations total ${total.toFixed()}% — allocate exactly 100%, or turn on Trailing Take Profit to manage the remaining ${new Decimal(100).minus(total).toFixed()}%.`);
+    else if (total.eq(100) && trailingOn)
+      add(['takeProfit'], 'The targets close 100%, so nothing is left for Trailing Take Profit. Lower an allocation, or turn Trailing Take Profit off.');
   }
   const ids = new Set(tp.levels.map((l) => l.id));
   if (ids.size !== tp.levels.length) add(['takeProfit', 'levels'], 'Target IDs must be unique.');
 
-  if (s.trailing.enabled && s.trailing.distancePct === null) add(['trailing', 'distancePct'], 'Enter a trailing distance.');
-  if (!s.trailing.enabled && (s.trailing.distancePct !== null || s.trailing.activationPct !== null)) {
-    add(['trailing'], 'Clear trailing values while the trailing stop is off.');
+  if (trailingOn) {
+    // Both values are explicit: activation is never assumed or derived from the distance.
+    if (s.trailing.activationPct === null) add(['trailing', 'activationPct'], 'Enter Activate after profit (%).');
+    if (s.trailing.distancePct === null) add(['trailing', 'distancePct'], 'Enter Trail distance (%).');
+  } else if (s.trailing.distancePct !== null || s.trailing.activationPct !== null) {
+    add(['trailing'], 'Clear the Trailing Take Profit values while it is off.');
   }
 
   if (s.allowAdds) {
@@ -245,8 +265,24 @@ export interface OrderBlockDto extends OrderBlockSettings {
   timezone: string;
   status: BlockStatus;
   revision: number;
+  /**
+   * Saved before Trailing Take Profit with trailing on. New entries are held until the
+   * investor saves trailing settings with an explicit activation value (or turns trailing off).
+   */
+  trailingConversionRequired: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Share of each new position (in % of the filled quantity) that take-profit targets and
+ * Trailing Take Profit manage. The fixed Stop Loss always covers the whole open quantity.
+ */
+export function exitAllocation(s: Pick<OrderBlockSettings, 'takeProfit' | 'trailing'>): { targetsPct: string; trailingPct: string } {
+  const tp = s.takeProfit;
+  const targets = tp.mode === 'OFF' ? new Decimal(0) : tp.levels.reduce((sum, l) => sum.plus(isDecimalString(l.closePct) ? l.closePct : 0), new Decimal(0));
+  const capped = Decimal.min(targets, 100);
+  return { targetsPct: capped.toFixed(), trailingPct: s.trailing.enabled ? new Decimal(100).minus(capped).toFixed() : '0' };
 }
 
 /** Editable settings of a stored block, used to merge a PATCH before validating the result. */

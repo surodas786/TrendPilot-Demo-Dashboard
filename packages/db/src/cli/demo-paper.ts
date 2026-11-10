@@ -4,9 +4,9 @@
  *   npm run demo:paper -- [--at <UTC ISO>] [--ema off|on] [--market up|down|flat|gap|none] [--reset-paper] [--profile entries|exits|split|reverse]
  *
  * --profile exits:   both investors trade every day; A has a 3 % fixed TP, B a 6 % fixed TP.
- * --profile split:   A: split TP 50 % at +2 % and 30 % at +4 %, the 20 % remainder on a trailing
- *                    stop (activates at +3 %, 1 % distance, mark). B: no TP, trailing from entry
- *                    (1 %, last price).
+ * --profile split:   A: split TP 50 % at +2 % and 30 % at +4 %, the 20 % remainder on Trailing
+ *                    Take Profit (activates at +3 %, 1 % trail, mark). B: no TP, Trailing Take
+ *                    Profit on 100 % (activates at +1 %, 1 % trail, last price).
  * --profile reverse: both pinned to a CLOSE_AND_REVERSE version of the package (created and
  *                    published if missing). B may only trade Long, so B's reversal stays flat.
  *
@@ -112,7 +112,7 @@ try {
         : { takeProfit: tp('3'), trailing: off },
     B:
       profile === 'split'
-        ? { takeProfit: { mode: 'OFF' as const, levels: [] }, trailing: { enabled: true, activationPct: null, distancePct: '1', basis: 'LAST' as const } }
+        ? { takeProfit: { mode: 'OFF' as const, levels: [] }, trailing: { enabled: true, activationPct: '1', distancePct: '1', basis: 'LAST' as const } }
         : { takeProfit: tp(exitsProfile ? '6' : '3'), trailing: off }
   };
   await upsertBlock(db, ids.A!, { ...common, ...plans.A, orderCostUsdt: '100', leverage: 10, stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' }, weekdays: [...ALL_WEEKDAYS] });
@@ -146,11 +146,11 @@ try {
 
   console.log(`Paper demo ready at ${at.toISOString()} (${WEEKDAY_LABELS[today]} in ${TZ}).`);
   const versionLabel = `${ema ? 'EMA 200' : 'EMA Off'}, ${policy}`;
-  const aPlan = profile === 'split' ? 'split TP 50% @ +2% and 30% @ +4%, trailing 1% from +3% (mark)' : 'TP 3%';
+  const aPlan = profile === 'split' ? 'split TP 50% @ +2% and 30% @ +4%, trailing take profit on 20%: trail 1% after +3% (mark)' : 'TP 3%';
   console.log(`  Investor A: BTC/USDT Paper, ACTIVE, every day, 100 USDT x10, stop 1.5%, ${aPlan} (${versionLabel}).`);
   console.log(
     profile === 'split'
-      ? '  Investor B: BTC/USDT Paper, ACTIVE, every day, 50 USDT x5, stop 2%, no TP, trailing 1% from entry (last).'
+      ? '  Investor B: BTC/USDT Paper, ACTIVE, every day, 50 USDT x5, stop 2%, no TP, trailing take profit on 100%: trail 1% after +1% (last).'
       : profile === 'reverse'
         ? '  Investor B: BTC/USDT Paper, ACTIVE, every day, 50 USDT x5, stop 2%, TP 6%, Long only -> its reversal stays flat (DIRECTION_DISABLED).'
         : exitsProfile

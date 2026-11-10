@@ -4,7 +4,7 @@ import { getDb, getMyTrade } from '@trendpilot/db';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
-import { EXIT_LABEL, signedUsdt, TARGET_STATUS_LABEL } from '@/lib/exitLabels';
+import { EXIT_LABEL, signedUsdt, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
 
 export const dynamic = 'force-dynamic';
@@ -173,21 +173,26 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
           )}
           <p className="mt-2 text-xs text-subtle">Each target closes its share of the opening quantity with a reduce-only market order. Only confirmed fills count; the stop is resized after each fill.</p>
         </section>
-        <section className="rounded-xl border border-line bg-surface p-4 text-sm" data-testid="trailing-detail" data-status={t.trailing?.status ?? 'OFF'}>
-          <h3 className="mb-2 font-semibold text-ink">Trailing stop</h3>
+        <section className="rounded-xl border border-line bg-surface p-4 text-sm" data-testid="trailing-detail" data-status={t.trailing?.status ?? 'OFF'} data-kind={t.trailing?.kind ?? 'NONE'}>
+          <h3 className="mb-2 font-semibold text-ink">{t.trailing ? trailingName(t.trailing.kind) : 'Trailing take profit'}</h3>
           {!t.trailing ? (
-            <p className="text-xs text-subtle">Trailing is off for this position.</p>
+            <p className="text-xs text-subtle">No trailing exit for this position.</p>
           ) : (
             <dl>
-              <Row label="State" value={t.trailing.status === 'ACTIVE' ? 'Active' : 'Waiting for activation'} />
-              <Row label="Activation price" value={t.trailing.activationPrice ?? 'from entry'} />
-              <Row label="Distance · basis" value={`${t.trailing.distancePct}% · ${t.trailing.basis === 'MARK' ? 'mark price' : 'last price'}`} />
+              <Row label="State" value={TRAILING_STATUS_LABEL[t.trailing.status] ?? t.trailing.status} testId="trailing-state" />
+              <Row label="Activation price" value={t.trailing.activationPrice ?? 'from entry (legacy)'} testId="trailing-activation" />
+              <Row label="Trail distance · basis" value={`${t.trailing.distancePct}% · ${t.trailing.basis === 'MARK' ? 'mark price' : 'last price'}`} />
               <Row label={t.side === 'LONG' ? 'Highest since activation' : 'Lowest since activation'} value={t.trailing.watermark ?? '—'} testId="trailing-watermark" />
-              <Row label="Trailing level (only tightens)" value={t.trailing.level ?? '—'} testId="trailing-level" />
+              <Row label="Closes at (only tightens)" value={t.trailing.level ?? '—'} testId="trailing-level" />
+              <Row label="Quantity it manages" value={t.trailing.contracts !== null ? `${t.trailing.contracts} contracts` : '—'} testId="trailing-contracts" />
               <Row label="Activated" value={t.trailing.activatedAt ? fmt(t.trailing.activatedAt) : '—'} />
             </dl>
           )}
-          <p className="mt-2 text-xs text-subtle">A software trigger closes the remaining quantity at market; the original stop stays at the venue as protection.</p>
+          <p className="mt-2 text-xs text-subtle">
+            {t.trailing?.kind === 'STOP'
+              ? 'Legacy trailing stop saved with this position: it closes the whole remaining quantity at market. The fixed stop stays at the venue.'
+              : 'Arms after the activation move from the average entry, then closes its quantity at market when price pulls back by the trail distance from the best level. Targets keep their own quantity; the fixed stop loss stays at the venue for the whole position.'}
+          </p>
         </section>
         <section className="rounded-xl border border-line bg-surface p-4 text-sm lg:col-span-2" data-testid="exits">
           <h3 className="mb-2 font-semibold text-ink">Exits</h3>

@@ -95,7 +95,7 @@ With `npm run dev` running:
    - **Trade Settings → Add Token:**
      - Choose a pair. Only strategies approved for that pair are offered.
      - Set direction, order cost (USDT), leverage and margin mode.
-     - Set the stop (percent or price, mark or last basis), take profit, trailing (activation, distance, basis), trading days, multiple entries and risk limits.
+     - Set the stop (percent or price, mark or last basis), take profit, Trailing Take Profit (Activate after profit, Trail distance, basis), trading days, multiple entries and risk limits.
      - Select *Preview order* for sizing, margin, fees, stop, targets and loss-to-stop from fixture prices.
      - Save, or *Save & Activate*. Use *Pause* / *Resume* per pair.
 4. **Pinning.**
@@ -145,7 +145,7 @@ M1 exit condition: *"Isolation, onboarding and configuration tests pass."* Every
 | IAM-02 ownership on every settings read/write/preview | ✅ | Unowned ID gives the same 404 as a missing one; denials audited |
 | Investors cannot use admin actions | ✅ | 17 admin routes return 403 for investors and 401 without a session |
 | UI-02 My Account fixed to the signed-in investor | ✅ | No account switcher |
-| UI-03 / CFG-03 Trade Settings controls | ✅ | Pair, compatible strategy, direction, cost, leverage, margin, stop type and basis, TP fixed/split/off, trailing, 7 weekdays, adds, risk caps, pause/resume |
+| UI-03 / CFG-03 Trade Settings controls | ✅ | Pair, compatible strategy, direction, cost, leverage, margin, stop type and basis, TP fixed/split/off, Trailing Take Profit, 7 weekdays, adds, risk caps, pause/resume |
 | EXE-01 order preview with fixture data | ✅ | Ask for long, bid for short; rounded down to the step; never sized up; loss-to-stop includes fees |
 | Server validation and stale-tab protection | ✅ | Shared zod schemas; If-Match revisions (409/428) on every configuration write |
 | CFG-02 strategy versions: 5m/15m, Supertrend, EMA 200, opposite policy | ✅ | Drafts → publish; one draft per package |
@@ -460,24 +460,26 @@ SIGNAL_TEST_CLOCK=2026-11-08T09:32:00Z npm run worker:once     # → stopsTrigge
 - No live market data; ticks are fixtures. Funding and slippage models beyond the simulator's top-of-book fill are not built.
 - Live order submission remains disabled; no adapter or credentials exist.
 
-## M2 slice 4 — split take profit, trailing stop, close and reverse
+## M2 slice 4 — split take profit, trailing exit, close and reverse
+
+> The trailing exit described here is now **Trailing Take Profit**: see [Trailing Take Profit](#trailing-take-profit-replaces-the-trailing-stop) below. Positions opened before that change keep the legacy trailing stop they were saved with.
 
 Builds on the slice 3 exit engine (same simulator, durable jobs and fixture price replay). Every position uses the exit plan and strategy version saved with it at entry. Paper mode only; live order submission stays disabled and no public MEXC market data is used.
 
 **Split take profit (EXT-03).**
 - At the confirmed entry fill, each target in the saved plan becomes a `position_targets` row. The row holds the immutable level ID, the trigger price (from the average entry, rounded toward entry) and the target's planned share of the filled quantity, rounded down to the contract step.
-- A plan that allocates 100% gives the last target the exact remainder. A plan below 100% is valid only with the trailing stop enabled, which manages the rest (EXT-07). A fixed TP is a single 100% target.
+- A plan that allocates 100% gives the last target the exact remainder. A plan below 100% is valid only with Trailing Take Profit enabled, which manages the rest (EXT-07); a plan of exactly 100% leaves it nothing and is refused with it on. A fixed TP is a single target: 100% on its own, or a smaller share when Trailing Take Profit manages the rest.
 - When a target is reached on its basis, the engine sends a reduce-only market close for that target's remaining quantity, capped at the position.
 - *Requested* and *filled* quantities are tracked separately. Only confirmed fills move a target forward (`PENDING → REQUESTED → PARTIAL → DONE`). A partly filled target resumes for exactly its remainder on a later price, and only after its earlier order is reconciled.
 - After every fill, the stop is resized to the remaining quantity and verified.
 - A database trigger stops target progress from ever decreasing and stops a `DONE` target from reopening. Replaying the same price or the same fill repeats nothing.
 
-**Trailing stop (EXT-04).**
-- **Activation:** uses the saved activation move (or "from entry") on the saved price basis.
+**Trailing exit (EXT-04)** — now Trailing Take Profit; the mechanics below are shared with the legacy trailing stop.
+- **Activation:** the saved activation move from the confirmed average entry, on the saved price basis. Trailing Take Profit always waits for it; only legacy positions can be active from entry.
 - **Watermark:** the highest price for a Long and the lowest for a Short.
 - **Level:** high minus distance for a Long, low plus distance for a Short. It only tightens; a database trigger refuses any loosening.
-- **Persistence:** status, activation time, watermark and level are stored on the position, so a restarted worker continues from them.
-- **Trigger:** a software trigger closes the remaining quantity at market. The original venue stop stays in place as protection while any quantity is open. Trailing also manages the remainder after split TP.
+- **Persistence:** kind, status, activation time, watermark and level are stored on the position, so a restarted worker continues from them.
+- **Trigger:** a software trigger closes at market. Trailing Take Profit closes only the quantity no unfinished target reserves; the legacy trailing stop closes the whole remaining position. The fixed venue stop stays in place as protection while any quantity is open.
 
 **Close and reverse (STR-06).**
 - **Close first:** on an opposite flip with saved policy `CLOSE_AND_REVERSE`, the engine sends the market close first. The same event does not evaluate an entry for that block.
@@ -497,7 +499,7 @@ Builds on the slice 3 exit engine (same simulator, durable jobs and fixture pric
 
 Use one fixed clock per command. In PowerShell, set it with `$env:SIGNAL_TEST_CLOCK='…'` before each command instead of the `VAR=… cmd` prefix.
 
-**Split TP and trailing** (A: 50% at +2% and 30% at +4%, with the 20% remainder on a 1% trailing stop that activates at +3%, mark price; B: no TP, a 1% trailing stop from entry, last price):
+**Split TP and Trailing Take Profit** (A: 50% at +2% and 30% at +4%, with the 20% remainder on Trailing Take Profit that activates at +3% and trails 1%, mark price; B: no TP, Trailing Take Profit on 100% that activates at +1% and trails 1%, last price):
 
 ```sh
 # Terminal 1
@@ -515,11 +517,11 @@ SIGNAL_TEST_CLOCK=2026-11-08T09:30:30Z npm run worker:once        # tp1 FILLED f
 npm run market:tick -- --price 66400 --at 2026-11-08T09:30:35Z
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:35Z npm run worker:once        # takeProfitsRequested=0 (no repeat)
 npm run market:tick -- --price 67000 --at 2026-11-08T09:30:40Z
-SIGNAL_TEST_CLOCK=2026-11-08T09:30:40Z npm run worker:once        # trailingActivated=1 (A: level 66330)
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:40Z npm run worker:once        # trailingActivated=1 (A: level 66330; B armed at 66400)
 npm run market:tick -- --price 67700 --at 2026-11-08T09:30:50Z
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:50Z npm run worker:once        # tp2 FILLED filled=45 remaining=32; trailing level 67023
 npm run market:tick -- --price 67000 --at 2026-11-08T09:31:00Z
-SIGNAL_TEST_CLOCK=2026-11-08T09:31:00Z npm run worker:once        # trailingStopsRequested=2 → A and B closed (TRAILING_STOP)
+SIGNAL_TEST_CLOCK=2026-11-08T09:31:00Z npm run worker:once        # trailingTakeProfitsRequested=2 → A and B closed (TRAILING_TAKE_PROFIT)
 ```
 
 Each `worker:once` is a new process, so trailing state that carries across runs has survived a restart. For a Short, run `demo:paper -- --market down --profile split` and `replay -- --action BEARISH_FLIP`.
@@ -556,17 +558,18 @@ Variations:
 
 ### Where to verify
 - **Target progress:**
-  - *My Trades* → open row → **Take profit · trailing** shows "N of M targets filled" and, for each target, its trigger price, status and filled/planned quantity.
+  - *My Trades* → open row → **Take profit · trailing take profit** shows "N of M targets filled" and, for each target, its trigger price, status and filled/planned quantity.
   - *Trade detail* → **Take-profit targets** lists, per target, the trigger and basis, planned, requested and filled quantities, and status.
   - API: `GET /v1/me/trades/{id}` → `targets[]`. Database: `position_targets`.
 - **Remaining stop coverage:**
   - *My Trades* → **Stop loss** shows *Protected · covers N*, where N equals the remaining contracts.
   - *Trade detail* → **Stop loss** shows the covered contracts, and **Remaining contracts** shows `R of N`.
   - The resting order is `sim_orders` (`STOP_MARKET`, `contracts`), and the platform view is `positions.stop_contracts`.
-- **Trailing:**
-  - *My Trades* shows "Trailing L (best W)".
-  - *Trade detail* → **Trailing stop** shows state, activation price, distance and basis, watermark, level and activation time.
-  - API: `trailing` on the trade. Database: the `positions.trailing_*` columns.
+- **Trailing Take Profit:**
+  - *Holdings* → **Trailing take profit** shows *Waiting for activation* (with the activation price) or *Active* (closing level and best price), the contracts it manages and the trail distance.
+  - *My Trades* shows "Trailing take profit: Active · closes at L (best W) · N contracts".
+  - *Trade detail* → **Trailing take profit** shows state, activation price, trail distance and basis, best price, closing level, the quantity it manages and activation time. Exits closed by it read *Trailing take profit* (`TRAILING_TAKE_PROFIT`).
+  - API: `trailing` (with `kind`, `status`, `contracts`) on the trade and on each holding. Database: the `positions.trailing_*` columns.
 - **Each reversal outcome:**
   - *Signals*: *Close and reverse · filled*, together with either *Reversed · Paper Short filled* or *Stayed flat · REASON* (or *Opening leg pending*).
   - *Trade detail* of the closed position → **Close and reverse**: the outcome, reason text and a link to the new position. The new position links back to the one it replaced.
@@ -578,14 +581,14 @@ Variations:
 | Suite | Covers |
 | --- | --- |
 | `packages/domain/test/exits.test.ts` | Target planning (full and partial splits, fixed, off), target status from fills, trailing activation and level rounding, and the Long/Short watermark, tighten-only rule and trigger |
-| `packages/domain/test/orderBlock.test.ts` | A split below 100% is valid only with trailing enabled; above 100% is invalid |
-| `apps/web/test/api/splitTrailing.test.ts` | Long split + trailing remainder; partial target fill and its resume; no repeat on the same price or a duplicate tick; activation on the saved basis; restart (a fresh worker pool re-runs a crashed tick from persisted state); tighten-only (including the DB guard); trailing close of the remainder with zero confirmed and the stop cleared; target progress API and isolation; Short trailing on LAST from entry; competing triggers (target in flight vs trailing vs manual close vs venue stop; a stop beating a pending target); target DB guard |
+| `packages/domain/test/orderBlock.test.ts` | A split below 100% is valid only with Trailing Take Profit enabled; above 100% is invalid; targets closing 100% leave nothing for it; Activate after profit and Trail distance are both required |
+| `apps/web/test/api/splitTrailing.test.ts` | Long split + trailing remainder; partial target fill and its resume; no repeat on the same price or a duplicate tick; activation on the saved basis; restart (a fresh worker pool re-runs a crashed tick from persisted state); tighten-only (including the DB guard); Trailing Take Profit close of the remainder with zero confirmed and the stop cleared; target progress API and isolation; a legacy Short position's trailing stop from entry on LAST keeps working; competing triggers on a legacy position (target in flight vs trailing vs manual close vs venue stop; a stop beating a pending target); target DB guard |
 | `apps/web/test/api/reversal.test.ts` | Successful close-then-open with the new stop in the same simulated request; owner views and isolation; replaying the same event, plus re-running dispatch, close, reverse and submit concurrently, creates no duplicate fill, entry or position; partial close withholds and keeps the remainder protected; an uncertain close (venue stop first, close refused) withholds; a close crossing local midnight into a disabled day gives `DAY_DISABLED`; paused gives `PAUSED`; expired gives `SIGNAL_STALE` |
 | `apps/web/e2e/6-split-trailing-reverse.spec.ts` | The real `demo:paper --profile split/reverse`, `replay`, `market:tick` and `worker:once` commands; the My Trades, trade detail and Signals views for both investors |
 
 ### Still open after this slice
 - **Market data:** public MEXC market data was added in Step 8 (below). Replays still use fixtures (`source = FIXTURE`).
-- **Trailing:** the trailing stop is a software trigger; native venue tightening is not modelled.
+- **Trailing:** Trailing Take Profit is a software trigger; native venue trailing orders are not modelled.
 - **Minimum residuals:** there is no special handling for exchange minimum residuals beyond rounding targets down to the contract step.
 - **Risk:** daily-loss limits and cooldown are not enforced yet.
 - **Live trading:** live order submission remains disabled; no adapter or credentials exist.
@@ -722,3 +725,33 @@ B's Dashboard then shows funding *Booked*, and B's trade lists it.
 - **Delivery:** invitations, password resets and notices are still written to `email_outbox` in the same transaction as the change. `EMAIL_DELIVERY=capture` (default outside production; tests and e2e) stores them only, so `/dev/mail` and `npm run ops:mail` keep working. `EMAIL_DELIVERY=smtp` (default in production) also queues an `email.deliver` job; the worker sends it in a separate loop so mail never delays trading jobs. Results: `SENT`, retried on connection/timeout/4xx, or `FAILED` with the reason (including "SMTP is not configured"), shown under **Delivery** on the Mail Box page.
 - **Migration:** `0015_m5_mail_settings` (new `mail_settings` table; `email_outbox` delivery columns). Run `npm run db:migrate`.
 - **Tests:** `apps/web/test/api/mailBox.test.ts` (mocked SMTP), `apps/web/e2e/8-mail-box-settings.spec.ts`.
+
+## Trailing Take Profit (replaces the trailing stop)
+
+The trailing exit is now **Trailing Take Profit**. It locks in profit after an explicit favourable move; it is never active from entry, so it can no longer close a position at a loss straight after entry. Paper mode only; live order submission stays disabled.
+
+**Settings (Trade Settings → Exits).**
+- **Activate after profit (%)** and **Trail distance (%)** are both required when it is on, plus the trigger basis (mark or last). Both percentages are price movement from the confirmed average entry, before fees and leverage. The activation value is always entered by the investor; it is never assumed or derived from the trail distance.
+- The fixed **Stop Loss** stays mandatory and is attached to the opening order request. It protects the whole position before and after Trailing Take Profit activates.
+- **Quantity:** take-profit targets close their shares; Trailing Take Profit manages the rest. Split targets below 100% put the remainder on it; a Fixed target can close less than 100% when it is on; with TP off it manages 100%. Targets that close 100% leave it nothing, so that combination is refused. The editor and the order preview show which quantity each exit manages.
+- New drafts start with it off (the pair's suggested trail distance is prefilled): the investor chooses the activation value and the quantity split.
+
+**Behaviour.**
+- **Long:** arms only once price has risen by the activation percentage (activation price rounded up to the tick), then tracks the highest price. **Short:** arms only once price has fallen by it (rounded down), then tracks the lowest price.
+- After activation, a pullback of the trail distance from that high or low triggers a reduce-only market close for the quantity no unfinished target reserves. Once that quantity is closed it is *Done*; it never closes target quantity, and targets never close its quantity.
+- State (kind, status, activation price, best price, level) is stored on the position, so a restarted worker continues from it.
+- *Holdings* shows *Waiting for activation* or *Active*; *My Trades* records the exit reason `TRAILING_TAKE_PROFIT`.
+
+**Existing data (migration `0018_m8_trailing_take_profit`).**
+- **Open positions keep their saved behaviour.** Every position that already had a trailing exit is marked `trailing_kind = 'STOP'` and keeps working as the legacy trailing stop (closes the whole remaining position, reason `TRAILING_STOP`). New entries get `trailing_kind = 'TAKE_PROFIT'`.
+- **Order blocks saved with the old trailing stop on are not converted automatically.** They are flagged `trailing_conversion_required`; their new entries are held (decision reason `TRAILING_CONVERSION_REQUIRED`) and Trade Settings shows *Needs update*. Saving the block with Trailing Take Profit settings (explicit activation value) or with trailing off converts it; an unrelated edit cannot skip the activation value. The conversion is audited (`trailingConvertedToTakeProfit`).
+
+**Tests.**
+
+| Suite | Covers |
+| --- | --- |
+| `packages/domain/test/exits.test.ts` | The BTC example (entry 74788.4, activation 0.3 %, trail 0.1 %): activation prices; a direct move to 74863.2 does not trigger (the legacy from-entry stop would have); a favourable move short of activation then a rebound never arms; Short and Long arming, tracking and the pullback trigger; the quantity it manages next to targets |
+| `packages/domain/test/orderBlock.test.ts`, `preview.test.ts` | Both values required; quantity rules (Fixed below 100 %, split remainder, 100 % refused); preview quantities per exit and activation rounding |
+| `apps/web/test/api/trailingTakeProfit.test.ts` | Paper, end to end: the Short example with the stop attached to the opening order, the 74863.2 move, below-activation rebound, activation, restart after activation (fresh worker, re-run tick), pullback close as `TRAILING_TAKE_PROFIT` in profit; the Long equivalent; split targets with Trailing Take Profit on the remainder (66 + 28 + 39 = 133, nothing closed twice; *Done* state); legacy block migration flag, held entries, unrelated edit refused, explicit conversion, next entry opens with Trailing Take Profit |
+| `apps/web/test/api/splitTrailing.test.ts` | Trailing Take Profit on a split remainder; legacy positions (trailing stop from entry, competing triggers) keep their saved behaviour |
+| `apps/web/e2e/6-split-trailing-reverse.spec.ts` | The replay commands above, with the My Trades and trade detail views (state, closing level, managed contracts) |

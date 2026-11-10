@@ -39,6 +39,7 @@ function toDto(r: Row, inst: { symbol: string; exchange: string }): OrderBlockDt
     risk: r.risk as OrderBlockDto['risk'],
     status: r.status,
     revision: r.revision,
+    trailingConversionRequired: r.trailingConversionRequired,
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString()
   };
@@ -115,12 +116,21 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
       }
     },
 
-    /** CFG-03 optimistic concurrency: applies only when the stored revision matches. */
-    async update(id: string, expectedRevision: number, settings: OrderBlockSettings): Promise<WriteResult> {
+    /**
+     * CFG-03 optimistic concurrency: applies only when the stored revision matches.
+     * `trailingConverted`: the save carried trailing settings validated under Trailing Take
+     * Profit rules, so a legacy trailing stop is converted and entries are no longer held.
+     */
+    async update(id: string, expectedRevision: number, settings: OrderBlockSettings, o: { trailingConverted?: boolean } = {}): Promise<WriteResult> {
       if (!isUuid(id)) return { ok: false, reason: 'NOT_FOUND' };
       const rows = await db
         .update(orderBlocks)
-        .set({ ...settingsColumns(settings), revision: sql`${orderBlocks.revision} + 1`, updatedAt: sql`now()` })
+        .set({
+          ...settingsColumns(settings),
+          ...(o.trailingConverted ? { trailingConversionRequired: false } : {}),
+          revision: sql`${orderBlocks.revision} + 1`,
+          updatedAt: sql`now()`
+        })
         .where(and(owned(id), eq(orderBlocks.revision, expectedRevision)))
         .returning({ id: orderBlocks.id });
       if (rows.length === 0) return { ok: false, reason: await missReason(id) };

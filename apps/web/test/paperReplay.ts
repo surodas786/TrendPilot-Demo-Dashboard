@@ -19,10 +19,10 @@ export const D = (v: Decimal.Value) => new Decimal(v);
 export const clock = { now: new Date('2026-11-08T09:30:03Z') };
 export const cookies = { a: '', b: '', admin: '' };
 
-export async function deliver(action: SignalAction, barOpen: Date) {
+export async function deliver(action: SignalAction, barOpen: Date, referencePrice = '65000.5') {
   const token = process.env.DEV_INGRESS_TOKEN!;
   const raw = JSON.stringify(
-    buildTradingViewPayload({ action, exchange: 'MEXC', symbol: 'BTCUSDT.P', interval: '15', barOpen, firedAt: plus(new Date(barOpen.getTime() + M15), 1), referencePrice: '65000.5' })
+    buildTradingViewPayload({ action, exchange: 'MEXC', symbol: 'BTCUSDT.P', interval: '15', barOpen, firedAt: plus(new Date(barOpen.getTime() + M15), 1), referencePrice })
   );
   const res = await webhook.POST(new Request(`http://localhost/v1/webhooks/tradingview/${token}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: raw }), {
     params: Promise.resolve({ ingressToken: token })
@@ -89,6 +89,8 @@ export interface OpenOptions {
   version?: () => Promise<string>;
   /** Replaces the fixture candles and quote (e.g. a public-feed cycle against a stub exchange). */
   market?: () => Promise<void>;
+  /** Fixture close for the signal bar (quote = close ± 0.5) and the alert's reference price. Default 65000. */
+  price?: string;
   /** Job hooks for the opening drain (e.g. an injected venue). */
   hooks?: Parameters<typeof processNextJob>[1]['hooks'];
 }
@@ -118,8 +120,8 @@ export async function openFromAlert(o: OpenOptions = {}) {
     blocksOut[who] = (await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies[who], params: { id: created.body.id }, ifMatch: created.body.revision })).body;
   }
   if (o.market) await o.market();
-  else await writeMarketFixture(direct.db, { instrumentId: BTC, interval: '15', endBarOpen: bar, count: 260, endClose: '65000', trend: o.side === 'SHORT' ? 'DOWN' : 'UP', quoteAt: clock.now });
-  if ((await deliver(o.side === 'SHORT' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', bar)) !== 202) throw new Error('alert not accepted');
+  else await writeMarketFixture(direct.db, { instrumentId: BTC, interval: '15', endBarOpen: bar, count: 260, endClose: o.price ?? '65000', trend: o.side === 'SHORT' ? 'DOWN' : 'UP', quoteAt: clock.now });
+  if ((await deliver(o.side === 'SHORT' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', bar, o.price ?? '65000.5')) !== 202) throw new Error('alert not accepted');
   await drain(clock.now, direct.db, o.hooks);
   return blocksOut;
 }

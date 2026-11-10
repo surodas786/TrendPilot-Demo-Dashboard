@@ -1,4 +1,5 @@
 import { Decimal } from './decimal';
+import { planTargets, trailingActivationPrice } from './exits';
 import type { MarketSource } from './marketFeed';
 import type { OrderBlockSettings, PriceBasis } from './orderBlock';
 
@@ -42,8 +43,13 @@ export interface SidePreview {
   stopBasis: PriceBasis;
   stopDistancePct: string;
   lossToStopUsdt: string;
-  takeProfits: { id: string; price: string; closePct: string }[];
-  trailing: { activationPrice: string | null; distancePct: string } | null;
+  /** Each target with the contracts it would close from this size. */
+  takeProfits: { id: string; price: string; closePct: string; contracts: string }[];
+  /**
+   * Trailing Take Profit: arms at `activationPrice` and manages `contracts` (`managesPct` of
+   * the position) — the quantity no target reserves.
+   */
+  trailing: { activationPrice: string | null; distancePct: string; managesPct: string; contracts: string } | null;
   reasons: { code: PreviewReason; message: string }[];
   ok: boolean;
 }
@@ -105,19 +111,19 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
     reasons.push({ code: 'RISK_LIMIT', message: `Loss to stop ${fmt(lossToStop, 2)} USDT exceeds your cap of ${s.risk.maxStopRiskUsdt} USDT.` });
   }
 
-  const tps = s.takeProfit.levels.map((l) => {
-    const move = D(l.movePct).div(100);
-    const raw = long ? p.times(D(1).plus(move)) : p.times(D(1).minus(move));
-    return { id: l.id, price: fmt(roundToTick(raw, tick, long ? Decimal.ROUND_DOWN : Decimal.ROUND_UP)), closePct: s.takeProfit.mode === 'FIXED' ? '100' : l.closePct };
-  });
+  const planned = planTargets(dir, fmt(p), fmt(contracts), s.takeProfit, { priceTick: spec.priceTick, qtyStep: spec.qtyStep });
+  const tps = planned.map((t) => ({ id: t.levelId, price: t.triggerPrice, closePct: t.closePct, contracts: t.plannedContracts }));
+  const targetsContracts = planned.reduce((sum, t) => sum.plus(t.plannedContracts), D(0));
+  const targetsPct = s.takeProfit.mode === 'OFF' ? D(0) : s.takeProfit.levels.reduce((sum, l) => sum.plus(l.closePct), D(0));
 
+  // Same activation rounding as the running position (never closer than configured).
   const trailing =
     s.trailing.enabled && s.trailing.distancePct
       ? {
-          activationPrice: s.trailing.activationPct
-            ? fmt(roundToTick(long ? p.times(D(1).plus(D(s.trailing.activationPct).div(100))) : p.times(D(1).minus(D(s.trailing.activationPct).div(100))), tick, Decimal.ROUND_HALF_UP))
-            : null,
-          distancePct: s.trailing.distancePct
+          activationPrice: trailingActivationPrice(dir, fmt(p), s.trailing.activationPct, spec.priceTick),
+          distancePct: s.trailing.distancePct,
+          managesPct: Decimal.max(0, D(100).minus(targetsPct)).toFixed(),
+          contracts: Decimal.max(0, contracts.minus(targetsContracts)).toFixed()
         }
       : null;
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import {
   advanceTrailing,
+  trailingTakeProfitContracts,
   basisPrice,
   Decimal,
   EXIT_REASON_TEXT,
@@ -12,6 +13,7 @@ import {
   targetStatusAfter,
   type ExitReason,
   type PriceBasis,
+  type TrailingKind,
   type TrailingState
 } from '@trendpilot/domain';
 import type { QuoteChannel } from '@trendpilot/domain';
@@ -39,8 +41,9 @@ import { listStopFills, triggerStops, type CloseResult, type VenueQuote } from '
  *   release are ledger rows that can only be booked once. Target progress moves only on
  *   confirmed fills — a touched target is not a fill.
  * - The stop is resized after every partial exit and cleared only after the venue confirms zero.
- * - The trailing stop is a software trigger with persisted activation, watermark and level; the
- *   original venue stop stays in place as protection while any quantity is open.
+ * - Trailing Take Profit is a software trigger with persisted activation, watermark and level;
+ *   the fixed venue stop stays in place as protection for the whole open quantity, before and
+ *   after activation. It closes only the quantity no take-profit target reserves.
  */
 
 export const PAPER_CLOSE_JOB = 'paper.close';
@@ -426,43 +429,57 @@ export interface PositionExitStep {
 
 /**
  * Software exit triggers for one locked, open position at one price (caller's transaction):
- * trailing stop first (it protects), then the first unfinished target that is reached. At most
- * one close is requested — exits are serialised per position.
+ * the trailing exit first, then the first unfinished target that is reached. At most one close
+ * is requested — exits are serialised per position.
+ *
+ * Trailing Take Profit (kind TAKE_PROFIT) closes only the contracts no unfinished target
+ * reserves, so a trailing close and a target never close the same quantity. Once it has closed
+ * all of its quantity it is DONE. The legacy trailing stop (kind STOP, positions opened before
+ * Trailing Take Profit) keeps its saved behaviour: it closes the whole remaining position.
  */
 export async function evaluatePositionExits(tx: Executor, p: PositionRow, quote: VenueQuote, now: Date): Promise<PositionExitStep> {
   const out: PositionExitStep = { requested: null, inProgress: false, trailingActivated: false, trailingTightened: false, trailingTriggered: false };
   if (p.status !== 'OPEN' || D(p.contracts).lte(0)) return out;
   const side = p.side as 'LONG' | 'SHORT';
+  const targets = await targetsFor(tx, p);
 
-  if (p.trailingStatus !== 'OFF' && p.trailingDistancePct && p.trailingBasis) {
-    const [inst] = await tx.select({ tick: instruments.priceTick }).from(instruments).where(eq(instruments.id, p.instrumentId));
-    const state: TrailingState = { status: p.trailingStatus as 'WAITING' | 'ACTIVE', activationPrice: p.trailingActivationPrice, watermark: p.trailingWatermark, level: p.trailingStopPrice };
-    const step = advanceTrailing(side, state, basisPrice(quote, p.trailingBasis as PriceBasis), { distancePct: p.trailingDistancePct, tick: inst!.tick });
-    if (step.state !== state) {
-      await tx
-        .update(positions)
-        .set({
-          trailingStatus: step.state.status,
-          trailingWatermark: step.state.watermark,
-          trailingStopPrice: step.state.level,
-          ...(step.activated ? { trailingActivatedAt: now } : {}),
-          trailingUpdatedAt: now,
-          updatedAt: sql`now()`
-        })
-        .where(eq(positions.id, p.id));
-    }
-    out.trailingActivated = step.activated;
-    out.trailingTightened = step.tightened && !step.activated;
-    if (step.triggered) {
-      out.trailingTriggered = true;
-      const r = await requestExit(tx, { position: p, reason: 'TRAILING_STOP', now });
-      if (r.status === 'REQUESTED') out.requested = 'TRAILING_STOP';
-      else out.inProgress = r.status === 'IN_PROGRESS';
-      return out;
+  if ((p.trailingStatus === 'WAITING' || p.trailingStatus === 'ACTIVE') && p.trailingDistancePct && p.trailingBasis) {
+    const takeProfit = (p.trailingKind as TrailingKind) === 'TAKE_PROFIT';
+    const manages = takeProfit ? trailingTakeProfitContracts(p.contracts, targets) : p.contracts;
+    if (takeProfit && D(manages).lte(0)) {
+      // Everything still open is reserved by targets: its own quantity is closed.
+      await tx.update(positions).set({ trailingStatus: 'DONE', trailingUpdatedAt: now, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+    } else {
+      const [inst] = await tx.select({ tick: instruments.priceTick }).from(instruments).where(eq(instruments.id, p.instrumentId));
+      const state: TrailingState = { status: p.trailingStatus as 'WAITING' | 'ACTIVE', activationPrice: p.trailingActivationPrice, watermark: p.trailingWatermark, level: p.trailingStopPrice };
+      const step = advanceTrailing(side, state, basisPrice(quote, p.trailingBasis as PriceBasis), { distancePct: p.trailingDistancePct, tick: inst!.tick });
+      if (step.state !== state) {
+        await tx
+          .update(positions)
+          .set({
+            trailingStatus: step.state.status,
+            trailingWatermark: step.state.watermark,
+            trailingStopPrice: step.state.level,
+            ...(step.activated ? { trailingActivatedAt: now } : {}),
+            trailingUpdatedAt: now,
+            updatedAt: sql`now()`
+          })
+          .where(eq(positions.id, p.id));
+      }
+      out.trailingActivated = step.activated;
+      out.trailingTightened = step.tightened && !step.activated;
+      if (step.triggered) {
+        out.trailingTriggered = true;
+        const reason: ExitReason = takeProfit ? 'TRAILING_TAKE_PROFIT' : 'TRAILING_STOP';
+        const r = await requestExit(tx, { position: p, reason, now, contracts: manages });
+        if (r.status === 'REQUESTED') out.requested = reason;
+        else out.inProgress = r.status === 'IN_PROGRESS';
+        return out;
+      }
     }
   }
 
-  for (const t of await targetsFor(tx, p)) {
+  for (const t of targets) {
     if (t.status === 'DONE' || t.status === 'CANCELLED' || D(t.plannedContracts).lte(0)) continue;
     if (!takeProfitReached(side, basisPrice(quote, t.triggerBasis as PriceBasis), t.triggerPrice)) break; // later targets are further
     if (t.status === 'REQUESTED') {
@@ -494,6 +511,9 @@ export interface TickSummary {
   takeProfitsRequested: number;
   trailingActivated: number;
   trailingTightened: number;
+  /** Trailing Take Profit closes requested. */
+  trailingTakeProfitsRequested: number;
+  /** Legacy trailing stop closes requested (positions opened before Trailing Take Profit). */
   trailingStopsRequested: number;
   /** A trigger fired but an exit for that position was still in flight (serialised). */
   exitsWaiting: number;
@@ -557,7 +577,7 @@ export async function recordMarketTick(
 
 export async function processMarketTick(db: Db, job: JobRow, now: Date): Promise<TickSummary> {
   const { instrumentId, quote } = job.payload as { instrumentId: string; quote: VenueQuote };
-  const summary: TickSummary = { instrumentId, stopsTriggered: 0, stopExitsRecorded: 0, takeProfitsRequested: 0, trailingActivated: 0, trailingTightened: 0, trailingStopsRequested: 0, exitsWaiting: 0 };
+  const summary: TickSummary = { instrumentId, stopsTriggered: 0, stopExitsRecorded: 0, takeProfitsRequested: 0, trailingActivated: 0, trailingTightened: 0, trailingTakeProfitsRequested: 0, trailingStopsRequested: 0, exitsWaiting: 0 };
 
   // 1. The venue triggers resting stops on their own basis (exchange-native, may fire any time).
   summary.stopsTriggered = (await triggerStops(db, instrumentId, quote, now)).length;
@@ -572,7 +592,7 @@ export async function processMarketTick(db: Db, job: JobRow, now: Date): Promise
     if (recorded) summary.stopExitsRecorded += 1;
   }
 
-  // 3. Software triggers (trailing stop, TP targets) on each position's saved basis.
+  // 3. Software triggers (Trailing Take Profit or a legacy trailing stop, TP targets) on each position's saved basis.
   const open = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.instrumentId, instrumentId), eq(positions.status, 'OPEN')));
   for (const { id } of open) {
     const r = await db.transaction(async (tx) => {
@@ -581,6 +601,7 @@ export async function processMarketTick(db: Db, job: JobRow, now: Date): Promise
     });
     if (!r) continue;
     if (r.requested === 'TAKE_PROFIT') summary.takeProfitsRequested += 1;
+    if (r.requested === 'TRAILING_TAKE_PROFIT') summary.trailingTakeProfitsRequested += 1;
     if (r.requested === 'TRAILING_STOP') summary.trailingStopsRequested += 1;
     if (r.trailingActivated) summary.trailingActivated += 1;
     if (r.trailingTightened) summary.trailingTightened += 1;

@@ -60,6 +60,11 @@ export function OrderBlockRow({ block, pairLabel, strategyName, busy, onEdit, on
             Paused
           </StatusPill>
         )}
+        {block.trailingConversionRequired && (
+          <p className="mt-1 text-xs font-semibold text-warn" data-testid="trailing-needs-update">
+            Needs update: entries on hold until Trailing take profit has an activation value
+          </p>
+        )}
         {active && noDays && (
           <p className="mt-1 flex items-center gap-1 text-xs text-warn">
             <CalendarOffIcon className="h-3 w-3" aria-hidden /> No entry days selected

@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import { Decimal, marketSourceLabel, type MarketSource } from '@trendpilot/domain';
+import { Decimal, marketSourceLabel, trailingTakeProfitContracts, type MarketSource, type TrailingKind } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { fills, instruments, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions, positionTargets, signalDecisions, signalEvents } from '../schema';
 
@@ -60,7 +60,7 @@ export interface PositionDto {
   signal: { eventId: string; action: string; barOpenAt: string; barCloseAt: string } | null;
   /** EXT-03 target progress: planned share, requested and confirmed filled quantity per target. */
   targets: TargetDto[];
-  /** EXT-04 persisted trailing state (null = trailing off). */
+  /** EXT-04 persisted trailing exit state (null = no trailing exit). */
   trailing: TrailingDto | null;
 }
 
@@ -79,7 +79,15 @@ export interface TargetDto {
 }
 
 export interface TrailingDto {
+  /** TAKE_PROFIT = Trailing Take Profit; STOP = legacy trailing stop saved with an older position. */
+  kind: TrailingKind;
+  /** WAITING (for activation), ACTIVE, or DONE (Trailing Take Profit closed its quantity). */
   status: string;
+  /**
+   * Contracts it would close now: Trailing Take Profit manages what no unfinished target
+   * reserves; a legacy trailing stop closes the whole remaining position. Null once closed.
+   */
+  contracts: string | null;
   basis: string;
   distancePct: string;
   activationPrice: string | null;
@@ -113,6 +121,13 @@ async function targetsByPosition(db: Executor, ownerId: string, positionIds: str
     .orderBy(asc(positionTargets.ordinal));
   for (const t of rows) m.set(t.positionId, [...(m.get(t.positionId) ?? []), toTarget(t)]);
   return m;
+}
+
+/** Attaches targets and the quantity the trailing exit manages for an open position. */
+function withTargets(pos: PositionDto, targets: TargetDto[]): PositionDto {
+  if (!pos.trailing || pos.status !== 'OPEN' || pos.trailing.status === 'DONE') return { ...pos, targets };
+  const contracts = pos.trailing.kind === 'TAKE_PROFIT' ? trailingTakeProfitContracts(pos.contracts, targets) : pos.contracts;
+  return { ...pos, targets, trailing: { ...pos.trailing, contracts } };
 }
 
 const positionSelect = (db: Executor) =>
@@ -153,7 +168,9 @@ function toPosition({ p, symbol, ev }: { p: typeof positions.$inferSelect; symbo
       p.trailingStatus === 'OFF'
         ? null
         : {
+            kind: p.trailingKind as TrailingKind,
             status: p.trailingStatus,
+            contracts: null,
             basis: p.trailingBasis ?? p.stopBasis,
             distancePct: n(p.trailingDistancePct)!,
             activationPrice: n(p.trailingActivationPrice),
@@ -168,7 +185,7 @@ function toPosition({ p, symbol, ev }: { p: typeof positions.$inferSelect; symbo
 export async function listMyPositions(db: Executor, ownerId: string): Promise<PositionDto[]> {
   const rows = await positionSelect(db).where(eq(positions.ownerId, ownerId)).orderBy(desc(positions.openedAt));
   const targets = await targetsByPosition(db, ownerId, rows.map((r) => r.p.id));
-  return rows.map((r) => ({ ...toPosition(r), targets: targets.get(r.p.id) ?? [] }));
+  return rows.map((r) => withTargets(toPosition(r), targets.get(r.p.id) ?? []));
 }
 
 export interface FillDto {
@@ -376,7 +393,7 @@ export async function getMyTrade(db: Executor, ownerId: string, positionId: stri
   const funding = fundingRows.map((f) => ({ settledAt: f.settledAt.toISOString(), rate: n(f.rate)!, contracts: n(f.contracts)!, markPrice: n(f.markPrice)!, notionalUsdt: n(f.notional)!, amountUsdt: n(f.amount)!, source: f.source }));
   const fundingUsdt = fundingRows.reduce((t, f) => t.plus(f.amount), new Decimal(0)).toFixed();
   const netRealizedWithFundingUsdt = new Decimal(pos.netRealizedUsdt).plus(fundingUsdt).toFixed();
-  return { ...pos, targets, order, exits, closeOrders, ledger, reversal: await reversalOf(db, ownerId, pos), reversedFromPositionId, marketData, funding, fundingUsdt, netRealizedWithFundingUsdt };
+  return { ...withTargets(pos, targets), order, exits, closeOrders, ledger, reversal: await reversalOf(db, ownerId, pos), reversedFromPositionId, marketData, funding, fundingUsdt, netRealizedWithFundingUsdt };
 }
 
 /** GET /v1/me/commands/{id}: status of a close command the investor submitted (owner-scoped). */

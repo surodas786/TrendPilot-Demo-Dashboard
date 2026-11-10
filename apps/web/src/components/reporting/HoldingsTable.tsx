@@ -2,13 +2,14 @@ import Link from 'next/link';
 import type { HoldingDto } from '@trendpilot/db';
 import { fmtTime, pnlTone, priceOrUnavailable, usdtOrUnavailable } from './format';
 import { StatusPill } from '../ui/StatusPill';
+import { TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
 
 /** REP-04 Holdings: each open paper position with current price, stop coverage and unrealized P&L. */
 export function HoldingsTable({ holdings, timezone }: { holdings: HoldingDto[]; timezone: string }) {
   if (!holdings.length) return <p className="text-sm text-muted">No open paper positions.</p>;
   return (
     <div className="overflow-x-auto rounded-xl border border-line">
-      <table className="w-full min-w-[1080px] text-left text-sm" aria-label="Holdings">
+      <table className="w-full min-w-[1240px] text-left text-sm" aria-label="Holdings">
         <thead className="border-b border-line text-xs text-subtle">
           <tr>
             <th scope="col" className="px-3 py-2 font-medium">Contract</th>
@@ -17,6 +18,7 @@ export function HoldingsTable({ holdings, timezone }: { holdings: HoldingDto[]; 
             <th scope="col" className="px-3 py-2 font-medium">Entry</th>
             <th scope="col" className="px-3 py-2 font-medium">Current (mark · last)</th>
             <th scope="col" className="px-3 py-2 font-medium">Stop coverage</th>
+            <th scope="col" className="px-3 py-2 font-medium">Trailing take profit</th>
             <th scope="col" className="px-3 py-2 font-medium">Unrealized (mark)</th>
             <th scope="col" className="px-3 py-2 font-medium">Liquidation</th>
           </tr>
@@ -64,6 +66,25 @@ export function HoldingsTable({ holdings, timezone }: { holdings: HoldingDto[]; 
                   <span className="block text-xs text-subtle">
                     stop {priceOrUnavailable(h.stop.price)} ({h.stop.basis.toLowerCase()})
                   </span>
+                </td>
+                <td className="px-3 py-2.5 text-xs" data-testid="holding-trailing" data-status={h.trailing?.status ?? 'OFF'} data-kind={h.trailing?.kind ?? 'NONE'}>
+                  {!h.trailing ? (
+                    <span className="text-muted">Off</span>
+                  ) : (
+                    <>
+                      <StatusPill tone={h.trailing.status === 'ACTIVE' ? 'gain' : 'neutral'}>{TRAILING_STATUS_LABEL[h.trailing.status] ?? h.trailing.status}</StatusPill>
+                      <span className="block text-subtle">
+                        {h.trailing.status === 'ACTIVE'
+                          ? `closes at ${priceOrUnavailable(h.trailing.level)} · best ${priceOrUnavailable(h.trailing.watermark)}`
+                          : h.trailing.activationPrice
+                            ? `activates at ${priceOrUnavailable(h.trailing.activationPrice)}`
+                            : 'from entry'}
+                      </span>
+                      <span className="block text-subtle">
+                        {h.trailing.contracts !== null ? `${Number(h.trailing.contracts)} contracts · ` : ''}trail {h.trailing.distancePct}%{h.trailing.kind === 'STOP' ? ` · ${trailingName('STOP')}` : ''}
+                      </span>
+                    </>
+                  )}
                 </td>
                 <td className={`px-3 py-2.5 font-semibold ${pnlTone(h.unrealizedPnlUsdt)}`} data-testid="holding-unrealized">
                   {usdtOrUnavailable(h.unrealizedPnlUsdt, true)}

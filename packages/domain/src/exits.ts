@@ -7,12 +7,26 @@ import type { OppositePolicy } from './strategy';
  * EXT-01…07 and STR-04/05/06 exit rules for paper positions. Pure functions.
  */
 
-export type ExitReason = 'STOP_LOSS' | 'TAKE_PROFIT' | 'TRAILING_STOP' | 'SIGNAL_CLOSE' | 'OPPOSITE_SIGNAL_CLOSE' | 'REVERSAL_CLOSE' | 'MANUAL_CLOSE' | 'PROTECTION_FAILURE';
+/**
+ * TRAILING_TAKE_PROFIT is the current trailing exit. TRAILING_STOP is kept only for positions
+ * opened before Trailing Take Profit existed: they keep the behaviour saved with them.
+ */
+export type ExitReason =
+  | 'STOP_LOSS'
+  | 'TAKE_PROFIT'
+  | 'TRAILING_TAKE_PROFIT'
+  | 'TRAILING_STOP'
+  | 'SIGNAL_CLOSE'
+  | 'OPPOSITE_SIGNAL_CLOSE'
+  | 'REVERSAL_CLOSE'
+  | 'MANUAL_CLOSE'
+  | 'PROTECTION_FAILURE';
 
 export const EXIT_REASON_TEXT: Record<ExitReason, string> = {
   STOP_LOSS: 'The attached stop loss was triggered.',
   TAKE_PROFIT: 'A take-profit target was reached.',
-  TRAILING_STOP: 'Price came back to the trailing stop level.',
+  TRAILING_TAKE_PROFIT: 'After Trailing Take Profit activated, price pulled back by the trail distance from its best level.',
+  TRAILING_STOP: 'Price came back to the trailing stop level (legacy trailing stop saved with this position).',
   SIGNAL_CLOSE: 'A matching close signal was received.',
   OPPOSITE_SIGNAL_CLOSE: 'An opposite signal closed the position (policy: close position only).',
   REVERSAL_CLOSE: 'An opposite signal closed the position to reverse it (policy: close and reverse).',
@@ -102,7 +116,8 @@ export function planTargets(
   spec: { priceTick: string; qtyStep: string }
 ): PlannedTarget[] {
   if (tp.mode === 'OFF' || tp.levels.length === 0) return [];
-  const levels = tp.mode === 'FIXED' ? [{ ...tp.levels[0]!, closePct: '100' }] : tp.levels;
+  // A fixed target closes its saved share: 100 %, or less when Trailing Take Profit manages the rest.
+  const levels = tp.mode === 'FIXED' ? [tp.levels[0]!] : tp.levels;
   const full = levels.reduce((sum, l) => sum.plus(l.closePct), D(0)).eq(100);
   let allocated = D(0);
   return levels.map((l, i) => {
@@ -122,7 +137,27 @@ export function targetStatusAfter(planned: string, filled: string, inFlight: boo
   return D(filled).gt(0) ? 'PARTIAL' : 'PENDING';
 }
 
-/* ───────────────────────── EXT-04 trailing stop ───────────────────────── */
+/* ───────────────────────── EXT-04 trailing take profit ───────────────────────── */
+
+/**
+ * TAKE_PROFIT: Trailing Take Profit. It arms only after the activation move, then closes, at
+ * market, the quantity no take-profit target reserves.
+ * STOP: the legacy trailing stop of positions opened before. It may be active from entry and
+ * closes the whole remaining position. It is never created for new entries.
+ */
+export type TrailingKind = 'TAKE_PROFIT' | 'STOP';
+
+/**
+ * Contracts Trailing Take Profit may close: what is open minus what unfinished targets still
+ * reserve (their planned share less confirmed fills). A trailing close and a target can
+ * therefore never close the same contracts.
+ */
+export function trailingTakeProfitContracts(openContracts: string, targets: { status: string; plannedContracts: string; filledContracts: string }[]): string {
+  const reserved = targets
+    .filter((t) => t.status !== 'DONE' && t.status !== 'CANCELLED')
+    .reduce((sum, t) => sum.plus(Decimal.max(0, D(t.plannedContracts).minus(t.filledContracts))), D(0));
+  return Decimal.max(0, D(openContracts).minus(reserved)).toFixed();
+}
 
 const toTick = (v: Decimal, tick: string, mode: Decimal.Rounding) => v.div(tick).toDecimalPlaces(0, mode).times(tick);
 

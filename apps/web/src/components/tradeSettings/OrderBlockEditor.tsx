@@ -305,6 +305,16 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
         </Section>
 
         <Section title="Exits">
+          {existing?.trailingConversionRequired && (
+            <div role="status" data-testid="trailing-conversion-banner" className="flex gap-2 rounded-lg border border-warn/40 bg-warn/10 p-3 text-xs text-ink">
+              <InfoIcon className="mt-0.5 h-4 w-4 shrink-0 text-warn" aria-hidden />
+              <p>
+                <span className="font-semibold">New entries are on hold.</span> This block was saved with the old Trailing Stop, which is replaced by Trailing take
+                profit. Enter Activate after profit (%) — it is not taken from the old trailing distance — or turn trailing off, then save. Open positions keep the
+                behaviour they were opened with.
+              </p>
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-subtle">Percentages are price movement from entry.</p>
             <Button size="sm" variant="ghost" icon={RotateCcwIcon} onClick={() => setConfirmRestore(true)} disabled={!instrument}>
@@ -335,21 +345,51 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
             onChange={(v) => updateExits({ stopPct: v })}
             hint={
               draft.stopType === 'PERCENT'
-                ? 'Required. Distance from entry: below for longs, above for shorts. Sent with the opening order.'
+                ? 'Required. Distance from entry: below for longs, above for shorts. Sent with the opening order; protects the whole position before and after Trailing take profit activates.'
                 : 'Required. Absolute trigger price. Must be below entry for longs and above for shorts — check the preview.'
             }
             error={err('stop')}
             trailing={draft.stopType === 'PERCENT' ? pct : <span className="pr-2 text-xs text-subtle">USDT</span>}
           />
           <TakeProfitEditor draft={draft} errors={errors} showErrors={touched} onChange={updateExits} />
-          <Switch label="Trailing stop" description="Follows the best price since entry — highest for longs, lowest for shorts — and only tightens." checked={draft.trailingEnabled} onChange={(v) => updateExits({ trailingEnabled: v })} />
-          {draft.trailingEnabled && (
-            <div className="grid gap-3 sm:grid-cols-3">
-              <TextField label="Activate after move" inputMode="decimal" placeholder="Immediately" value={draft.trailingActivationPct} onChange={(v) => updateExits({ trailingActivationPct: v })} error={err('trailing.activationPct')} trailing={pct} />
-              <TextField label="Trailing distance" inputMode="decimal" value={draft.trailingPct} onChange={(v) => updateExits({ trailingPct: v })} error={err('trailing.distancePct')} trailing={pct} />
-              <FilterSelect label="Trigger basis" value={draft.trailingBasis} onChange={(v) => updateExits({ trailingBasis: v as PriceBasis })} options={(['MARK', 'LAST'] as const).map((b) => ({ value: b, label: BASIS_LABELS[b] }))} />
-            </div>
-          )}
+          <div className="space-y-3 rounded-lg border border-line p-3" data-testid="trailing-take-profit">
+            <Switch
+              label="Trailing take profit"
+              description="Locks in profit after a favourable move: it arms only once price has moved by Activate after profit, then closes its quantity at market when price pulls back by Trail distance from the best price since activation."
+              checked={draft.trailingEnabled}
+              onChange={(v) => updateExits({ trailingEnabled: v })}
+            />
+            {draft.trailingEnabled && (
+              <>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <TextField
+                    label="Activate after profit (%)"
+                    inputMode="decimal"
+                    value={draft.trailingActivationPct}
+                    onChange={(v) => updateExits({ trailingActivationPct: v })}
+                    error={err('trailing.activationPct')}
+                    hint="Required. Long: price rises this much; Short: price falls this much."
+                    trailing={pct}
+                  />
+                  <TextField
+                    label="Trail distance (%)"
+                    inputMode="decimal"
+                    value={draft.trailingPct}
+                    onChange={(v) => updateExits({ trailingPct: v })}
+                    error={err('trailing.distancePct')}
+                    hint="Required. Pullback from the highest (Long) or lowest (Short) price."
+                    trailing={pct}
+                  />
+                  <FilterSelect label="Trigger basis" value={draft.trailingBasis} onChange={(v) => updateExits({ trailingBasis: v as PriceBasis })} options={(['MARK', 'LAST'] as const).map((b) => ({ value: b, label: BASIS_LABELS[b] }))} />
+                </div>
+                <p className="text-xs text-subtle">
+                  Both percentages are price movement from the confirmed average entry, before fees and leverage. Until it activates it does nothing. The stop loss above
+                  stays in place for the whole position before and after activation.
+                </p>
+                {err('trailing') && <p className="text-xs text-loss">{err('trailing')}</p>}
+              </>
+            )}
+          </div>
         </Section>
 
         <MultipleEntriesSection draft={draft} errors={errors} showErrors={touched} onChange={update} />
@@ -389,7 +429,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
       <ConfirmDialog
         open={confirmRestore}
         title="Restore suggested values?"
-        description={`Replace this draft's stop loss, take profit and trailing stop with the administrator's current ${instrument ? pairLabel(instrument) : ''} suggestions. Nothing is saved until you press Save.`}
+        description={`Replace this draft's stop loss, take profit and Trailing take profit with the administrator's current ${instrument ? pairLabel(instrument) : ''} suggestions. Nothing is saved until you press Save.`}
         confirmLabel="Restore"
         onConfirm={() => {
           updateExits(exitDefaults(instrument));

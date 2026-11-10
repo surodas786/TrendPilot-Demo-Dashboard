@@ -30,7 +30,7 @@ const describe = (r: ProcessResult) =>
     : r.close
       ? `job ${r.job?.id} ${r.outcome}: paper close ${r.close.intentId} ${r.close.state}${r.close.reason ? ` (${r.close.reason})` : ''}${r.close.filled ? ` filled=${r.close.filled} remaining=${r.close.remaining}${r.close.closed ? ' position CLOSED' : ''}` : ''}${r.close.reconciled ? ' [reconciled with simulator]' : ''}${r.close.exitReason ? ` exit=${r.close.exitReason}` : ''}${r.close.targetLevelId ? ` target=${r.close.targetLevelId}` : ''}${r.close.next ? ` next=${r.close.next}` : ''}${r.close.reversalQueued ? ' reversal queued' : ''}`
       : r.tick
-        ? `job ${r.job?.id} ${r.outcome}: market tick stopsTriggered=${r.tick.stopsTriggered} stopExitsRecorded=${r.tick.stopExitsRecorded} takeProfitsRequested=${r.tick.takeProfitsRequested} trailingActivated=${r.tick.trailingActivated} trailingTightened=${r.tick.trailingTightened} trailingStopsRequested=${r.tick.trailingStopsRequested} exitsWaiting=${r.tick.exitsWaiting}`
+        ? `job ${r.job?.id} ${r.outcome}: market tick stopsTriggered=${r.tick.stopsTriggered} stopExitsRecorded=${r.tick.stopExitsRecorded} takeProfitsRequested=${r.tick.takeProfitsRequested} trailingActivated=${r.tick.trailingActivated} trailingTightened=${r.tick.trailingTightened} trailingTakeProfitsRequested=${r.tick.trailingTakeProfitsRequested} trailingStopsRequested=${r.tick.trailingStopsRequested} exitsWaiting=${r.tick.exitsWaiting}`
         : r.funding
           ? `job ${r.job?.id} ${r.outcome}: funding ${r.funding.settledAt} positions=${r.funding.positions} booked=${r.funding.booked} alreadyBooked=${r.funding.alreadyBooked}${r.funding.noMark ? ` noMark=${r.funding.noMark}` : ''}`
         : r.reverse
