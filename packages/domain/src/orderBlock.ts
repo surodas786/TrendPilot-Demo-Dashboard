@@ -250,11 +250,12 @@ const createStrict = settingsBase
   })
   .strict()
   .superRefine((s, ctx) => refineSettings(s, ctx));
-const patchStrict = settingsBase.partial().strict();
+/** PATCH: any subset of settings, plus an optional change of trading mode (checked by the server). */
+const patchStrict = settingsBase.partial().extend({ mode: z.enum(MODES).optional() }).strict();
 
 export const orderBlockSettingsSchema = z.preprocess(liftSharedTakeProfit, settingsStrict);
 export const orderBlockCreateSchema = z.preprocess(liftSharedTakeProfit, createStrict);
-/** PATCH body: any subset of settings. Instrument and mode identify the block and cannot change. */
+/** PATCH body: any subset of settings and optionally `mode`. The instrument cannot change. */
 export const orderBlockPatchSchema = z.preprocess(liftSharedTakeProfit, patchStrict);
 
 export type OrderBlockSettings = z.output<typeof settingsStrict>;

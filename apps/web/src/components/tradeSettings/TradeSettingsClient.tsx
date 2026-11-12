@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { PlusIcon, SlidersHorizontalIcon } from 'lucide-react';
 import { toast } from 'sonner';
-import type { OrderBlockDto } from '@trendpilot/domain';
+import { liveUnavailableReason, MODE_LABELS, type BlockMode, type OrderBlockDto } from '@trendpilot/domain';
 import type { InstrumentDto, StrategyVersionDto } from '@trendpilot/db';
 import { api } from '@/lib/api';
 import { PageContainer } from '../layout/PageContainer';
@@ -21,17 +21,20 @@ interface Props {
   blocks: OrderBlockDto[];
   instruments: InstrumentDto[];
   versions: StrategyVersionDto[];
-  /** The investor's MEXC connection is verified (Live blocks can be created). */
-  liveConnected: boolean;
+  /** Status of the investor's MEXC connection (null = none); Live needs VERIFIED. */
+  liveConnectionStatus: string | null;
 }
 
 /** UI-03 Trade Settings for the signed-in investor only. All data arrives owner-scoped from the server. */
-export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnected }: Props) {
+export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus }: Props) {
   const router = useRouter();
-  const [editing, setEditing] = useState<string | 'new' | null>(null);
+  /** A saved block id, 'new', or a new block prefilled from a saved one in the other mode. */
+  const [editing, setEditing] = useState<string | 'new' | { copyFrom: OrderBlockDto; mode: BlockMode } | null>(null);
+  const liveConnected = liveUnavailableReason(liveConnectionStatus) === null;
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const existing = editing && editing !== 'new' ? blocks.find((b) => b.id === editing) : undefined;
+  const existing = typeof editing === 'string' && editing !== 'new' ? blocks.find((b) => b.id === editing) : undefined;
+  const copy = editing && typeof editing === 'object' ? editing : undefined;
   const takenByMode = { PAPER: blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId), LIVE: blocks.filter((b) => b.mode === 'LIVE').map((b) => b.instrumentId) };
   const tradable = (i: InstrumentDto) => versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id));
   const canAdd = instruments.some((i) => tradable(i) && (!takenByMode.PAPER.includes(i.id) || (liveConnected && !takenByMode.LIVE.includes(i.id))));
@@ -84,17 +87,24 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
         onClose={() => setEditing(null)}
         widthClassName="sm:w-[540px]"
         bodyClassName="flex min-h-0 flex-1 flex-col"
-        title={<h2 className="text-base font-semibold text-ink">{existing ? `${labelOf(existing)} · Paper` : 'Add Token'}</h2>}
+        title={
+          <h2 className="text-base font-semibold text-ink">
+            {existing ? `${labelOf(existing)} · ${MODE_LABELS[existing.mode as BlockMode]}` : copy ? `${labelOf(copy.copyFrom)} · new ${MODE_LABELS[copy.mode]} entry` : 'Add Token'}
+          </h2>
+        }
         subtitle={existing ? 'Changes apply to future entries only.' : 'Saved blocks start paused unless you activate them.'}
       >
         {editing !== null && (
           <OrderBlockEditor
-            key={`${editing}-${existing?.revision ?? 0}`}
+            key={copy ? `copy-${copy.copyFrom.id}-${copy.mode}` : `${editing}-${existing?.revision ?? 0}`}
             existing={existing}
+            copyFrom={copy ? { block: copy.copyFrom, mode: copy.mode } : undefined}
+            onEditBlock={(id) => setEditing(id)}
+            onCopyToMode={(block, mode) => setEditing({ copyFrom: block, mode })}
             instruments={instruments}
             versions={versions}
             takenByMode={takenByMode}
-            liveConnected={liveConnected}
+            liveConnectionStatus={liveConnectionStatus}
             timezone={timezone}
             onDone={(saved) => {
               setEditing(null);

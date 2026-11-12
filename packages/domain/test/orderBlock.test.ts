@@ -181,9 +181,10 @@ describe('order block schema', () => {
     expect(parse(valid({ [key]: 'x' })).ok).toBe(false);
   });
 
-  it('patch schema refuses instrument and mode changes and unknown keys', () => {
+  it('patch schema refuses instrument changes and unknown keys; a mode change is accepted for the server to check', () => {
     expect(parseWith(orderBlockPatchSchema, { orderCostUsdt: '5' }).ok).toBe(true);
-    expect(parseWith(orderBlockPatchSchema, { mode: 'PAPER' }).ok).toBe(false);
+    expect(parseWith(orderBlockPatchSchema, { mode: 'LIVE' }).ok).toBe(true);
+    expect(parseWith(orderBlockPatchSchema, { mode: 'DEMO' }).ok).toBe(false);
     expect(parseWith(orderBlockPatchSchema, { instrumentId: INSTRUMENT }).ok).toBe(false);
     expect(parseWith(orderBlockPatchSchema, { ownerId: INSTRUMENT }).ok).toBe(false);
   });

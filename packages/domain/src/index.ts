@@ -7,6 +7,7 @@ export * from './liveTransport';
 export * from './mailSettings';
 export * from './market';
 export * from './marketFeed';
+export * from './modeChange';
 export * from './orderBlock';
 export * from './paperEntry';
 export * from './pilot';

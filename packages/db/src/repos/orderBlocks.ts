@@ -1,8 +1,9 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, sql } from 'drizzle-orm';
 import {
   DomainError,
   ErrorCode,
   normDecimal,
+  type BlockMode,
   type BlockStatus,
   type OrderBlockCreate,
   type OrderBlockDto,
@@ -10,7 +11,10 @@ import {
   type Weekday
 } from '@trendpilot/domain';
 import type { Executor } from '../client';
-import { instruments, orderBlocks } from '../schema';
+import { instruments, orderBlocks, orderIntents, paperAccounts, positions } from '../schema';
+
+/** Order intent states that are not finished yet (same set the entry and exit paths use). */
+const UNFINISHED_INTENTS = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (v: string) => UUID_RE.test(v);
@@ -100,6 +104,38 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
   return {
     get,
 
+    /**
+     * Open positions and unfinished orders this block manages (they keep the block's mode).
+     * `lockMode` (inside a transaction): first lock the owner's account row for that mode, the
+     * same row an entry locks before it reserves an order, so no entry can start in between. An
+     * account that does not exist yet is not created; nothing can be open on it.
+     */
+    async activity(id: string, opts: { lockMode?: BlockMode } = {}): Promise<{ openPositions: number; pendingOrders: number }> {
+      if (!isUuid(id)) return { openPositions: 0, pendingOrders: 0 };
+      if (opts.lockMode) {
+        await db
+          .select({ id: paperAccounts.id })
+          .from(paperAccounts)
+          .where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, opts.lockMode)))
+          .for('update');
+      }
+      const [[p], [o]] = await Promise.all([
+        db.select({ n: count() }).from(positions).where(and(eq(positions.orderBlockId, id), eq(positions.ownerId, ownerId), eq(positions.status, 'OPEN'))),
+        db.select({ n: count() }).from(orderIntents).where(and(eq(orderIntents.orderBlockId, id), eq(orderIntents.ownerId, ownerId), inArray(orderIntents.state, [...UNFINISHED_INTENTS])))
+      ]);
+      return { openPositions: Number(p?.n ?? 0), pendingOrders: Number(o?.n ?? 0) };
+    },
+
+    /** The owner's block for a pair in a given mode (one per pair and mode), if any. */
+    async idFor(instrumentId: string, mode: BlockMode): Promise<string | null> {
+      const [row] = await db
+        .select({ id: orderBlocks.id })
+        .from(orderBlocks)
+        .where(and(eq(orderBlocks.ownerId, ownerId), eq(orderBlocks.instrumentId, instrumentId), eq(orderBlocks.mode, mode)))
+        .limit(1);
+      return row?.id ?? null;
+    },
+
     async list(): Promise<OrderBlockDto[]> {
       const rows = await select().where(eq(orderBlocks.ownerId, ownerId)).orderBy(asc(instruments.symbol), asc(orderBlocks.mode));
       return rows.map((r) => toDto(r.b, r));
@@ -125,19 +161,28 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
      * CFG-03 optimistic concurrency: applies only when the stored revision matches.
      * `trailingConverted`: the save carried trailing settings validated under Trailing Take
      * Profit rules, so a legacy trailing stop is converted and entries are no longer held.
+     * `mode`: switch the block to this trading mode (checked by the caller). The block is paused
+     * so the investor resumes it explicitly in the new mode.
      */
-    async update(id: string, expectedRevision: number, settings: OrderBlockSettings, o: { trailingConverted?: boolean } = {}): Promise<WriteResult> {
+    async update(id: string, expectedRevision: number, settings: OrderBlockSettings, o: { trailingConverted?: boolean; mode?: BlockMode } = {}): Promise<WriteResult> {
       if (!isUuid(id)) return { ok: false, reason: 'NOT_FOUND' };
-      const rows = await db
-        .update(orderBlocks)
-        .set({
-          ...settingsColumns(settings),
-          ...(o.trailingConverted ? { trailingConversionRequired: false } : {}),
-          revision: sql`${orderBlocks.revision} + 1`,
-          updatedAt: sql`now()`
-        })
-        .where(and(owned(id), eq(orderBlocks.revision, expectedRevision)))
-        .returning({ id: orderBlocks.id });
+      let rows: { id: string }[];
+      try {
+        rows = await db
+          .update(orderBlocks)
+          .set({
+            ...settingsColumns(settings),
+            ...(o.trailingConverted ? { trailingConversionRequired: false } : {}),
+            ...(o.mode ? { mode: o.mode, status: 'PAUSED' as const } : {}),
+            revision: sql`${orderBlocks.revision} + 1`,
+            updatedAt: sql`now()`
+          })
+          .where(and(owned(id), eq(orderBlocks.revision, expectedRevision)))
+          .returning({ id: orderBlocks.id });
+      } catch (e) {
+        if (isUniqueViolation(e)) throw new DomainError(409, ErrorCode.DUPLICATE_BLOCK, 'You already have an order block for this pair and mode.');
+        throw e;
+      }
       if (rows.length === 0) return { ok: false, reason: await missReason(id) };
       return { ok: true, block: (await get(id))! };
     },
