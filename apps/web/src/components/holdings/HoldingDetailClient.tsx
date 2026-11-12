@@ -3,7 +3,7 @@
 import React from 'react';
 import type { HoldingDto, LiveQuoteDto, TradeDetailDto } from '@trendpilot/db';
 import { cn } from '@/lib/cn';
-import { EXIT_LABEL, signedUsdt, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
+import { EXIT_LABEL, signedUsdt, takeProfitPlanLabel, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
 import { ConnectionPill } from '../market/LiveQuotesPanel';
 import { useLiveQuotes } from '../market/useLiveQuotes';
 import { fmtTime, pnlTone, priceOrUnavailable } from '../reporting/format';
@@ -147,6 +147,9 @@ export function HoldingDetailClient({ t, holdingPrice, quotes, timezone }: { t: 
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="rounded-xl border border-line bg-surface p-4 text-sm">
           <h3 className="mb-2 font-semibold text-ink">Exit plan (saved with this position)</h3>
+          <p className="mb-2 text-xs text-muted" data-testid="detail-tp-plan">
+            {takeProfitPlanLabel(t.takeProfitPlan, t.side)}
+          </p>
           {t.targets.length === 0 && !t.trailing && <p className="text-muted">No take-profit target or trailing exit. The stop loss and close signals manage this position.</p>}
           <ul className="space-y-2">
             {t.targets.map((x) => (

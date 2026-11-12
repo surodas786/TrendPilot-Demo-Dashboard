@@ -1,7 +1,7 @@
 import { Decimal } from './decimal';
 import { planExits, trailingActivationPrice } from './exits';
 import type { MarketSource } from './marketFeed';
-import { exitAllocation, type OrderBlockSettings, type PriceBasis } from './orderBlock';
+import { exitAllocation, takeProfitFor, type OrderBlockSettings, type PriceBasis, type TakeProfitMode } from './orderBlock';
 
 /**
  * EXE-01 order preview: sizing, stop, targets and fees from a quote, without placing
@@ -43,7 +43,11 @@ export interface SidePreview {
   stopBasis: PriceBasis;
   stopDistancePct: string;
   lossToStopUsdt: string;
-  /** Each target with the contracts it would close from this size. */
+  /** This side's Take Profit configuration (Long and Short are set independently). */
+  takeProfitMode: TakeProfitMode;
+  /** % of the position this side's Take Profit manages (the rest after Trailing Take Profit). */
+  takeProfitManagesPct: string;
+  /** Each target with the contracts it would close from this size (above entry for a Long, below for a Short). */
   takeProfits: { id: string; price: string; closePct: string; contracts: string }[];
   /**
    * Trailing Take Profit: arms at `activationPrice` and manages `contracts` (`managesPct` of
@@ -60,7 +64,7 @@ export interface OrderPreview {
   notes: string[];
 }
 
-type PreviewSettings = Pick<OrderBlockSettings, 'orderCostUsdt' | 'leverage' | 'direction' | 'stop' | 'takeProfit' | 'trailing' | 'risk'>;
+type PreviewSettings = Pick<OrderBlockSettings, 'orderCostUsdt' | 'leverage' | 'direction' | 'stop' | 'takeProfitLong' | 'takeProfitShort' | 'trailing' | 'risk'>;
 
 const D = (v: string | number | Decimal) => new Decimal(v);
 const fmt = (v: Decimal, dp = 8) => v.toDecimalPlaces(dp, Decimal.ROUND_HALF_UP).toFixed();
@@ -111,9 +115,10 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
     reasons.push({ code: 'RISK_LIMIT', message: `Loss to stop ${fmt(lossToStop, 2)} USDT exceeds your cap of ${s.risk.maxStopRiskUsdt} USDT.` });
   }
 
-  const plan = planExits(dir, fmt(p), fmt(contracts), s, { priceTick: spec.priceTick, qtyStep: spec.qtyStep });
+  const exits = { takeProfit: takeProfitFor(s, dir), trailing: s.trailing };
+  const plan = planExits(dir, fmt(p), fmt(contracts), exits, { priceTick: spec.priceTick, qtyStep: spec.qtyStep });
   const tps = plan.targets.map((t) => ({ id: t.levelId, price: t.triggerPrice, closePct: t.closePct, contracts: t.plannedContracts }));
-  const allocation = exitAllocation(s);
+  const allocation = exitAllocation(exits);
 
   // Same activation rounding as the running position (never closer than configured).
   const trailing =
@@ -141,6 +146,8 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
     stopBasis: s.stop.basis,
     stopDistancePct: fmt(stopDistance.div(p).times(100), 3),
     lossToStopUsdt: fmt(lossToStop, 2),
+    takeProfitMode: exits.takeProfit.mode,
+    takeProfitManagesPct: allocation.takeProfitPct,
     takeProfits: tps,
     trailing,
     reasons,

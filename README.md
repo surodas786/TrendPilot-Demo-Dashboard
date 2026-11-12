@@ -813,3 +813,43 @@ The worker re-checks every gate right before it sends. Stops, take profits, trai
 - `packages/domain/test/live.test.ts`: every gate.
 - `packages/domain/test/liveTransport.test.ts`: `enabled` is accepted only in production.
 - `apps/web/e2e/10-live-off-by-default.spec.ts`: the Live UI is Off by default; Paper and Live tabs.
+
+## Per-side Take Profit (Long and Short) — 2026-11-12
+
+Each token's Trade Settings now hold two independent Take Profit configurations, `takeProfitLong` and `takeProfitShort`. Each can be Fixed, Split (2–3 targets) or Off, with its own target percentages.
+- The editor shows a **Long take profit** and a **Short take profit** section. With a one-sided direction only the applicable section is shown, and the other side's saved values are kept: changing the direction never discards them.
+- Validation runs per enabled side and reports inline under `takeProfitLong.*` or `takeProfitShort.*` on blur and on Save.
+- Clearing a percentage with Backspace leaves the editor open with a field message.
+
+**At entry**
+- The actual side of the entry selects the configuration. It is saved with the intent and the position as `settingsSnapshot.block.takeProfit`, together with `takeProfitSide`.
+- Targets are computed from the confirmed average entry: above it for a Long, below it for a Short.
+- After a close-and-reverse, the new position uses its new side's configuration.
+
+**Exits are unchanged**
+- Each target, including every split target, arms on the favourable touch. It submits a market close on a later pullback through the target: back down for a Long, back up for a Short.
+- Take Profit manages what is left after Trailing Take Profit's *Position to close (%)*. With 40 % trailing, the side's Take Profit manages 60 %, and split shares divide that 60 %.
+- Partial fills, stop resizing and stop coverage follow the existing exit workflow.
+
+**Existing data**
+- Migration `0021_m11_take_profit_per_side` keeps `take_profit` as the Long configuration and adds `take_profit_short`, both starting from the current shared configuration.
+- Open positions keep the exit plan saved with them.
+- API clients that still send one `takeProfit` set both sides.
+
+**Where to see it**
+- **Order preview:** each side shows its plan (Fixed, Split or Off) and how much it manages, with targets marked above or below entry.
+- **My Holdings / My Trades detail:** the saved plan, e.g. "Short take profit · Split · targets below entry".
+
+**Tests**
+- `apps/web/test/api/takeProfitPerSide.test.ts` (Paper, 9 scenarios):
+  - Long Fixed / Short Split on one token, with 40 % trailing;
+  - a reversal;
+  - Short arm-then-rebound with stop coverage of the remainder;
+  - saved plans in holdings and trade detail;
+  - later edits not touching open positions;
+  - Long Off;
+  - legacy shared input;
+  - a direction change keeping both sides;
+  - the preview.
+- `packages/domain/test/orderBlock.test.ts`: per-side validation and Backspace.
+- `apps/web/e2e/99-take-profit-per-side.spec.ts`: the editor in the browser.

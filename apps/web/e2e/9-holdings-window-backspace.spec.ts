@@ -74,7 +74,7 @@ test('Backspace clears percentage fields without breaking the editor; inline val
   await expect(close).toBeVisible();
 
   await close.fill('40');
-  await expect(panel.getByTestId('exit-allocation')).toContainText('Take profit 60% · Trailing take profit 40%');
+  await expect(panel.getByTestId('tp-LONG').getByTestId('exit-allocation')).toContainText('Take profit 60% · Trailing take profit 40%');
   await close.press('Backspace');
   await close.press('Backspace');
   await expect(close).toHaveValue('');
@@ -85,9 +85,9 @@ test('Backspace clears percentage fields without breaking the editor; inline val
   await close.fill('0');
   await close.press('Tab');
   await expect(panel.getByText('Enter Position to close (%), from 0 to 100.')).toHaveCount(0);
-  await expect(panel.getByTestId('exit-allocation')).toContainText('Take profit 100% · Trailing take profit 0%');
+  await expect(panel.getByTestId('tp-LONG').getByTestId('exit-allocation')).toContainText('Take profit 100% · Trailing take profit 0%');
   await close.fill('100');
-  await expect(panel.getByTestId('exit-allocation')).toContainText('Take profit 0% · Trailing take profit 100%');
+  await expect(panel.getByTestId('tp-LONG').getByTestId('exit-allocation')).toContainText('Take profit 0% · Trailing take profit 100%');
   await close.fill('12.');
   await close.press('Tab');
   await expect(close).toHaveValue('12'); // tidied on blur
@@ -101,7 +101,7 @@ test('Backspace clears percentage fields without breaking the editor; inline val
   await stop.press('End');
   for (let i = 0; i < 6; i++) await stop.press('Backspace');
   await expect(stop).toHaveValue('');
-  const move = panel.getByLabel('Target — price move');
+  const move = panel.getByTestId('tp-LONG').getByLabel('Long target — price move');
   await move.click();
   await move.press('End');
   for (let i = 0; i < 4; i++) await move.press('Backspace');
@@ -203,6 +203,8 @@ test('a partial take-profit (arm, then pullback with limited liquidity): the det
   await expect(fills.nth(1)).toContainText('103');
   await expect(page.getByTestId('linked-signal')).toContainText('Opened by Bullish flip');
   await expect(page.getByTestId('detail-target').first()).toHaveAttribute('data-armed', 'true');
+  // The plan of the position's own side, saved at entry.
+  await expect(page.getByTestId('detail-tp-plan')).toHaveText('Long take profit · Fixed · targets above entry');
 
   // Chart for the exact contract, with the entry and current stop lines.
   const chart = page.getByTestId('position-chart');

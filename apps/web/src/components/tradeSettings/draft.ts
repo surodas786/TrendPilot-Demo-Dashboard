@@ -15,6 +15,14 @@ import {
 } from '@trendpilot/domain';
 import type { InstrumentDto, StrategyVersionDto } from '@trendpilot/db';
 
+export type TpSide = 'LONG' | 'SHORT';
+export interface SideTakeProfit {
+  mode: TakeProfitMode;
+  targets: { id: string; movePct: string; closePct: string }[];
+}
+/** API field and validation path prefix of each side's Take Profit. */
+export const TP_KEY: Record<TpSide, 'takeProfitLong' | 'takeProfitShort'> = { LONG: 'takeProfitLong', SHORT: 'takeProfitShort' };
+
 /** Form state for one order block. Strings mirror the inputs; validation is shared with the server. */
 export interface Draft {
   instrumentId: string;
@@ -27,8 +35,8 @@ export interface Draft {
   /** Percent distance or absolute price, depending on stopType. */
   stopPct: string;
   stopBasis: PriceBasis;
-  tpMode: TakeProfitMode;
-  targets: { id: string; movePct: string; closePct: string }[];
+  /** Take Profit per position side, edited independently; both are kept whatever the direction. */
+  tp: Record<TpSide, SideTakeProfit>;
   trailingEnabled: boolean;
   trailingActivationPct: string;
   trailingPct: string;
@@ -75,14 +83,14 @@ export const pairLabel = (i: Pick<InstrumentDto, 'base' | 'quote'>) => `${i.base
  * by the targets, neither of which a suggestion can choose. Its trail distance is prefilled
  * from the suggestion for when the investor turns it on.
  */
-export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tpMode' | 'targets' | 'trailingEnabled' | 'trailingPct' | 'trailingActivationPct' | 'trailingClosePct'> {
+export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tp' | 'trailingEnabled' | 'trailingPct' | 'trailingActivationPct' | 'trailingClosePct'> {
+  const fixed = (): SideTakeProfit => ({ mode: 'FIXED', targets: [{ id: newTargetId(), movePct: i?.suggested.takeProfitPct ?? '', closePct: '100' }] });
   return {
     stopType: 'PERCENT',
     stopPct: i?.suggested.stopPct ?? '',
     trailingActivationPct: '',
     trailingClosePct: '',
-    tpMode: 'FIXED',
-    targets: [{ id: newTargetId(), movePct: i?.suggested.takeProfitPct ?? '', closePct: '100' }],
+    tp: { LONG: fixed(), SHORT: fixed() },
     trailingEnabled: false,
     trailingPct: i?.suggested.trailingPct ?? ''
   };
@@ -114,6 +122,17 @@ export function newDraft(i: InstrumentDto | undefined, v: StrategyVersionDto | u
   };
 }
 
+const sideFromSaved = (t: OrderBlockDto['takeProfitLong']): SideTakeProfit => ({
+  mode: t.mode,
+  targets: t.levels.length ? t.levels.map((l) => ({ ...l })) : [{ id: newTargetId(), movePct: '', closePct: '100' }]
+});
+
+/** The API shape of one side: a fixed target manages the whole Take Profit share; split targets divide it. */
+const sidePayload = (t: SideTakeProfit) => {
+  const levels = t.mode === 'OFF' ? [] : t.mode === 'FIXED' ? [{ ...t.targets[0]!, closePct: '100' }] : t.targets;
+  return { mode: t.mode, levels: levels.map((l) => ({ id: l.id, movePct: l.movePct.trim(), closePct: l.closePct.trim() })) };
+};
+
 export function draftFromBlock(b: OrderBlockDto): Draft {
   return {
     instrumentId: b.instrumentId,
@@ -125,8 +144,7 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
     stopType: b.stop.type,
     stopPct: b.stop.value,
     stopBasis: b.stop.basis,
-    tpMode: b.takeProfit.mode,
-    targets: b.takeProfit.levels.length ? b.takeProfit.levels.map((l) => ({ ...l })) : [{ id: newTargetId(), movePct: '', closePct: '100' }],
+    tp: { LONG: sideFromSaved(b.takeProfitLong), SHORT: sideFromSaved(b.takeProfitShort) },
     trailingEnabled: b.trailing.enabled,
     trailingPct: b.trailing.distancePct ?? '',
     trailingActivationPct: b.trailing.activationPct ?? '',
@@ -144,9 +162,7 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
 
 /** The settings payload sent to the API (PATCH body; POST adds instrumentId and mode). */
 export function settingsPayload(d: Draft) {
-  // A fixed target manages the whole Take Profit share; split targets divide it between them.
   // The Take Profit / Trailing Take Profit split itself is Trailing Take Profit's "Position to close (%)".
-  const levels = d.tpMode === 'OFF' ? [] : d.tpMode === 'FIXED' ? [{ ...d.targets[0]!, closePct: '100' }] : d.targets;
   return {
     strategyVersionId: d.strategyVersionId,
     direction: d.direction,
@@ -154,7 +170,8 @@ export function settingsPayload(d: Draft) {
     leverage: d.leverage ?? 0,
     marginMode: d.marginMode,
     stop: { type: d.stopType, value: d.stopPct.trim(), basis: d.stopBasis },
-    takeProfit: { mode: d.tpMode, levels: levels.map((l) => ({ id: l.id, movePct: l.movePct.trim(), closePct: l.closePct.trim() })) },
+    takeProfitLong: sidePayload(d.tp.LONG),
+    takeProfitShort: sidePayload(d.tp.SHORT),
     trailing: {
       enabled: d.trailingEnabled,
       activationPct: d.trailingEnabled && d.trailingActivationPct.trim() ? d.trailingActivationPct.trim() : null,

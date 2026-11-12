@@ -14,6 +14,7 @@ import {
   TRADING_WINDOW_HELP,
   WEEKDAY_LABELS,
   WEEKDAYS,
+  sidesOf,
   type Direction,
   type MarginMode,
   type OrderBlockDto,
@@ -149,6 +150,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
 
   const cost = isDecimalString(draft.orderCostUsdt.trim()) ? new Decimal(draft.orderCostUsdt.trim()) : null;
   const notional = cost && cost.gt(0) && draft.leverage ? cost.times(draft.leverage) : null;
+  /** Take Profit is on for at least one side this direction trades. */
+  const anyTpOn = sidesOf(draft.direction).some((side) => draft.tp[side].mode !== 'OFF');
 
   const fail = (f: ApiFailure) => {
     if (f.code === 'REVISION_CONFLICT') setFormError('This block was changed in another window. Close the panel and reopen it to load the latest version.');
@@ -420,7 +423,13 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             error={err('stop')}
             trailing={draft.stopType === 'PERCENT' ? pct : <span className="pr-2 text-xs text-subtle">USDT</span>}
           />
-          <TakeProfitEditor draft={draft} err={err} commit={commit} onChange={updateExits} />
+          <p className="text-xs text-muted" data-testid="tp-sides-note">
+            Take profit is set separately for Long and Short positions. The side of each confirmed entry selects its plan, which is saved with the position (a reversal uses the new side&apos;s plan).
+            {draft.direction !== 'BOTH' && ` Only the ${draft.direction === 'LONG_ONLY' ? 'Long' : 'Short'} section applies to this direction; the other side's saved settings are kept.`}
+          </p>
+          {sidesOf(draft.direction).map((side) => (
+            <TakeProfitEditor key={side} side={side} draft={draft} err={err} commit={commit} onChange={updateExits} />
+          ))}
           <div className="space-y-3 rounded-lg border border-line p-3" data-testid="trailing-take-profit">
             <Switch
               label="Trailing take profit"
@@ -428,7 +437,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
               checked={draft.trailingEnabled}
               onChange={(v) => updateExits({ trailingEnabled: v })}
             />
-            {!draft.trailingEnabled && draft.tpMode !== 'OFF' && <p className="text-xs text-subtle">Off: Take profit manages the whole position.</p>}
+            {!draft.trailingEnabled && anyTpOn && <p className="text-xs text-subtle">Off: the position side&apos;s Take profit manages the whole position.</p>}
             {draft.trailingEnabled && (
               <>
                 <DecimalField
@@ -438,9 +447,9 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
                   onCommit={() => commit('trailing.closePct')}
                   error={err('trailing.closePct')}
                   hint={
-                    draft.tpMode === 'OFF'
+                    !anyTpOn
                       ? 'Required, 0-100% of the confirmed opening quantity. Take profit is off, so the rest stays open under the stop loss and close signals.'
-                      : 'Required, 0-100% of the confirmed opening quantity. Take profit manages the rest: 0% leaves everything to Take profit, 100% gives everything to Trailing take profit.'
+                      : 'Required, 0-100% of the confirmed opening quantity. The position side\'s Take profit manages the rest (split shares divide that rest): 0% leaves everything to Take profit, 100% gives everything to Trailing take profit.'
                   }
                   trailing={pct}
                 />

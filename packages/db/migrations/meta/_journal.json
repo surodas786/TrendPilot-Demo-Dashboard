@@ -148,6 +148,13 @@
       "when": 1794480294039,
       "tag": "0020_m10_live_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794486754960,
+      "tag": "0021_m11_take_profit_per_side",
+      "breakpoints": true
     }
   ]
 }

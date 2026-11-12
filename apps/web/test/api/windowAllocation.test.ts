@@ -243,16 +243,18 @@ describe('migration 0019 converts saved blocks without changing their effective 
     const make = async (cookie: string, instrumentId: string | undefined, takeProfit: unknown, trailing: unknown) => {
       const created = await call(blocks.POST, { method: 'POST', path: '/x', cookie, body: blockBody({ weekdays: ALL_DAYS, ...(instrumentId ? { instrumentId } : {}) }) });
       expect(created.status).toBe(201);
-      await direct.db.update(schema.orderBlocks).set({ takeProfit, trailing }).where(eq(schema.orderBlocks.id, created.body.id));
+      await direct.db.update(schema.orderBlocks).set({ takeProfitLong: takeProfit, trailing }).where(eq(schema.orderBlocks.id, created.body.id));
       return created.body.id as string;
     };
     const fixed = await make(cookies.a, undefined, { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] }, old);
     const split = await make(cookies.b, undefined, { mode: 'SPLIT', levels: [{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '30' }] }, old);
     expect(dataSteps.length).toBe(3);
     for (const stmt of dataSteps) await direct.pool.query(stmt);
+    // Then 0021 (per-side Take Profit) starts both sides from the converted shared configuration.
+    await direct.pool.query('UPDATE order_blocks SET take_profit_short = take_profit');
     const get = async (cookie: string, id: string) => (await call(block.GET, { path: '/x', cookie, params: { id } })).body;
-    expect(await get(cookies.a, fixed)).toMatchObject({ takeProfit: { levels: [{ closePct: '100' }] }, trailing: { closePct: '40' }, tradingWindow: null });
-    expect(await get(cookies.b, split)).toMatchObject({ takeProfit: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, trailing: { closePct: '20' } });
+    expect(await get(cookies.a, fixed)).toMatchObject({ takeProfitLong: { levels: [{ closePct: '100' }] }, takeProfitShort: { levels: [{ closePct: '100' }] }, trailing: { closePct: '40' }, tradingWindow: null });
+    expect(await get(cookies.b, split)).toMatchObject({ takeProfitLong: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, takeProfitShort: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, trailing: { closePct: '20' } });
     // Both now pass the current rules unchanged (an unrelated edit saves).
     for (const [cookie, id] of [[cookies.a, fixed], [cookies.b, split]] as const) {
       const b = await get(cookie, id);

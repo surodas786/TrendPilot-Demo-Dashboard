@@ -61,9 +61,15 @@ export const EXIT_RULES_VERSION = 'V2';
 export const windowOf = (b: Pick<BlockRow, 'tradingWindowStart' | 'tradingWindowEnd'>): TradingWindow | null =>
   b.tradingWindowStart && b.tradingWindowEnd ? { start: b.tradingWindowStart, end: b.tradingWindowEnd } : null;
 
-function snapshotOf(block: BlockRow, version: VersionRow) {
+/**
+ * Immutable copy saved with the intent and the position. `block.takeProfit` is the Take Profit
+ * configuration of the ACTUAL side of this entry (Long or Short, set independently); the exit
+ * engine reads only that. Both sides are kept for the record.
+ */
+function snapshotOf(block: BlockRow, version: VersionRow, side: 'LONG' | 'SHORT') {
   return {
     exitRules: EXIT_RULES_VERSION,
+    takeProfitSide: side,
     block: {
       id: block.id,
       revision: block.revision,
@@ -72,7 +78,9 @@ function snapshotOf(block: BlockRow, version: VersionRow) {
       leverage: block.leverage,
       marginMode: block.marginMode,
       stop: block.stop,
-      takeProfit: block.takeProfit,
+      takeProfit: side === 'LONG' ? block.takeProfitLong : block.takeProfitShort,
+      takeProfitLong: block.takeProfitLong,
+      takeProfitShort: block.takeProfitShort,
       trailing: block.trailing,
       weekdays: block.weekdays,
       tradingWindow: windowOf(block),
@@ -120,7 +128,8 @@ export async function evaluateAndReserveEntry(
       leverage: block.leverage,
       marginMode: block.marginMode,
       stop: block.stop as never,
-      takeProfit: block.takeProfit as never,
+      takeProfitLong: block.takeProfitLong as never,
+      takeProfitShort: block.takeProfitShort as never,
       trailing: block.trailing as never,
       risk: block.risk as never
     },
@@ -207,7 +216,7 @@ export async function evaluateAndReserveEntry(
       marginMode: block.marginMode,
       reservedUsdt: result.requiredUsdt,
       sizing: { ...s, liquidationEstimate: result.liquidationPrice },
-      settingsSnapshot: snapshotOf(block, version)
+      settingsSnapshot: snapshotOf(block, version, side)
     })
     .returning({ id: orderIntents.id });
   await book(tx, account, [{ kind: 'ORDER_RESERVE', bucket: 'ORDER_RESERVE', amount: result.requiredUsdt, refType: 'order_intent', refId: intent!.id, memo: `Margin and fee reserved for ${block.mode === 'LIVE' ? 'Live' : 'paper'} entry` }]);

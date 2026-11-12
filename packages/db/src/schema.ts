@@ -259,7 +259,10 @@ export const orderBlocks = pgTable(
     leverage: integer('leverage').notNull(),
     marginMode: marginMode('margin_mode').notNull(),
     stop: jsonb('stop').notNull(),
-    takeProfit: jsonb('take_profit').notNull(),
+    /** Long Take Profit (the column predates per-side Take Profit and kept its name). */
+    takeProfitLong: jsonb('take_profit').notNull(),
+    /** Short Take Profit. Backfilled from the shared configuration by migration 0021. */
+    takeProfitShort: jsonb('take_profit_short').notNull(),
     trailing: jsonb('trailing').notNull(),
     weekdays: text('weekdays')
       .array()

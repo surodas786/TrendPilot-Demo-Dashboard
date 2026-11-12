@@ -65,7 +65,8 @@ describe('paper entry checks (STR-08, EXE-01/02)', () => {
       leverage: 10,
       marginMode: 'ISOLATED',
       stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' },
-      takeProfit: { mode: 'OFF', levels: [] },
+      takeProfitLong: { mode: 'OFF', levels: [] },
+      takeProfitShort: { mode: 'OFF', levels: [] },
       trailing: { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' },
       risk: EMPTY_RISK
     },

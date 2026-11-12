@@ -142,7 +142,13 @@ const settingsBase = z.object({
   leverage: z.number().int('Leverage must be a whole number.').positive(),
   marginMode: z.enum(MARGIN_MODES),
   stop: stopSchema,
-  takeProfit: takeProfitSchema,
+  /**
+   * EXT-02/03 Take Profit per position side. The side of the confirmed entry selects one at entry
+   * and it is saved with the position. Both are stored whatever the direction, so changing the
+   * permitted direction never loses a saved configuration.
+   */
+  takeProfitLong: takeProfitSchema,
+  takeProfitShort: takeProfitSchema,
   trailing: trailingSchema,
   weekdays: weekdaysSchema,
   /** Optional daily window for new exposure (null or omitted = All day). */
@@ -167,38 +173,44 @@ const dec = (v: string | null | undefined) => (typeof v === 'string' && isDecima
  * throw on an empty or partial number: such values are skipped here and reported by their own
  * field schema.
  */
-function refineSettings(s: SettingsBase, ctx: IssueSink): void {
-  const tp = s.takeProfit;
-  const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
-
-  if (tp.mode === 'OFF' && tp.levels.length > 0) add(['takeProfit', 'levels'], 'Remove targets when take profit is off.');
-  const trailingOn = s.trailing.enabled;
+/** Rules for one side's Take Profit configuration; issues are reported under `key`. */
+function refineTakeProfit(tp: SettingsBase['takeProfitLong'], key: 'takeProfitLong' | 'takeProfitShort', add: (path: (string | number)[], message: string) => void): void {
+  if (tp.mode === 'OFF' && tp.levels.length > 0) add([key, 'levels'], 'Remove targets when take profit is off.');
   if (tp.mode === 'FIXED') {
-    if (tp.levels.length !== 1) add(['takeProfit', 'levels'], 'Fixed take profit has exactly one target.');
+    if (tp.levels.length !== 1) add([key, 'levels'], 'Fixed take profit has exactly one target.');
     else {
       // The single target manages the whole Take Profit share; the split with Trailing Take
       // Profit is set by Trailing Take Profit's "Position to close (%)".
       const close = dec(tp.levels[0]!.closePct);
-      if (close && !close.eq(100)) add(['takeProfit', 'levels', 0, 'closePct'], 'A fixed target manages the whole Take Profit share (100%).');
+      if (close && !close.eq(100)) add([key, 'levels', 0, 'closePct'], 'A fixed target manages the whole Take Profit share (100%).');
     }
   }
   if (tp.mode === 'SPLIT') {
-    if (tp.levels.length < 2) add(['takeProfit', 'levels'], 'Split take profit needs 2 or 3 targets.');
+    if (tp.levels.length < 2) add([key, 'levels'], 'Split take profit needs 2 or 3 targets.');
     tp.levels.forEach((l, i) => {
       const prev = tp.levels[i - 1];
       const cur = dec(l.movePct);
       const before = prev ? dec(prev.movePct) : null;
-      if (cur && before && !cur.gt(before)) add(['takeProfit', 'levels', i, 'movePct'], 'Must be further than the previous target.');
+      if (cur && before && !cur.gt(before)) add([key, 'levels', i, 'movePct'], 'Must be further than the previous target.');
     });
     // EXT-03: the targets divide the Take Profit share between them, so they total exactly 100%.
     const parts = tp.levels.map((l) => dec(l.closePct));
     if (parts.every((p) => p !== null)) {
       const total = parts.reduce((sum, p) => sum.plus(p!), new Decimal(0));
-      if (!total.eq(100)) add(['takeProfit'], `Target shares total ${total.toFixed()}% — they must total exactly 100% of the Take Profit share.`);
+      if (!total.eq(100)) add([key], `Target shares total ${total.toFixed()}% — they must total exactly 100% of the Take Profit share.`);
     }
   }
   const ids = new Set(tp.levels.map((l) => l.id));
-  if (ids.size !== tp.levels.length) add(['takeProfit', 'levels'], 'Target IDs must be unique.');
+  if (ids.size !== tp.levels.length) add([key, 'levels'], 'Target IDs must be unique.');
+}
+
+/** Sides a direction can open. A side the direction does not trade keeps its saved Take Profit unchecked. */
+export const sidesOf = (d: Direction): ('LONG' | 'SHORT')[] => (d === 'LONG_ONLY' ? ['LONG'] : d === 'SHORT_ONLY' ? ['SHORT'] : ['LONG', 'SHORT']);
+
+function refineSettings(s: SettingsBase, ctx: IssueSink): void {
+  const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
+  for (const side of sidesOf(s.direction)) refineTakeProfit(side === 'LONG' ? s.takeProfitLong : s.takeProfitShort, side === 'LONG' ? 'takeProfitLong' : 'takeProfitShort', add);
+  const trailingOn = s.trailing.enabled;
 
   if (trailingOn) {
     // All values are explicit: activation is never assumed or derived from the distance, and
@@ -217,24 +229,41 @@ function refineSettings(s: SettingsBase, ctx: IssueSink): void {
   }
 }
 
-export const orderBlockSettingsSchema = settingsBase.strict().superRefine((s, ctx) => refineSettings(s, ctx));
+/**
+ * Clients written before per-side Take Profit send one `takeProfit`: it becomes the configuration
+ * of both sides (a side the request sends itself wins).
+ */
+export function liftSharedTakeProfit(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('takeProfit' in raw)) return raw;
+  const { takeProfit, ...rest } = raw as Record<string, unknown>;
+  return { takeProfitLong: takeProfit, takeProfitShort: takeProfit, ...rest };
+}
 
-export const orderBlockCreateSchema = settingsBase
+const settingsStrict = settingsBase.strict().superRefine((s, ctx) => refineSettings(s, ctx));
+const createStrict = settingsBase
   .extend({
     instrumentId: z.uuid({ error: 'Select a trading pair.' }),
     mode: z.enum(MODES)
   })
   .strict()
   .superRefine((s, ctx) => refineSettings(s, ctx));
+const patchStrict = settingsBase.partial().strict();
 
+export const orderBlockSettingsSchema = z.preprocess(liftSharedTakeProfit, settingsStrict);
+export const orderBlockCreateSchema = z.preprocess(liftSharedTakeProfit, createStrict);
 /** PATCH body: any subset of settings. Instrument and mode identify the block and cannot change. */
-export const orderBlockPatchSchema = settingsBase.partial().strict();
+export const orderBlockPatchSchema = z.preprocess(liftSharedTakeProfit, patchStrict);
 
-export type OrderBlockSettings = z.output<typeof orderBlockSettingsSchema>;
-export type OrderBlockCreate = z.output<typeof orderBlockCreateSchema>;
-export type OrderBlockPatch = z.output<typeof orderBlockPatchSchema>;
+export type OrderBlockSettings = z.output<typeof settingsStrict>;
+export type OrderBlockCreate = z.output<typeof createStrict>;
+export type OrderBlockPatch = z.output<typeof patchStrict>;
 /** Client-side shape before validation (decimals still strings, weekdays any order). */
-export type OrderBlockSettingsInput = z.input<typeof orderBlockSettingsSchema>;
+export type OrderBlockSettingsInput = z.input<typeof settingsStrict>;
+export type TakeProfitSettings = OrderBlockSettings['takeProfitLong'];
+
+/** The Take Profit configuration a position on `side` uses (selected at entry from the actual side). */
+export const takeProfitFor = (s: Pick<OrderBlockSettings, 'takeProfitLong' | 'takeProfitShort'>, side: 'LONG' | 'SHORT'): TakeProfitSettings =>
+  side === 'LONG' ? s.takeProfitLong : s.takeProfitShort;
 
 export function issuesFromZod(error: z.ZodError): Issue[] {
   return error.issues.map((i) => ({ path: i.path.map(String).join('.'), message: i.message }));
@@ -342,7 +371,8 @@ export function settingsOf(dto: OrderBlockDto): OrderBlockSettingsInput {
     leverage: dto.leverage,
     marginMode: dto.marginMode,
     stop: dto.stop,
-    takeProfit: dto.takeProfit,
+    takeProfitLong: dto.takeProfitLong,
+    takeProfitShort: dto.takeProfitShort,
     trailing: dto.trailing,
     weekdays: dto.weekdays as Weekday[],
     tradingWindow: dto.tradingWindow,
@@ -360,7 +390,8 @@ export const AUDITED_FIELDS = [
   'leverage',
   'marginMode',
   'stop',
-  'takeProfit',
+  'takeProfitLong',
+  'takeProfitShort',
   'trailing',
   'weekdays',
   'tradingWindow',

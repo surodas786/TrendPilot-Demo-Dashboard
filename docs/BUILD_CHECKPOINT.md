@@ -1,6 +1,6 @@
 # TrendPilot build checkpoint
 
-**CURRENT: 2026-11-12. The Live path (commit `2b2a8ce`) is deployed with activation OFF. Release acceptance on the server is blocked on access; see the acceptance record below.**
+**CURRENT: 2026-11-12. Deployed `f322954` (main, contains Live `2b2a8ce`, migration `0020`) with Live activation OFF. Paper alert flow and the WebSocket feed PASS on the server; window skip, holdings UI, arm-then-pullback and Backspace are still to be observed there. OPEN SECURITY ISSUE: staging secrets and DB dumps are in the public repo (see the acceptance record).**
 - Live order submission is disabled everywhere:
   - `LIVE_ORDER_TRANSPORT=disabled`;
   - the platform switch is Off;
@@ -8,51 +8,56 @@
 - No real order has ever been sent.
 - Real-order testing is a separate, operator-led pilot that starts after the owner's Paper review (`docs/LIVE_PILOT_RUNBOOK.md`).
 
-## Release acceptance — 2026-11-12 12:00 UTC (Paper only; Live activation Off)
+## Per-side Take Profit — 2026-11-12 (implemented locally, uncommitted, not deployed)
 
-**Result: partially verified.** All server-side acceptance checks (items 1–2 and the feed) are **BLOCKED**: there is no shell or app access to the deployed host from this workstation. Item 3 passed against the mocked exchange.
+- **What:** independent Long and Short Take Profit per token (Fixed, Split or Off each). The entry side selects and saves its plan; targets come from the confirmed average entry (Long above, Short below); a reversal uses the new side's plan. The arm-then-pullback rule applies to every target. Take Profit manages the share left after Trailing Take Profit (with 40 % trailing, it gets 60 % and split shares divide the 60 %). Existing settings start both sides from the shared configuration; open positions keep their saved plans.
+- **Schema:** migration `0021_m11_take_profit_per_side`. `take_profit` stays as Long; `take_profit_short` is added and backfilled. The API exposes `takeProfitLong` and `takeProfitShort`, and still accepts a legacy `takeProfit`, which is applied to both sides.
+- **Deploy:** `npm ci && npm run db:migrate && npm run build && pm2 restart all` (applies `0021`). Paper only.
+- **Results:**
+  - lint and typecheck clean;
+  - `npm test` **48 files / 674 tests passed** (new: `takeProfitPerSide.test.ts`, 9 Paper scenarios; per-side domain tests);
+  - `npm run test:e2e` **58/58 passed** (new: `99-take-profit-per-side.spec.ts`);
+  - `npm run build` OK.
+- **To verify on the server after deploy:**
+  1. Set different Long and Short targets on one token.
+  2. On the next Long entry, holding detail reads "Long take profit · …"; after a reversal, the Short shows "Short take profit · …" with its targets below entry.
+  3. The first favourable touch arms a target; the pullback closes it.
 
-### Deployed revision
-- `origin/feature/admin-mailbox-settings` = `2b2a8ce` "Live Trading Integrated" (the Live work plus `63d3986`). The local tree is clean.
-- `http://192.168.91.16:3000` was probed at 12:03 UTC. `/v1/health` → `{"status":"ok","web":"up","database":"up","mode":"PAPER","liveOrderTransport":"disabled"}`.
-- Route fingerprint: `/v1/me/live`, `/v1/admin/live`, `/v1/me/holdings/{id}/chart` and `/v1/market/quotes/stream` all → 401 (exist). At 11:25 UTC the Live routes returned 404.
-- **So the deployed build contains the `2b2a8ce` code.** The exact commit and migration `0020` need a shell on the host.
+## Release acceptance — 2026-11-12 (deployed evidence from the server snapshot at 12:23 UTC; Paper only)
+
+### Deployed revision — VERIFIED
+- The server `/opt/TrendPilot-Demo-Dashboard` is on `f322954` ("Merge pull request #13"), the same as `origin/main`.
+- It contains `2b2a8ce` (Live) and `63d3986` (window, holdings, TP). The only other differences from `2b2a8ce` are docs, `scripts/acceptance-check.ts`, `.env.staging` and two `backups/*.dump` (see the security finding below).
+- Migrations: ids 22/23/24 have hashes equal to `0018` (applied 2026-11-10 05:42 UTC), `0019` (2026-11-12 07:40 UTC) and `0020` (2026-11-12 10:44 UTC) on `origin/main`.
+- PM2: `tp-web`, `tp-worker`, `tp-feed` online. There is exactly one feed, and it is `active`.
+- `/v1/health` → `mode PAPER`, `liveOrderTransport disabled`.
 
 ### Results
-| Check | Result | Evidence / blocker |
+| Check | Result | Deployed evidence |
 | --- | --- | --- |
-| 1. Fresh TradingView alert on the deployed app: route → decision → opening fill → attached stop → exit fill → P&L; two investors isolated | **BLOCKED** | No SSH user or key for the host (the server has no `~/.ssh` setup for this workstation), no admin or investor credentials, and no ingress token (stored only as a hash on the server). Locally: e2e `3-…`, `4-…`, `5-…`, `7-reporting-isolation` pass (57/57) |
-| 2a. Trading window: inside eligible, outside skipped, an open position still closes | **BLOCKED on the server** | Locally: `windowAllocation.test.ts`, `tradingWindow.test.ts`, e2e `9-…` pass |
-| 2b. My Holdings auto-update; entry and stop lines on the right contract chart | **BLOCKED on the server** | Locally: e2e `9-holdings-window-backspace` passes |
-| 2c. Trailing Take Profit 40% / Take Profit 60%; arm on first touch, close on pullback; Backspace keeps the editor open | **BLOCKED on the server** | Locally: `windowAllocation.test.ts`, `armPullback.test.ts`, e2e `9-…` pass |
-| 2d. Deployed worker receives WebSocket ticks; REST fallback reported separately | **BLOCKED** | Needs the feed log or DB (`market_feed_status.quote_channel`, `market_quotes.channel`, the feed heartbeat's REST counters) |
-| 3. Live readiness with activation Off | **PASS (mock)** | `vitest` Live and adapter suites: **6 files, 97 tests passed** (`liveMode`, `liveAdapter`, `pilotRehearsal`, `mexcPrivate`, `live`, `liveTransport`). Health shows `liveOrderTransport: disabled` on the server |
-| 3. Attached stop coverage | PASS (mock) | The opening request carries `stopLossPrice` + `lossTrend` (Long side 1, Short side 3). A partial fill books only the filled contracts and the stop must cover exactly them. A missing or failed stop leads to an immediate reduce-only close and an account halt |
-| 3. Reduce-only market closes | PASS (mock) | Manual, TP and signal closes send `side 4/2`, `type 5`, `reduceOnly`, `positionId`, capped at the MEXC position (never flips). A partial TP leads to a stop resize to the remainder (`stopLossReverse 2`). A rejected close (2008) leaves the position open and protected |
-| 3. Recovery after an uncertain order | PASS (mock) | Timeout after accept: reconciled by client order ID, one order. Not yet visible: waits for the 30 s grace. Still invisible after the grace: no resend while halted, and the sync flags `UNKNOWN_EXPOSURE`. A lookup failure is never treated as "absent". Worker restart: reconciles, nothing resent |
-| 3. Read-only account check | **PENDING** | `ops:mexc-readonly-check` → "PENDING: no authorized read-only MEXC account is configured … Nothing was sent." (exit 3) |
-| 3. Needs the operator-led live pilot | PENDING | Written MEXC eligibility; KYC, key permissions and IP whitelist; attached-stop atomicity and listing; partial-fill stop size; `reduceOnly` in the account's mode; stop auto-shrink vs re-place; unknown-ID code and visibility delay; duplicate and length of `externalOid`; deal-history shape; fee and `holdFee` signs |
+| 1. Fresh TradingView alert, traced end to end | **PASS** | Real alert 11:35:01 UTC `BEARISH_FLIP` 5m (route "XAU 5m Bearish" → XAUUSDT, package "Supertrend 5m — paper fixture"), `DISPATCHED`, no rejections. For each of 3 investors: `EXIT_REQUESTED REVERSAL_CLOSE` → close of the Long, 7589 @ 3952.6, P&L −0.7589 → `ENTRY_APPROVED` → open Short 7589 @ 3952.6, stop 3992.12 (+1.0 %), `stop_contracts 7589`, **PROTECTED** |
+| 1. Exit fill and final P&L | **PASS** | Short opened 06:55 @ 3972.72 (7551). A and B: `TAKE_PROFIT` 7551 @ 3948.69 → +181.45053 (= 24.03 × 7551 × 0.001). surodas (Trailing Take Profit 50 %): `TRAILING_TAKE_PROFIT` 3776 @ 3955.01 → +66.87296, then `TAKE_PROFIT` 3775 @ 3948.69 → +90.71325; total 157.58621 matches the position. Wallet, margin and reserve = ledger for all 4 accounts |
+| 1. Two investors on one contract, own records only | **PASS (data)** / UI not run | Each investor has their own intents, positions, exits and ledger rows (separate accounts). Per-session UI/API isolation was proven locally (e2e `7-…`, `isolation.test.ts`), not on the server |
+| 2a. Trading window | **PARTIAL** | surodas window 12:00–04:00 Asia/Dhaka (crosses midnight; entries allowed 06:00–22:00 UTC). Entries since `0019` at 06:55, 10:05 and 11:35 UTC are inside the window and approved. Entries at 00:25, 01:50 and 05:55 UTC predate `0019`. **No alert yet outside the window** after the deploy, so the skip and "existing position still closes" are not yet shown on the server |
+| 2b. My Holdings auto-update, chart lines | **NOT RUN** | Needs a browser session on the server app. Server side: the SSE route exists, quotes arrive about every 2.5 s |
+| 2c. Allocation, arm, pullback; Backspace | **PARTIAL** | Allocation works on the server: 50 % → trailing 3794 / TP 3795 of 7589; 3776 / 3775 of 7551. The configured value is 50 %, not the requested 40 %. ARM_PULLBACK targets exist on positions opened after `0019`, but **none has armed yet**: the 10:05 Long's target 3976.41 was never reached before its reversal (to be confirmed with the price-range query). Backspace is UI-only and was not run |
+| 2d. WebSocket ticks | **PASS** | Feed `tickerSource ws`, `restFallback false`, stream OPEN since 11:46:22, both contracts confirmed, 1764 tickers. Since 00:00 UTC: BTCUSDT 11 966 and XAUUSDT 11 968 quotes, **all channel `WS`**. REST calls are `ping 1, kline 18` (earlier instances: kline/detail/funding_rate only). **REST ticker = 0, no REST fallback quotes**. One WS reconnect (code 1006) in the instance that stopped 08:49 |
+| 3. Live readiness, activation Off | **PASS** | Server: `live_control.live_enabled=false`, capabilities `{}`, BTC and XAU `live_allowed=false`, transport `disabled`. Mock suites: 97/97 (attached stop coverage, reduce-only closes, uncertain-order recovery; see the previous record). Read-only account check: PENDING locally |
 
-### Added this session
-- `scripts/acceptance-check.ts`: a read-only DB snapshot for the server. It shows:
-  - migrations and the Live switch;
-  - the feed channel per contract, quotes by channel, and the feed's REST counters;
-  - routes, alerts, decisions, intents, positions, exits and targets;
-  - the ledger reconciliation per account and mode.
+### Server findings
+- **SECURITY, open:** commit `d0ebc18` "Some staging related files added" pushed `.env.staging` (staging Postgres password, `DATA_ENCRYPTION_KEY`) and `backups/trendpilot_staging_20261108T184356Z.dump` and `backups/trendpilot_dev_pre0011_20261109T053033Z.dump` to `main` of the **public** repo `surodas786/TrendPilot-Demo-Dashboard`. These paths are gitignored, so they must have been force-added. Required:
+  - remove them from the tree;
+  - purge them from history (needs a force push);
+  - rotate that encryption key and password wherever they are used;
+  - if the production `.env` uses the same `DATA_ENCRYPTION_KEY`, rotate it and have investors re-enter MEXC keys.
+- The `surodas@proton.me` MEXC connection is `VERIFIED` in **HEDGE** mode, not approved, Live off, with `entries_halted = true` (reason in the new query). Before a pilot: switch the account to one-way mode (runbook §1).
+- `BTCUSDT` is still `is_fixture = true`, so it cannot be allowed for Live until it is validated and published from MEXC. BTC Paper blocks are paused.
+- The worker shell showed `NODE_ENV=unset`. The PM2 processes' own env was not shown; production must run with `NODE_ENV=production` and `DATA_ENCRYPTION_KEY` set.
 
-  It runs in one `READ ONLY` transaction and was validated against the local e2e DB. On the server, from the app directory: `npx tsx scripts/acceptance-check.ts --since <ISO time>`.
-
-### To unblock (owner/operator)
-- Either give SSH access (user name and an authorized key for this workstation), or run on the server and share the output of:
-  - `git log -1 --oneline`;
-  - `pm2 list`;
-  - `pm2 logs market-feed --lines 200 --nostream | grep -E "sub.ticker|push.ticker|REST|510"`;
-  - `npx tsx scripts/acceptance-check.ts`.
-- For the end-to-end Paper alert, one of:
-  - a real TradingView alert on the next bar of an enabled route; or
-  - the route's webhook URL for a replayed alert;
-
-  plus two investor test accounts on that contract and an admin login.
+### Still to run (needs the app UI on the server, or more alerts)
+- 2a: the next alert between 22:00 and 06:00 UTC (outside the window). Expect `ENTRY_SCREEN … SKIPPED OUTSIDE_TRADING_WINDOW` for surodas, while a reversal/close of an open position still fills.
+- 2b and the Backspace check: in a browser, as an investor.
+- 2c with 40 %: set Trailing Take Profit *Position to close* to 40 %, then watch the next position (TP gets 60 %; a target arms on the first touch and closes on the pullback).
 
 ## Record — 2026-11-12
 

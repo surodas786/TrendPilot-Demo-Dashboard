@@ -46,6 +46,20 @@ await q('Exit fills since', `SELECT x.filled_at, u.email, x.reason, x.contracts,
 await q('Targets on positions opened since (arm then pullback)', `SELECT t.position_id, t.level_id, t.trigger_rule, t.trigger_price, t.planned_contracts, t.filled_contracts, t.status, t.armed_at, t.armed_price FROM position_targets t JOIN positions p ON p.id = t.position_id WHERE p.opened_at >= $1 ORDER BY t.position_id, t.ordinal`, [since]);
 await q('Order blocks (investor settings summary)', `SELECT u.email, i.symbol, b.mode, b.status, b.weekdays::text, b.trading_window_start, b.trading_window_end, b.timezone, b.take_profit::text AS tp, b.trailing::text AS trailing FROM order_blocks b JOIN users u ON u.id = b.owner_id JOIN instruments i ON i.id = b.instrument_id ORDER BY u.email, i.symbol, b.mode`);
 await q('Ledger reconciliation per account (wallet/margin/reserve = ledger)', `SELECT u.email, a.mode, a.wallet_balance, (SELECT coalesce(sum(amount),0) FROM ledger_entries l WHERE l.paper_account_id = a.id AND l.bucket='WALLET') AS ledger_wallet, a.position_margin, (SELECT coalesce(sum(amount),0) FROM ledger_entries l WHERE l.paper_account_id = a.id AND l.bucket='POSITION_MARGIN') AS ledger_margin, a.order_reserve, (SELECT coalesce(sum(amount),0) FROM ledger_entries l WHERE l.paper_account_id = a.id AND l.bucket='ORDER_RESERVE') AS ledger_reserve FROM paper_accounts a JOIN users u ON u.id = a.owner_id ORDER BY u.email, a.mode`);
+await q(
+  'Price range while each position was open (did a target or trailing activation get reached?)',
+  `SELECT left(p.id::text, 8) AS pos, u.email, p.side, p.opened_at, p.closed_at, p.avg_entry_price,
+          min(q.mark) AS min_mark, max(q.mark) AS max_mark, count(q.*) AS quotes,
+          (SELECT string_agg(t.trigger_rule || ' ' || t.trigger_price::numeric(20,2) || ' ' || t.status || coalesce(' armed ' || t.armed_at, ''), '; ') FROM position_targets t WHERE t.position_id = p.id) AS targets,
+          p.trailing_status, p.trailing_activation_price, p.trailing_activated_at, p.trailing_watermark, p.trailing_stop_price, p.trailing_planned_contracts, p.trailing_filled_contracts
+   FROM positions p JOIN users u ON u.id = p.owner_id
+   LEFT JOIN market_quotes q ON q.instrument_id = p.instrument_id AND q.as_of >= p.opened_at AND q.as_of <= coalesce(p.closed_at, now())
+   WHERE p.opened_at >= $1 GROUP BY p.id, u.email ORDER BY p.opened_at DESC LIMIT 12`,
+  [since]
+);
+await q('Order block changes (trading window / exits) from the audit log', `SELECT a.created_at, u.email, a.action, a.result, left(coalesce(a.after::text, a.metadata::text, ''), 160) AS change FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id WHERE a.target_type = 'order_block' ORDER BY a.created_at DESC LIMIT 10`);
+await q('Live connection halt reason and sync', `SELECT u.email, c.entries_halted, c.halt_reason, c.halted_at, c.last_sync_at, c.last_sync_error, jsonb_array_length(c.drift) AS drift_items FROM exchange_connections c JOIN users u ON u.id = c.owner_id`);
+await q('Live audit trail', `SELECT a.created_at, u.email, a.action, a.result FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id WHERE a.action LIKE '%LIVE%' ORDER BY a.created_at DESC LIMIT 15`);
 await q('Jobs: dead or retrying', `SELECT kind, status, attempts, left(last_error, 100) AS last_error, updated_at FROM jobs WHERE status = 'DEAD' OR (status = 'PENDING' AND last_error IS NOT NULL) ORDER BY updated_at DESC LIMIT 10`);
 await c.query('ROLLBACK');
 await c.end();

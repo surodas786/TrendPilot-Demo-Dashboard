@@ -12,6 +12,14 @@ export const EXIT_LABEL: Record<string, string> = {
   LIQUIDATION: 'Liquidated'
 };
 
+/** "Long take profit · Split" — which side's plan a position saved at entry. */
+export function takeProfitPlanLabel(plan: { side: 'LONG' | 'SHORT' | null; mode: string } | null, positionSide: string): string {
+  if (!plan) return 'Take profit: not saved with this position';
+  const mode = plan.mode === 'FIXED' ? 'Fixed' : plan.mode === 'SPLIT' ? 'Split' : 'Off';
+  const side = plan.side ?? (positionSide === 'SHORT' ? 'SHORT' : 'LONG');
+  return `${side === 'LONG' ? 'Long' : 'Short'} take profit · ${mode}${plan.side ? '' : ' (shared settings at entry)'} · targets ${side === 'LONG' ? 'above' : 'below'} entry`;
+}
+
 export const signedUsdt = (v: string) => `${Number(v) > 0 ? '+' : ''}${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT`;
 
 export const TARGET_STATUS_LABEL: Record<string, string> = {
