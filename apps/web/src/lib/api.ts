@@ -1,4 +1,12 @@
-import type { Issue, OrderBlockDto } from '@trendpilot/domain';
+import type { Issue, ModeChangeBlocker, OrderBlockDto } from '@trendpilot/domain';
+
+/** GET /v1/me/order-blocks/:id/mode-change — whether this block may switch mode, and why not. */
+export interface ModeChangeStatus {
+  from: 'PAPER' | 'LIVE';
+  to: 'PAPER' | 'LIVE';
+  allowed: boolean;
+  blocker: ModeChangeBlocker | null;
+}
 
 export interface ApiFailure {
   ok: false;
@@ -6,6 +14,7 @@ export interface ApiFailure {
   code: string;
   message: string;
   issues: Issue[];
+  details?: Record<string, unknown>;
 }
 export type ApiResult<T> = { ok: true; data: T } | ApiFailure;
 
@@ -25,13 +34,14 @@ export async function request<T>(method: string, path: string, opts: { body?: un
   const body = text ? JSON.parse(text) : null;
   if (res.ok) return { ok: true, data: body as T };
   if (res.status === 401 && opts.redirectOn401 !== false) window.location.assign('/sign-in');
-  return { ok: false, status: res.status, code: body?.code ?? 'UNKNOWN', message: body?.message ?? 'Request failed.', issues: body?.issues ?? [] };
+  return { ok: false, status: res.status, code: body?.code ?? 'UNKNOWN', message: body?.message ?? 'Request failed.', issues: body?.issues ?? [], details: body?.details };
 }
 
 export const api = {
   createBlock: (body: unknown) => request<OrderBlockDto>('POST', '/v1/me/order-blocks', { body }),
   updateBlock: (id: string, revision: number, body: unknown) => request<OrderBlockDto>('PATCH', `/v1/me/order-blocks/${id}`, { body, revision }),
   pauseBlock: (id: string, revision: number) => request<OrderBlockDto>('POST', `/v1/me/order-blocks/${id}/pause`, { revision }),
+  modeChangeStatus: (id: string, to: 'PAPER' | 'LIVE') => request<ModeChangeStatus>('GET', `/v1/me/order-blocks/${id}/mode-change?to=${to}`),
   resumeBlock: (id: string, revision: number) => request<OrderBlockDto>('POST', `/v1/me/order-blocks/${id}/resume`, { revision }),
   closePosition: (id: string, idempotencyKey: string) =>
     request<{ commandId: string; positionId: string; state: string; replayed: boolean }>('POST', `/v1/me/positions/${id}/close`, { idempotencyKey }),

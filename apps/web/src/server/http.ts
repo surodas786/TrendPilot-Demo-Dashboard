@@ -24,12 +24,13 @@ export function empty(correlationId: string, status = 204, headers: Record<strin
 
 /** §10.1 structured error body: {code, message, correlationId} (+ field issues). */
 export function errorResponse(correlationId: string, err: DomainError): Response {
-  const body: { code: string; message: string; correlationId: string; issues?: Issue[] } = {
+  const body: { code: string; message: string; correlationId: string; issues?: Issue[]; details?: Record<string, unknown> } = {
     code: err.code,
     message: err.message,
     correlationId
   };
   if (err.issues?.length) body.issues = err.issues;
+  if (err.details) body.details = err.details;
   return json(correlationId, body, err.status);
 }
 

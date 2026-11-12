@@ -12,6 +12,7 @@ export const ErrorCode = {
   REVISION_REQUIRED: 'REVISION_REQUIRED',
   LIVE_DISABLED: 'LIVE_DISABLED',
   RESUME_BLOCKED: 'RESUME_BLOCKED',
+  MODE_CHANGE_BLOCKED: 'MODE_CHANGE_BLOCKED',
   PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
   MFA_REQUIRED: 'MFA_REQUIRED',
   INVALID_MFA_CODE: 'INVALID_MFA_CODE',
@@ -38,7 +39,9 @@ export class DomainError extends Error {
     readonly status: number,
     readonly code: ErrorCode,
     message: string,
-    readonly issues?: Issue[]
+    readonly issues?: Issue[],
+    /** Machine-readable context for the client (e.g. which block to edit instead). */
+    readonly details?: Record<string, unknown>
   ) {
     super(message);
     this.name = 'DomainError';

@@ -3,6 +3,8 @@ import {
   assertModeAllowed,
   catalogIssues,
   changedFields,
+  MODE_LABELS,
+  modeChangeBlocker,
   DomainError,
   ErrorCode,
   notFound,
@@ -18,7 +20,9 @@ import {
   type BlockStatus,
   type Issue,
   type OrderBlockDto,
-  type Quote
+  type Quote,
+  type BlockMode,
+  type ModeChangeBlocker
 } from '@trendpilot/domain';
 import { now } from './clock';
 import { validationError } from './http';
@@ -93,28 +97,74 @@ async function deny(owner: PublicUser, action: string, id: string, correlationId
 
 const conflict = () => new DomainError(409, ErrorCode.REVISION_CONFLICT, 'This block changed since you loaded it. Reload and try again.');
 
+/**
+ * Why this block cannot switch to `to`, or null. Same rules the editor shows: Live needs a
+ * verified MEXC connection (the New Entry rule), one block per pair and mode, and a block that
+ * manages an open position or unfinished order keeps its mode. `lock` (inside a transaction)
+ * serialises with entries for the block's current mode before counting.
+ */
+async function modeChangeBlockerFor(db: Executor, owner: PublicUser, block: OrderBlockDto, to: BlockMode, lock = false): Promise<ModeChangeBlocker | null> {
+  const repo = orderBlocksFor(db, owner.id);
+  const from = block.mode as BlockMode;
+  const [conn, instrument, destinationBlockId, activity] = await Promise.all([
+    connectionFor(db, owner.id),
+    getInstrument(db, block.instrumentId),
+    repo.idFor(block.instrumentId, to),
+    repo.activity(block.id, lock ? { lockMode: from } : {})
+  ]);
+  return modeChangeBlocker({
+    from,
+    to,
+    pair: instrument ? `${instrument.base}/${instrument.quote}` : block.symbol,
+    liveConnectionStatus: conn?.status ?? null,
+    destinationBlockId: destinationBlockId === block.id ? null : destinationBlockId,
+    ...activity
+  });
+}
+
+const modeChangeError = (b: ModeChangeBlocker) =>
+  new DomainError(b.code === 'LIVE_UNAVAILABLE' ? 422 : 409, ErrorCode.MODE_CHANGE_BLOCKED, b.message, [{ path: 'mode', message: b.message }], { blocker: b });
+
+/** GET …/mode-change?to=: whether the block may switch to `to` now, and why not (read-only). */
+export async function modeChangeStatus(owner: PublicUser, id: string, to: string | null) {
+  if (to !== 'PAPER' && to !== 'LIVE') throw validationError([{ path: 'to', message: 'Use to=PAPER or to=LIVE.' }]);
+  const db = getDb();
+  const block = await orderBlocksFor(db, owner.id).get(id);
+  if (!block) throw notFound();
+  const blocker = await modeChangeBlockerFor(db, owner, block, to);
+  return { from: block.mode, to, allowed: blocker === null, blocker };
+}
+
 export async function updateBlock(owner: PublicUser, id: string, revision: number, raw: unknown, correlationId: string): Promise<OrderBlockDto> {
   const patch = parseWith(orderBlockPatchSchema, raw);
   if (!patch.ok) throw validationError(patch.issues);
+  const { mode: requestedMode, ...settingsPatch } = patch.value;
 
   const db = getDb();
   const repo = orderBlocksFor(db, owner.id);
   const current = await repo.get(id);
   if (!current) return deny(owner, 'ORDER_BLOCK_UPDATE', id, correlationId);
   if (current.revision !== revision) throw conflict();
+  const toMode = requestedMode !== undefined && requestedMode !== current.mode ? requestedMode : undefined;
+  if (toMode) assertModeAllowed(toMode);
 
   // CFG-05: the merged result must be a complete, valid configuration.
-  const merged = parseWith(orderBlockSettingsSchema, { ...settingsOf(current), ...patch.value });
+  const merged = parseWith(orderBlockSettingsSchema, { ...settingsOf(current), ...settingsPatch });
   if (!merged.ok) throw validationError(merged.issues);
   const issues = await catalogCheck(db, current.instrumentId, merged.value);
   if (issues.length) throw validationError(issues);
 
   // A legacy trailing stop converts only when this save carries trailing settings, which the
   // merged validation above held to Trailing Take Profit rules (explicit activation value).
-  const trailingConverted = current.trailingConversionRequired && patch.value.trailing !== undefined;
+  const trailingConverted = current.trailingConversionRequired && settingsPatch.trailing !== undefined;
 
   return db.transaction(async (tx) => {
-    const result = await orderBlocksFor(tx, owner.id).update(id, revision, merged.value, { trailingConverted });
+    if (toMode) {
+      // Rechecked under the account lock entries take, so the answer cannot go stale before commit.
+      const blocker = await modeChangeBlockerFor(tx, owner, current, toMode, true);
+      if (blocker) throw modeChangeError(blocker);
+    }
+    const result = await orderBlocksFor(tx, owner.id).update(id, revision, merged.value, { trailingConverted, mode: toMode });
     if (!result.ok) {
       if (result.reason === 'REVISION_CONFLICT') throw conflict();
       throw notFound();
@@ -126,9 +176,13 @@ export async function updateBlock(owner: PublicUser, id: string, revision: numbe
       targetType: 'order_block',
       targetId: id,
       result: 'SUCCESS',
-      before: diff.before,
-      after: diff.after,
-      metadata: { revision: result.block.revision, ...(trailingConverted ? { trailingConvertedToTakeProfit: true } : {}) },
+      before: toMode ? { ...diff.before, mode: current.mode } : diff.before,
+      after: toMode ? { ...diff.after, mode: result.block.mode } : diff.after,
+      metadata: {
+        revision: result.block.revision,
+        ...(trailingConverted ? { trailingConvertedToTakeProfit: true } : {}),
+        ...(toMode ? { modeChange: { from: current.mode, to: toMode, note: `Switched from ${MODE_LABELS[current.mode as BlockMode]} to ${MODE_LABELS[toMode]} for future entries; paused.` } } : {})
+      },
       correlationId
     });
     return result.block;

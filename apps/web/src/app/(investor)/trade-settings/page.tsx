@@ -9,5 +9,5 @@ export default async function TradeSettingsPage() {
   const db = getDb();
   // Owner comes from the session; the browser never names whose blocks to load.
   const [blocks, instruments, versions, conn] = await Promise.all([orderBlocksFor(db, user.id).list(), listPublishedInstruments(db), listPublishedVersions(db), connectionFor(db, user.id)]);
-  return <TradeSettingsClient ownerName={user.name} timezone={user.timezone} blocks={blocks} instruments={instruments} versions={versions} liveConnected={conn?.status === 'VERIFIED'} />;
+  return <TradeSettingsClient ownerName={user.name} timezone={user.timezone} blocks={blocks} instruments={instruments} versions={versions} liveConnectionStatus={conn?.status ?? null} />;
 }

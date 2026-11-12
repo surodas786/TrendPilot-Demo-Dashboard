@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
-import { CalculatorIcon, InfoIcon, LockIcon, RotateCcwIcon } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowLeftRightIcon, CalculatorIcon, CopyIcon, InfoIcon, LockIcon, PencilIcon, RotateCcwIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Decimal,
@@ -9,12 +9,15 @@ import {
   directionPermitted,
   isDecimalString,
   isHhMm,
+  liveUnavailableReason,
+  MODE_LABELS,
   NO_DAYS_WARNING,
   TRADING_DAYS_HELP,
   TRADING_WINDOW_HELP,
   WEEKDAY_LABELS,
   WEEKDAYS,
   sidesOf,
+  type BlockMode,
   type Direction,
   type MarginMode,
   type OrderBlockDto,
@@ -23,7 +26,7 @@ import {
   type Weekday
 } from '@trendpilot/domain';
 import type { InstrumentDto, StrategyVersionDto } from '@trendpilot/db';
-import { api, type ApiFailure } from '@/lib/api';
+import { api, type ApiFailure, type ModeChangeStatus } from '@/lib/api';
 import { Button } from '../ui/Button';
 import { ChipCheckboxGroup } from '../ui/ChipCheckboxGroup';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -73,18 +76,46 @@ interface Props {
   versions: StrategyVersionDto[];
   /** Instruments that already have a block in each mode (one block per pair and mode). */
   takenByMode: { PAPER: string[]; LIVE: string[] };
-  /** True when the investor's MEXC connection is verified: Live blocks can then be created. */
-  liveConnected: boolean;
+  /** Status of the investor's MEXC connection (null = none). Live needs VERIFIED (liveUnavailableReason). */
+  liveConnectionStatus: string | null;
+  /** New entry prefilled from a saved block's settings, in `mode` (same pair). */
+  copyFrom?: { block: OrderBlockDto; mode: BlockMode };
   timezone: string;
   onDone: (saved?: OrderBlockDto) => void;
+  /** Open another saved block in the editor (the existing block in the destination mode). */
+  onEditBlock?: (id: string) => void;
+  /** Start a new block in `mode` from this block's saved settings. */
+  onCopyToMode?: (block: OrderBlockDto, mode: BlockMode) => void;
 }
 
 /** Adapted from the MagicPatterns TokenBlockEditor; persists through /v1/me/order-blocks. */
-export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnected, timezone, onDone }: Props) {
-  const [mode, setMode] = useState<'PAPER' | 'LIVE'>(() => (existing ? (existing.mode as 'PAPER' | 'LIVE') : takenByMode.PAPER.length >= instruments.length && liveConnected ? 'LIVE' : 'PAPER'));
-  const availableFor = (m: 'PAPER' | 'LIVE') => instruments.filter((i) => i.status === 'PUBLISHED' && !takenByMode[m].includes(i.id));
+export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
+  /** The same rule as the server: Live needs a verified MEXC connection. */
+  const liveReason = liveUnavailableReason(liveConnectionStatus);
+  const liveConnected = liveReason === null;
+  const savedMode = existing ? (existing.mode as BlockMode) : undefined;
+  const [mode, setMode] = useState<BlockMode>(() => savedMode ?? copyFrom?.mode ?? (takenByMode.PAPER.length >= instruments.length && liveConnected ? 'LIVE' : 'PAPER'));
+  const availableFor = (m: BlockMode) => instruments.filter((i) => i.status === 'PUBLISHED' && !takenByMode[m].includes(i.id));
   const available = availableFor(mode);
-  const [draft, setDraft] = useState<Draft>(() => (existing ? draftFromBlock(existing) : newDraft(available[0], available[0] ? versionChoices(versions, available[0].id)[0] : undefined)));
+  const [draft, setDraft] = useState<Draft>(() =>
+    existing ? draftFromBlock(existing) : copyFrom ? draftFromBlock(copyFrom.block) : newDraft(available[0], available[0] ? versionChoices(versions, available[0].id)[0] : undefined)
+  );
+  /** Editing: may this block switch to the other mode (server check, including open positions and orders)? */
+  const otherMode: BlockMode | undefined = savedMode && (savedMode === 'PAPER' ? 'LIVE' : 'PAPER');
+  const [modeStatus, setModeStatus] = useState<ModeChangeStatus | null>(null);
+  const [confirmModeChange, setConfirmModeChange] = useState(false);
+  const modeChanging = Boolean(savedMode && mode !== savedMode);
+  const existingId = existing?.id;
+  useEffect(() => {
+    if (!existingId || !otherMode) return;
+    let current = true;
+    void api.modeChangeStatus(existingId, otherMode).then((r) => {
+      if (current && r.ok) setModeStatus(r.data);
+    });
+    return () => {
+      current = false;
+    };
+  }, [existingId, otherMode]);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [exitsTouched, setExitsTouched] = useState(Boolean(existing));
@@ -131,7 +162,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
     setDraft((d) => ({ ...d, strategyVersionId: id, direction: v && !directionPermitted(d.direction, v.permittedDirections) ? v.permittedDirections : d.direction }));
   };
 
-  const strategyOptions = versionChoices(versions, draft.instrumentId, existing?.strategyVersionId);
+  const strategyOptions = versionChoices(versions, draft.instrumentId, existing?.strategyVersionId ?? copyFrom?.block.strategyVersionId);
   const newerForPinned = existing && version && !version.isLatest ? versions.find((v) => v.packageId === version.packageId && v.isLatest) : undefined;
 
   const runPreview = async () => {
@@ -145,8 +176,9 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
     else fail(r);
   };
 
-  const pairOptions = existing
-    ? [{ value: existing.instrumentId, label: instrument ? pairLabel(instrument) : existing.symbol }]
+  const fixedPair = existing ?? copyFrom?.block;
+  const pairOptions = fixedPair
+    ? [{ value: fixedPair.instrumentId, label: instrument ? pairLabel(instrument) : fixedPair.symbol }]
     : available.map((i) => ({ value: i.id, label: pairLabel(i) }));
 
   const cost = isDecimalString(draft.orderCostUsdt.trim()) ? new Decimal(draft.orderCostUsdt.trim()) : null;
@@ -155,11 +187,24 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
   const anyTpOn = sidesOf(draft.direction).some((side) => draft.tp[side].mode !== 'OFF');
 
   const fail = (f: ApiFailure) => {
-    if (f.code === 'REVISION_CONFLICT') setFormError('This block was changed in another window. Close the panel and reopen it to load the latest version.');
+    if (f.code === 'MODE_CHANGE_BLOCKED' && f.details?.blocker && savedMode && otherMode) {
+      // Things changed since the editor opened (e.g. an entry filled): show why, keep the saved mode.
+      setModeStatus({ from: savedMode, to: otherMode, allowed: false, blocker: f.details.blocker as ModeChangeStatus['blocker'] });
+      setMode(savedMode);
+      setFormError(f.message);
+    } else if (f.code === 'REVISION_CONFLICT') setFormError('This block was changed in another window. Close the panel and reopen it to load the latest version.');
     else if (f.issues.length) {
       setServerIssues(errorMap(f.issues));
       setFormError(f.message);
     } else setFormError(f.message);
+  };
+
+  /** Save: a mode switch on a saved block is confirmed first. */
+  const requestSave = () => {
+    setTouched(true);
+    if (issues.length) return;
+    if (modeChanging) setConfirmModeChange(true);
+    else void submit(false);
   };
 
   const submit = async (activate: boolean) => {
@@ -171,7 +216,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
       const settings = settingsPayload(draft);
       let saved: OrderBlockDto;
       if (existing) {
-        const r = await api.updateBlock(existing.id, existing.revision, settings);
+        const r = await api.updateBlock(existing.id, existing.revision, modeChanging ? { ...settings, mode } : settings);
         if (!r.ok) return fail(r);
         saved = r.data;
       } else {
@@ -188,9 +233,11 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           saved = a.data;
         }
       }
-      toast.success(activate ? 'Saved & activated — waiting for signal' : 'Order block saved', {
-        description: saved.status === 'ACTIVE' ? 'No position opens until a matching signal arrives.' : 'Paused until you resume it.'
-      });
+      if (modeChanging) toast.success(`Switched to ${MODE_LABELS[mode]}`, { description: 'Settings kept. The entry is paused; resume it when you are ready.' });
+      else
+        toast.success(activate ? 'Saved & activated — waiting for signal' : 'Order block saved', {
+          description: saved.status === 'ACTIVE' ? 'No position opens until a matching signal arrives.' : 'Paused until you resume it.'
+        });
       onDone(saved);
     } finally {
       setSaving(false);
@@ -206,10 +253,16 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           {existing && (
             <p className="flex items-start gap-2 text-xs text-muted">
               <LockIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              Pair and mode identify this block and cannot change. Other edits apply to future entries only.
+              The pair identifies this entry and cannot change. Other edits, including the trading mode, apply to future entries only.
             </p>
           )}
-          <FilterSelect label="Trading pair" value={draft.instrumentId} onChange={changePair} options={pairOptions.length ? pairOptions : [{ value: '', label: 'No pairs available' }]} disabled={Boolean(existing)} />
+          {copyFrom && (
+            <p className="flex items-start gap-2 rounded-lg bg-inset px-3 py-2 text-xs text-muted" data-testid="copy-notice">
+              <CopyIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              New {MODE_LABELS[copyFrom.mode]} entry with the saved settings of your {MODE_LABELS[copyFrom.block.mode as BlockMode]} entry. That entry, its positions and orders stay as they are.
+            </p>
+          )}
+          <FilterSelect label="Trading pair" value={draft.instrumentId} onChange={changePair} options={pairOptions.length ? pairOptions : [{ value: '', label: 'No pairs available' }]} disabled={Boolean(fixedPair)} />
           {err('instrumentId') && <p className="-mt-2 text-xs text-loss">{err('instrumentId')}</p>}
           {instrument && (
             <p className="-mt-2 text-xs text-subtle">
@@ -245,22 +298,69 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             label="Trading mode"
             value={mode}
             onChange={(m) => {
-              if (existing) return;
               setMode(m);
+              if (existing || copyFrom) return;
               // One block per pair and mode: move to a pair that is still free in the new mode.
               const free = availableFor(m);
               if (!free.some((i) => i.id === draft.instrumentId) && free[0]) changePair(free[0].id);
             }}
-            options={[
-              { value: 'PAPER', label: 'Paper', disabled: Boolean(existing) && mode !== 'PAPER' },
-              { value: 'LIVE', label: liveConnected ? 'Live (MEXC)' : 'Live — connect MEXC first', disabled: existing ? mode !== 'LIVE' : !liveConnected }
-            ]}
+            options={
+              existing
+                ? (['PAPER', 'LIVE'] as const).map((m) => ({ value: m, label: MODE_LABELS[m], disabled: m !== savedMode && !modeStatus?.allowed }))
+                : copyFrom
+                  ? [{ value: copyFrom.mode, label: MODE_LABELS[copyFrom.mode] }]
+                  : [
+                      { value: 'PAPER' as const, label: 'Paper' },
+                      { value: 'LIVE' as const, label: liveConnected ? 'Live (MEXC)' : 'Live — connect MEXC first', disabled: !liveConnected }
+                    ]
+            }
             hint={
               mode === 'LIVE'
                 ? 'Live sends real orders to your own MEXC Futures account with the stop loss in the same request. Entries also need the platform switch, administrator approval of your account and limits, your own activation (Live Trading page) and a contract on the Live allowlist. Same strategy rules and prices as Paper; separate balance, orders and positions.'
                 : 'Paper uses the simulator with an isolated paper balance. Same strategy rules and public prices as Live.'
             }
           />
+          {!existing && !copyFrom && liveReason && (
+            <p className="-mt-2 text-xs text-warn" data-testid="mode-unavailable">
+              Live unavailable: {liveReason}
+            </p>
+          )}
+          {existing && otherMode && !modeStatus && (
+            <p className="-mt-2 text-xs text-subtle" data-testid="mode-checking">
+              Checking whether this entry can switch to {MODE_LABELS[otherMode]}…
+            </p>
+          )}
+          {existing && otherMode && modeStatus?.blocker && (
+            <div className="-mt-2 space-y-2 rounded-lg border border-warn/40 bg-warn/5 px-3 py-2" data-testid="mode-unavailable" data-code={modeStatus.blocker.code}>
+              <p className="text-xs text-ink">
+                <span className="font-semibold">{MODE_LABELS[otherMode]} unavailable for this entry:</span> {modeStatus.blocker.message}
+              </p>
+              {modeStatus.blocker.code === 'DESTINATION_EXISTS' && onEditBlock && (
+                <Button size="sm" icon={PencilIcon} onClick={() => onEditBlock((modeStatus.blocker as { destinationBlockId: string }).destinationBlockId)}>
+                  Edit the {MODE_LABELS[otherMode]} entry
+                </Button>
+              )}
+              {modeStatus.blocker.code === 'BLOCK_IN_USE' && onCopyToMode && (
+                <Button size="sm" icon={CopyIcon} onClick={() => onCopyToMode(existing, otherMode)}>
+                  Copy saved settings to a new {MODE_LABELS[otherMode]} entry
+                </Button>
+              )}
+              {modeStatus.blocker.code === 'LIVE_UNAVAILABLE' && (
+                <a href="/live-trading" className="inline-block text-xs font-semibold text-accent hover:underline">
+                  Open Live Trading
+                </a>
+              )}
+            </div>
+          )}
+          {modeChanging && savedMode && (
+            <p className="-mt-2 flex items-start gap-2 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 text-xs text-ink" data-testid="mode-change-notice">
+              <ArrowLeftRightIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>
+                Saving switches this entry from {MODE_LABELS[savedMode]} to {MODE_LABELS[mode]} for future entries. Strategy, trading days and window, sizing and exits are kept. The
+                entry is paused after saving; resume it when you are ready. Past {MODE_LABELS[savedMode]} trades stay in {MODE_LABELS[savedMode]}.
+              </span>
+            </p>
+          )}
         </Section>
 
         <Section title="Trading days">
@@ -509,8 +609,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
         )}
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button onClick={() => onDone()}>Cancel</Button>
-          <Button onClick={() => submit(false)} loading={saving}>
-            Save
+          <Button onClick={requestSave} loading={saving}>
+            {modeChanging ? `Save and switch to ${MODE_LABELS[mode]}` : 'Save'}
           </Button>
           {!existing && (
             <Button variant="primary" onClick={() => submit(true)} loading={saving}>
@@ -530,6 +630,21 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           setConfirmRestore(false);
         }}
         onCancel={() => setConfirmRestore(false)}
+      />
+      <ConfirmDialog
+        open={confirmModeChange}
+        title={`Switch to ${MODE_LABELS[mode]}?`}
+        description={
+          savedMode
+            ? `This entry will trade future signals in ${MODE_LABELS[mode]} instead of ${MODE_LABELS[savedMode]}. Your settings are kept and the entry is paused until you resume it.${mode === 'LIVE' ? ' Live sends real orders to your own MEXC account once every Live check passes.' : ''}`
+            : ''
+        }
+        confirmLabel={`Switch to ${MODE_LABELS[mode]}`}
+        onConfirm={() => {
+          setConfirmModeChange(false);
+          void submit(false);
+        }}
+        onCancel={() => setConfirmModeChange(false)}
       />
     </div>
   );
