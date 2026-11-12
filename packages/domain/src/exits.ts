@@ -20,7 +20,11 @@ export type ExitReason =
   | 'OPPOSITE_SIGNAL_CLOSE'
   | 'REVERSAL_CLOSE'
   | 'MANUAL_CLOSE'
-  | 'PROTECTION_FAILURE';
+  | 'PROTECTION_FAILURE'
+  /** Live: reduced at MEXC outside TrendPilot (manual close on the exchange), found by private sync. */
+  | 'EXTERNAL_CLOSE'
+  /** Live: closed by MEXC liquidation, found by private sync. */
+  | 'LIQUIDATION';
 
 export const EXIT_REASON_TEXT: Record<ExitReason, string> = {
   STOP_LOSS: 'The attached stop loss was triggered.',
@@ -31,7 +35,9 @@ export const EXIT_REASON_TEXT: Record<ExitReason, string> = {
   OPPOSITE_SIGNAL_CLOSE: 'An opposite signal closed the position (policy: close position only).',
   REVERSAL_CLOSE: 'An opposite signal closed the position to reverse it (policy: close and reverse).',
   MANUAL_CLOSE: 'You closed the position at market.',
-  PROTECTION_FAILURE: 'The stop loss could not be confirmed at the venue, so the position was closed at market to remove unprotected exposure.'
+  PROTECTION_FAILURE: 'The stop loss could not be confirmed at the venue, so the position was closed at market to remove unprotected exposure.',
+  EXTERNAL_CLOSE: 'The position was reduced or closed directly on MEXC, outside TrendPilot; TrendPilot recorded the exchange fills.',
+  LIQUIDATION: 'MEXC liquidated the position.'
 };
 
 type Side = 'LONG' | 'SHORT';

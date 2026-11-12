@@ -1,12 +1,13 @@
-import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
-import { assertLiveTransportDisabled } from '@trendpilot/domain';
+import { and, desc, eq, inArray, lt, ne, sql } from 'drizzle-orm';
+import { assertLiveTransportAllowed } from '@trendpilot/domain';
 import type { Db, Executor } from './client';
-import { jobs, marketQuotes, serviceHeartbeats } from './schema';
+import { exchangeConnections, jobs, marketQuotes, serviceHeartbeats, users } from './schema';
+import { getLiveControl } from './live/liveMode';
 import { listFeedEvents, listFeedHealth, type FeedEventDto, type FeedHealthDto } from './market/health';
 
 /**
  * Operations (UI-05 Operations, OPS): service liveness, the durable job queue, the public market
- * feed and the release mode. Contract- and queue-level only; no investor data is exposed.
+ * feed, the release mode and Live account health (status and drift only; never balances or keys).
  */
 
 export type ServiceName = 'worker' | 'market-feed';
@@ -46,8 +47,17 @@ export async function pruneRetention(db: Db, o: { now?: Date; jobDays?: number; 
 
 export interface OperationsDto {
   checkedAt: string;
-  mode: 'PAPER';
-  liveOrderTransport: 'disabled' | 'MISCONFIGURED';
+  mode: 'PAPER' | 'PAPER_AND_LIVE';
+  liveOrderTransport: 'disabled' | 'enabled' | 'MISCONFIGURED';
+  live: {
+    platformEnabled: boolean;
+    entriesHalted: boolean;
+    haltReason: string | null;
+    connections: { ownerEmail: string; status: string; approved: boolean; liveEnabled: boolean; entriesHalted: boolean; haltReason: string | null; lastSyncAt: string | null; lastSyncError: string | null; drift: number }[];
+    openPositions: number;
+    unprotectedPositions: number;
+    unresolvedOrders: number;
+  };
   database: { ok: boolean; latencyMs: number | null; error: string | null };
   services: { service: string; instance: string; startedAt: string; lastSeenAt: string; ageSeconds: number; state: 'REPORTING' | 'NOT_REPORTING' | 'STOPPED'; detail: Record<string, unknown> }[];
   /** Overall per service: REPORTING if any instance reports, else NOT_REPORTING / NEVER_STARTED. */
@@ -77,10 +87,38 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
   }
   let liveOrderTransport: OperationsDto['liveOrderTransport'] = 'disabled';
   try {
-    assertLiveTransportDisabled(env);
+    liveOrderTransport = assertLiveTransportAllowed(env);
   } catch {
     liveOrderTransport = 'MISCONFIGURED';
   }
+  const control = await getLiveControl(db);
+  const conns = await db.select({ c: exchangeConnections, email: users.email }).from(exchangeConnections).innerJoin(users, eq(users.id, exchangeConnections.ownerId)).where(ne(exchangeConnections.status, 'REVOKED'));
+  const [lp] = (
+    await db.execute<{ open: string; unprotected: string; unresolved: string }>(sql`
+      SELECT
+        (SELECT count(*) FROM positions WHERE mode = 'LIVE' AND status = 'OPEN') AS open,
+        (SELECT count(*) FROM positions WHERE mode = 'LIVE' AND status = 'OPEN' AND protection_status <> 'PROTECTED') AS unprotected,
+        (SELECT count(*) FROM order_intents WHERE mode = 'LIVE' AND state IN ('INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN')) AS unresolved`)
+  ).rows;
+  const live: OperationsDto['live'] = {
+    platformEnabled: control.liveEnabled,
+    entriesHalted: control.entriesHalted,
+    haltReason: control.haltReason,
+    connections: conns.map(({ c, email }) => ({
+      ownerEmail: email,
+      status: c.status,
+      approved: !!c.approvedAt,
+      liveEnabled: c.liveEnabled,
+      entriesHalted: c.entriesHalted,
+      haltReason: c.haltReason,
+      lastSyncAt: c.lastSyncAt?.toISOString() ?? null,
+      lastSyncError: c.lastSyncError,
+      drift: (c.drift as unknown[]).length
+    })),
+    openPositions: Number(lp!.open),
+    unprotectedPositions: Number(lp!.unprotected),
+    unresolvedOrders: Number(lp!.unresolved)
+  };
 
   const hb = await db.select().from(serviceHeartbeats).orderBy(desc(serviceHeartbeats.lastSeenAt));
   const wall = Date.now();
@@ -131,7 +169,15 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
 
   const alerts: OperationsDto['alerts'] = [];
   if (!database.ok) alerts.push({ level: 'ERROR', message: `Database unreachable: ${database.error}` });
-  if (liveOrderTransport !== 'disabled') alerts.push({ level: 'ERROR', message: 'LIVE_ORDER_TRANSPORT is not "disabled". Paper builds must keep live order submission disabled.' });
+  if (liveOrderTransport === 'MISCONFIGURED') alerts.push({ level: 'ERROR', message: 'LIVE_ORDER_TRANSPORT has an invalid value, or "enabled" outside a production process.' });
+  if (live.openPositions > 0 && liveOrderTransport !== 'enabled') alerts.push({ level: 'ERROR', message: `${live.openPositions} Live position(s) are open but LIVE_ORDER_TRANSPORT is not enabled: TrendPilot cannot close them. Their MEXC stops still protect them; see the runbook.` });
+  if (live.unprotectedPositions > 0) alerts.push({ level: 'ERROR', message: `${live.unprotectedPositions} Live position(s) are not verified as protected by a MEXC stop.` });
+  for (const c of live.connections) {
+    if (c.drift) alerts.push({ level: 'ERROR', message: `Live account ${c.ownerEmail}: MEXC and TrendPilot disagree (${c.drift} item(s)); new entries halted.` });
+    else if (c.entriesHalted && c.liveEnabled) alerts.push({ level: 'WARN', message: `Live account ${c.ownerEmail}: new entries halted (${c.haltReason ?? 'no reason'}).` });
+    if (c.lastSyncError && c.liveEnabled) alerts.push({ level: 'WARN', message: `Live account ${c.ownerEmail}: private sync failed (${c.lastSyncError}).` });
+  }
+  if (live.platformEnabled && live.entriesHalted) alerts.push({ level: 'WARN', message: `All new Live entries are halted: ${live.haltReason ?? 'operator'}.` });
   if (serviceSummary.worker !== 'REPORTING') alerts.push({ level: 'ERROR', message: `Worker ${serviceSummary.worker === 'NEVER_STARTED' ? 'has never reported' : 'is not reporting'}: signals, fills and exits are not processed.` });
   if (serviceSummary['market-feed'] !== 'REPORTING') alerts.push({ level: 'WARN', message: `Market feed ${serviceSummary['market-feed'] === 'NEVER_STARTED' ? 'has never reported' : 'is not reporting'}: public prices are not updating.` });
   for (const c of contracts) {
@@ -142,5 +188,5 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
   if (jobsDto.dead > 0) alerts.push({ level: 'ERROR', message: `${jobsDto.dead} job(s) failed permanently (DEAD). See recent failures.` });
   if (jobsDto.oldestDueSeconds !== null && jobsDto.oldestDueSeconds > 60) alerts.push({ level: 'WARN', message: `Job backlog: oldest due job waiting ${jobsDto.oldestDueSeconds} s.` });
 
-  return { checkedAt: now.toISOString(), mode: 'PAPER', liveOrderTransport, database, services, serviceSummary, jobs: jobsDto, feed: { contracts, events }, alerts };
+  return { checkedAt: now.toISOString(), mode: live.platformEnabled && liveOrderTransport === 'enabled' ? 'PAPER_AND_LIVE' : 'PAPER', liveOrderTransport, live, database, services, serviceSummary, jobs: jobsDto, feed: { contracts, events }, alerts };
 }

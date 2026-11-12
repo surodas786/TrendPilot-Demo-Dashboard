@@ -72,9 +72,11 @@ async function priceFor(db: Executor, instrumentId: string, now: Date): Promise<
   };
 }
 
-/** Open positions of the owner, priced from the newest quote at `now`. */
-export async function listMyHoldings(db: Executor, ownerId: string, now: Date): Promise<HoldingDto[]> {
-  const open = (await listMyPositions(db, ownerId)).filter((p) => p.status === 'OPEN');
+export type ReportMode = 'PAPER' | 'LIVE';
+
+/** Open positions of the owner, priced from the newest quote at `now`. `mode` limits to Paper or Live. */
+export async function listMyHoldings(db: Executor, ownerId: string, now: Date, mode?: ReportMode): Promise<HoldingDto[]> {
+  const open = (await listMyPositions(db, ownerId)).filter((p) => p.status === 'OPEN' && (!mode || p.mode === mode));
   if (!open.length) return [];
   const ids = open.map((p) => p.id);
   const meta = await db
@@ -100,16 +102,23 @@ export async function listMyHoldings(db: Executor, ownerId: string, now: Date): 
       unrealizedPnlUsdt: price ? unrealizedPnl(p.side as 'LONG' | 'SHORT', p.avgEntryPrice, price.mark, p.contracts, m.multiplier) : null,
       unrealizedBasis: 'MARK',
       notionalUsdt: price ? s(D(p.contracts).times(m.multiplier).times(price.mark)) : null,
-      liquidation: p.marginMode === 'ISOLATED' && p.liquidationEstimate ? { price: p.liquidationEstimate, label: 'Estimated (isolated margin, paper simulator)' } : null,
-      fundingUsdt: f ? s(f.total) : '0',
-      fundingSettlements: f?.n ?? 0
+      liquidation:
+        p.mode === 'LIVE'
+          ? p.venueSync?.liquidationPrice
+            ? { price: p.venueSync.liquidationPrice, label: 'MEXC liquidation price (last sync)' }
+            : null
+          : p.marginMode === 'ISOLATED' && p.liquidationEstimate
+            ? { price: p.liquidationEstimate, label: 'Estimated (isolated margin, paper simulator)' }
+            : null,
+      fundingUsdt: p.mode === 'LIVE' ? (p.venueSync?.fundingUsdt ?? '0') : f ? s(f.total) : '0',
+      fundingSettlements: p.mode === 'LIVE' ? 0 : (f?.n ?? 0)
     });
   }
   return out;
 }
 
 export interface DashboardDto {
-  mode: 'PAPER';
+  mode: ReportMode;
   label: string;
   timezone: string;
   day: { date: string; from: string; to: string; isToday: boolean };
@@ -150,27 +159,30 @@ export interface Reconciliation {
   checks: { name: string; ok: boolean; expected: string; actual: string }[];
 }
 
-/** Lifetime identity checks: account columns vs ledger, and ledger vs fills, exits and funding. */
-export async function reconcileMyAccount(db: Executor, ownerId: string): Promise<Reconciliation | null> {
-  const [a] = await db.select().from(paperAccounts).where(eq(paperAccounts.ownerId, ownerId));
+/**
+ * Lifetime identity checks for one account (Paper or Live): account columns vs ledger, and ledger
+ * vs fills, exits and funding. Live wallet adjustments to the MEXC balance appear as "other".
+ */
+export async function reconcileMyAccount(db: Executor, ownerId: string, mode: ReportMode = 'PAPER'): Promise<Reconciliation | null> {
+  const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode)));
   if (!a) return null;
   const kinds = await db
     .select({ kind: ledgerEntries.kind, bucket: ledgerEntries.bucket, total: sql<string>`sum(${ledgerEntries.amount})` })
     .from(ledgerEntries)
-    .where(eq(ledgerEntries.ownerId, ownerId))
+    .where(eq(ledgerEntries.paperAccountId, a.id))
     .groupBy(ledgerEntries.kind, ledgerEntries.bucket);
   const k = (kind: string) => D(kinds.find((x) => x.kind === kind && x.bucket === 'WALLET')?.total ?? 0);
   const bucket = (b: string) => kinds.filter((x) => x.bucket === b).reduce((t, x) => t.plus(x.total), D(0));
   const known = ['OPENING_BALANCE', 'REALIZED_PNL', 'TRADING_FEE', 'FUNDING'];
   const other = kinds.filter((x) => x.bucket === 'WALLET' && !known.includes(x.kind)).reduce((t, x) => t.plus(x.total), D(0));
-  const [ex] = await db.select({ pnl: sql<string>`coalesce(sum(${positionExits.realizedPnl}), 0)`, fee: sql<string>`coalesce(sum(${positionExits.fee}), 0)` }).from(positionExits).where(eq(positionExits.ownerId, ownerId));
+  const [ex] = await db.select({ pnl: sql<string>`coalesce(sum(${positionExits.realizedPnl}), 0)`, fee: sql<string>`coalesce(sum(${positionExits.fee}), 0)` }).from(positionExits).where(eq(positionExits.paperAccountId, a.id));
   // Closing fills are also in `fills`; their fees are counted once, from position_exits.
   const [en] = await db
     .select({ fee: sql<string>`coalesce(sum(${fills.fee}), 0)` })
     .from(fills)
     .innerJoin(orderIntents, eq(orderIntents.id, fills.intentId))
-    .where(and(eq(fills.ownerId, ownerId), eq(orderIntents.kind, 'OPEN')));
-  const [fu] = await db.select({ amt: sql<string>`coalesce(sum(${paperFunding.amount}), 0)` }).from(paperFunding).where(eq(paperFunding.ownerId, ownerId));
+    .where(and(eq(fills.paperAccountId, a.id), eq(orderIntents.kind, 'OPEN')));
+  const [fu] = await db.select({ amt: sql<string>`coalesce(sum(${paperFunding.amount}), 0)` }).from(paperFunding).where(eq(paperFunding.paperAccountId, a.id));
   const checks = [
     { name: 'wallet balance = wallet ledger', expected: bucket('WALLET'), actual: D(a.walletBalance) },
     { name: 'position margin = margin ledger', expected: bucket('POSITION_MARGIN'), actual: D(a.positionMargin) },
@@ -213,13 +225,18 @@ async function fundingDue(db: Executor, ownerId: string, from: Date, to: Date, n
   return { due, booked: got, amount: booked.reduce((t, b) => t.plus(b.amount), D(0)) };
 }
 
-export async function getMyDashboard(db: Executor, user: { id: string; timezone: string }, o: { now: Date; date?: string }): Promise<DashboardDto> {
+/** Dashboard for one mode. Paper and Live are reported separately and never summed. */
+export async function getMyDashboard(db: Executor, user: { id: string; timezone: string }, o: { now: Date; date?: string; mode?: ReportMode }): Promise<DashboardDto> {
   const tz = user.timezone || 'Asia/Dhaka';
   const today = localDate(o.now, tz);
   const w = reportingDayWindow(o.date ?? today, tz);
   const ownerId = user.id;
+  const mode: ReportMode = o.mode ?? 'PAPER';
+  const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode)));
+  // No account for this mode yet: every figure below is zero (an impossible ID matches nothing).
+  const acctId = acct?.id ?? '00000000-0000-0000-0000-000000000000';
 
-  const [account, holdings, reconciliation] = await Promise.all([getMyPaperAccount(db, ownerId), listMyHoldings(db, ownerId, o.now), reconcileMyAccount(db, ownerId)]);
+  const [account, holdings, reconciliation] = await Promise.all([getMyPaperAccount(db, ownerId, mode), listMyHoldings(db, ownerId, o.now, mode), reconcileMyAccount(db, ownerId, mode)]);
 
   const [ex] = await db
     .select({
@@ -229,17 +246,19 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
       partial: sql<number>`count(*) filter (where ${positionExits.remainingContracts} > 0)`.mapWith(Number)
     })
     .from(positionExits)
-    .where(and(eq(positionExits.ownerId, ownerId), gte(positionExits.filledAt, w.from), lt(positionExits.filledAt, w.to)));
+    .where(and(eq(positionExits.paperAccountId, acctId), gte(positionExits.filledAt, w.from), lt(positionExits.filledAt, w.to)));
   const [en] = await db
     .select({ fee: sql<string>`coalesce(sum(${fills.fee}), 0)`, n: sql<number>`count(*)`.mapWith(Number) })
     .from(fills)
     .innerJoin(orderIntents, eq(orderIntents.id, fills.intentId))
-    .where(and(eq(fills.ownerId, ownerId), eq(orderIntents.kind, 'OPEN'), gte(fills.filledAt, w.from), lt(fills.filledAt, w.to)));
+    .where(and(eq(fills.paperAccountId, acctId), eq(orderIntents.kind, 'OPEN'), gte(fills.filledAt, w.from), lt(fills.filledAt, w.to)));
   const [closed] = await db
     .select({ n: sql<number>`count(*)`.mapWith(Number) })
     .from(positions)
-    .where(and(eq(positions.ownerId, ownerId), gte(positions.closedAt, w.from), lt(positions.closedAt, w.to)));
-  const f = await fundingDue(db, ownerId, w.from, w.to, o.now);
+    .where(and(eq(positions.paperAccountId, acctId), gte(positions.closedAt, w.from), lt(positions.closedAt, w.to)));
+  // Paper books simulated funding per settlement. Live funding is charged by MEXC and already in the
+  // synced wallet; it is shown per position (cumulative, from MEXC) and not added to net realized.
+  const f = mode === 'PAPER' ? await fundingDue(db, ownerId, w.from, w.to, o.now) : { due: 0, booked: 0, amount: D(0) };
   const status = fundingStatus(f.due, f.booked);
   const fees = D(ex!.fee).plus(en!.fee);
 
@@ -256,8 +275,8 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
   const newest = contracts.map((c) => c.asOf).filter((x): x is string => !!x).sort().at(-1) ?? null;
 
   return {
-    mode: 'PAPER',
-    label: 'Paper — simulated balance and fills. Live trading is disabled.',
+    mode,
+    label: mode === 'LIVE' ? 'Live — your MEXC Futures account: real fills, fees and balance (synced from MEXC).' : 'Paper — simulated balance and fills.',
     timezone: tz,
     day: { date: w.date, from: w.from.toISOString(), to: w.to.toISOString(), isToday: w.date === today },
     asOf: o.now.toISOString(),
@@ -276,7 +295,13 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
       feesUsdt: s(fees),
       entryFeesUsdt: s(en!.fee),
       exitFeesUsdt: s(ex!.fee),
-      funding: { amountUsdt: status === 'UNAVAILABLE' ? null : s(f.amount), status, statusText: FUNDING_STATUS_TEXT[status], settlementsDue: f.due, settlementsBooked: f.booked },
+      funding: {
+        amountUsdt: status === 'UNAVAILABLE' ? null : s(f.amount),
+        status,
+        statusText: mode === 'LIVE' ? 'Live funding is charged by MEXC and included in the synced balance; see each position for its cumulative funding.' : FUNDING_STATUS_TEXT[status],
+        settlementsDue: f.due,
+        settlementsBooked: f.booked
+      },
       netRealizedUsdt: netRealized(ex!.pnl, fees.toFixed(), f.amount.toFixed()),
       entryFills: en!.n,
       exitFills: ex!.n,

@@ -7,7 +7,9 @@ export const EXIT_LABEL: Record<string, string> = {
   OPPOSITE_SIGNAL_CLOSE: 'Opposite signal',
   REVERSAL_CLOSE: 'Close and reverse',
   MANUAL_CLOSE: 'Manual close',
-  PROTECTION_FAILURE: 'Emergency close (stop not confirmed)'
+  PROTECTION_FAILURE: 'Emergency close (stop not confirmed)',
+  EXTERNAL_CLOSE: 'Closed on MEXC',
+  LIQUIDATION: 'Liquidated'
 };
 
 export const signedUsdt = (v: string) => `${Number(v) > 0 ? '+' : ''}${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT`;

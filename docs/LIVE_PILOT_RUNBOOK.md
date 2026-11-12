@@ -1,146 +1,179 @@
-# TrendPilot live pilot — operator runbook (Step 12)
+# TrendPilot Live — operator runbook
 
-**Status: NOT READY for the first live trade. Live order submission is disabled in this build.** This runbook is the procedure for the first supervised pilot once the blockers in §1 are cleared in a separately reviewed release. It was rehearsed end to end with mocked MEXC responses (dry run, `apps/web/test/api/pilotRehearsal.test.ts`; transcript `test-results/pilot-rehearsal.md`). Do not place a real order until the operator approves the first trade in writing.
+**Status (2026-11-12): the Live path is implemented and ships switched OFF.** Every gate below defaults to Off. No real order has ever been sent. Real-order testing is a separate, operator-led pilot that starts only after the owner has reviewed several days of Paper results and approved it in writing.
 
-Related: `docs/MEXC_PRIVATE_ADAPTER.md` (endpoints, capability matrix), `docs/STAGING.md` (deployment, Operations view, backups), `docs/BUILD_CHECKPOINT.md` (status).
+Related: `docs/MEXC_PRIVATE_ADAPTER.md` (endpoints, docs review, capability matrix), `docs/STAGING.md` (deployment and backups), `docs/BUILD_CHECKPOINT.md` (status and evidence).
 
-## 0. Pilot scope (fixed for the first pilot)
+## 0. How Live works and what stops it
 
-| Item | Value |
-| --- | --- |
-| Investors | **One** approved investor (allowlist; every other investor is refused `PILOT_INVESTOR_NOT_ALLOWLISTED`) |
-| Exchange account | **One** verified MEXC Futures account, identified by a non-secret reference (UID suffix) |
-| Contract | **One** approved contract (e.g. BTCUSDT → `BTC_USDT`) |
-| Limits (operator-approved) | Max contracts per order, max notional per order (USDT), max leverage (≤ 20, recommended ≤ 5), max total exposure (USDT) |
-| Adds | **Off** (database constraint; an entry while a position is open is refused `PILOT_ADDS_DISABLED`) |
-| Automatic reversal | **Off** (database constraint; activation refused for a `CLOSE_AND_REVERSE` strategy version) |
-| Authorization | Platform approval by an administrator **and** explicit activation by the investor, both audited |
-| Stops | Every opening order carries `stopLossPrice` in the same request; a fill without a verified stop is closed immediately and halts entries |
+Paper and Live are one application. The same TradingView alert, strategy rules, public MEXC price feed, durable order intents and worker drive both. Each investor has a **separate Live account** in TrendPilot: its own balance (synced from MEXC), orders, fills, positions and ledger. Live orders go to the investor's **own** MEXC Futures account through the signed private API.
 
-Recommended first-pilot limits: 1–2 × the contract minimum per order, leverage ≤ 3x, exposure ≤ the per-order notional (no second position).
+A Live **opening** order (new entry, or the opening leg of a reversal) is sent only if ALL of these hold, checked when the signal is evaluated and again in the worker right before sending:
 
-## 1. Preconditions (all must be PASS before the first trade)
+| # | Gate | Default | Who controls it |
+| --- | --- | --- | --- |
+| 1 | `LIVE_ORDER_TRANSPORT=enabled` on the server (production process only) | `disabled` | Server operator (env + restart) |
+| 2 | Platform Live switch on, platform entries not halted | Off | Admin → Live Trading |
+| 3 | The four order capabilities recorded `VERIFIED` or `PILOT_ACCEPTED` (needed to switch 2 on) | none recorded | Admin → Live Trading |
+| 4 | Investor's MEXC connection `VERIFIED` (read-only checks passed) | not connected | Investor → Live Trading |
+| 5 | Account approved by an admin, with limits: max contracts/order, max notional/order, max leverage, max total exposure | not approved | Admin → Live Trading |
+| 6 | Investor activated Live, account entries not halted | Off | Investor → Live Trading |
+| 7 | Contract on the Live allowlist (published, validated against MEXC, not fixture metadata) | none | Admin → Live Trading |
+| 8 | Investor's Live order block is Active; trading days / trading window allow it | Paused | Investor → Trade Settings |
+| 9 | Order carries its stop loss; size, notional, leverage, exposure within the limits (exposure uses MEXC's position) | — | Enforced by the worker |
 
-Check: `GET /v1/admin/live-pilot` → `readiness.items` (stage `FIRST_TRADE`). Today:
+**Never gated:** stop resize, take profit, trailing take profit, close on signal, manual close, emergency close. Halting or switching Live off stops new entries only.
 
-| Item | Today | Who clears it |
+**Automatic protection:**
+- The stop loss is attached to the opening request (`stopLossPrice`, `lossTrend`). After the fill TrendPilot verifies, at MEXC, an ACTIVE, non-reversing stop covering exactly the filled contracts on the correct side of the entry. Otherwise it closes the position at market at once (`PROTECTION_FAILURE`) and halts that account's entries.
+- Timeouts, network errors and 5xx responses are uncertain. TrendPilot never resends blindly. It looks the order up by client order ID (`tp-…`), halts the account's entries (`UNCERTAIN_ORDER`), and only treats the order as absent after 30 s.
+- The private sync runs every 30 s (`LIVE_SYNC_MS`) for each Live account. It:
+  - matches the wallet to MEXC;
+  - stores the liquidation price and funding;
+  - books exchange-side closes (a triggered stop as `STOP_LOSS`; a manual MEXC close as `EXTERNAL_CLOSE`);
+  - re-verifies stop coverage;
+  - records **drift**, meaning MEXC and TrendPilot disagree. Drift halts the account's entries until an admin reviews it.
+
+## 1. Before activation (all must be true)
+
+| Item | State on 2026-11-12 | Who |
 | --- | --- | --- |
-| Written MEXC confirmation that the account may place automated futures orders for this use (MEXC restricts "bot trading, or algorithmic trading"; API access "primarily available to institutional users") | **Missing** | Release owner with MEXC (institution@mexc.com) |
-| KYC complete; API key with only the needed permissions; IP whitelist | **Missing** | Investor + operator |
-| `npm run ops:mexc-readonly-check` passes on the pilot account | **Pending** (no read-only key) | Operator |
-| Position mode recorded (one-way preferred) and matching the adapter | **Pending** | Operator |
-| Contract spec equals the platform instrument | Pending (public spec matches BTC today) | Operator |
-| Account flat at start (no position, no resting order) | Pending | Operator |
-| Read capabilities verified on the account (signing, balances, positions, position mode) | Pending | Operator, via the read-only check |
-| Encrypted, access-restricted storage for the pilot API key (OPS-01) | **Not built** | Engineering (reviewed release) |
-| LIVE mode allowed for the pilot investor's order block | **Not built** (`ALLOWED_MODES` is PAPER only) | Engineering |
-| `venueForMode('LIVE')` builds the pilot-guarded MEXC venue | **Not built** (fails closed by design) | Engineering |
-| Build gate `LIVE_ACTIVATION_ALLOWED_IN_THIS_BUILD` | **Closed** | Engineering, under review |
-| Operator tool to record an exchange-side manual close (drift) when TrendPilot cannot close | **Not built** | Engineering (see §7) |
-| Operator approval of the first supervised trade | **Not given** | Operator, in writing |
+| Owner reviewed several days of Paper results and approved a supervised Live pilot in writing (date, investor, contract, max size) | **Pending** | Owner |
+| Written MEXC confirmation that the account may place automated futures orders for this use (MEXC restricts "bot trading, or algorithmic trading"; API access is "primarily available to institutional users") | **Pending** | Owner with MEXC (institution@mexc.com) |
+| Investor account: KYC complete; one-way position mode; API key with View Account Details + View Order Details + Order Placing only (never withdrawal), IP-whitelisted to the server's public IP | **Pending** | Investor |
+| Read-only check on that account passes (`npm run ops:mexc-readonly-check`, or *Save and check* on the Live Trading page) | **Pending** (no key) | Operator |
+| `DATA_ENCRYPTION_KEY` set on the server (32 bytes, base64). It seals API keys at rest; losing it means re-entering keys | Required in production; check the server | Operator |
+| Server migrated to `0020_m10_live_mode` and running this release | **Not deployed yet** | Operator |
+| Server can reach `https://api.mexc.com` (and its public IP is the one whitelisted on the key) | Check | Operator |
 
-## 2. Enable the approved pilot
+## 2. Deploy the release (Live stays Off)
 
-All admin calls are authenticated admin API requests (or the equivalent admin screen once built); record evidence as references, never as credentials.
+On the server (`192.168.91.16`, PM2):
+```sh
+git fetch && git checkout <release commit>
+npm ci && npm run db:migrate && npm run build
+pm2 restart all
+curl -s http://localhost:3000/v1/health
+#   {"status":"ok",...,"mode":"PAPER","liveOrderTransport":"disabled"}
+```
+`LIVE_ORDER_TRANSPORT` must still be `disabled` in the server's `.env`. Paper keeps running unchanged.
 
-1. **Define the pilot**
-   ```
-   POST /v1/admin/live-pilot
-   { "investorId": "<uuid>", "instrumentId": "<uuid>", "exchangeAccountRef": "MEXC UID …4821",
-     "maxOrderContracts": "2", "maxOrderNotionalUsdt": "20", "maxLeverage": 3, "maxExposureUsdt": "20" }
-   ```
-   Refused if a pilot is already open, the investor is not active, the contract is not published with a MEXC symbol, or the limits are invalid.
-2. **Run the read-only check** on the pilot account from the operator host (key exported in the shell only, never in a file under the repository):
-   ```sh
-   MEXC_READONLY_API_KEY=… MEXC_READONLY_SECRET_KEY=… npm run ops:mexc-readonly-check -- --symbol BTC_USDT
-   ```
-   Every line must be `OK`; position mode recorded; open positions `none`; stop orders `none`; contract spec `matches`.
-3. **Record the six checks with evidence** (one call each):
-   ```
-   POST /v1/admin/live-pilot/checks  { "check": "ELIGIBILITY_CONFIRMED", "passed": true, "evidence": "MEXC email ref …, 2026-…" }
-   ```
-   `ELIGIBILITY_CONFIRMED`, `KYC_AND_KEY_PERMISSIONS`, `READ_ONLY_CHECK`, `POSITION_MODE`, `CONTRACT_SPEC_MATCH`, `ACCOUNT_FLAT_AT_START`.
-4. **Platform authorization:** `POST /v1/admin/live-pilot/approve` (refused until all six are passed).
-5. **Investor activation:** the investor signs in and calls `POST /v1/me/live-pilot/activate` (refused for any other investor, before approval, or if the order block has adds on, a reversing strategy, leverage above the limit, or another contract).
-6. **Reviewed live release** (engineering, not an operator switch): credential store, LIVE mode for the pilot block, live venue wiring through `pilotGuardedVenue(mexcVenue(…))`, and the build gate. Deploy it to the pilot environment only.
-7. **First-trade approval:** the operator approves the first trade in writing (date, contract, max size). Until then the readiness item `FIRST_TRADE_APPROVAL` stays MISSING.
+## 3. Set up one pilot account (still no orders possible)
 
-## 3. Verify the first fill and its attached stop on MEXC
+1. **Contract.** In Admin → Trading Pairs, validate and publish the contract against MEXC (e.g. BTCUSDT → `BTC_USDT`). Then go to Admin → Live Trading → *Contracts allowed for Live* and allow it. Fixture-only contracts cannot be allowed.
+2. **Investor connects.** The investor opens **Live Trading** in the sidebar and enters:
+   - an account reference (UID suffix, never a key);
+   - the API key;
+   - the secret.
 
-Have both screens open before the alert: TrendPilot *Operations*, *My Trades → trade detail* (investor) and the MEXC Futures web UI for the pilot account (*Positions*, *Open orders → TP/SL*, *Order history*, *Trade history*).
+   Then they press **Save and check**.
+   - TrendPilot seals both values with AES-256-GCM and runs read-only calls: position mode, balances, open positions and stops.
+   - The connection becomes `VERIFIED` (or `FAILED`, with the MEXC code).
+   - The key is never shown again; only `…1234` is displayed.
+3. **Admin approves with limits.** Admin → Live Trading → *Investor MEXC accounts* → enter the limits → **Approve with these limits**.
+   - Recommended first pilot: 1–2 × the contract minimum per order, notional ≤ 20 USDT, leverage ≤ 3x, exposure = per-order notional.
+4. **Investor creates a Live order block.** Trade Settings → Add → Trading mode **Live (MEXC)**. The settings are the same as for Paper, and Paper blocks stay separate. Save it **paused** for now.
+5. **Capability evidence.** Admin → Live Trading → *MEXC order capabilities*. With an operator note (e.g. "Supervised pilot approved by owner 2026-11-xx, ref …"), press **Pilot** on:
+   - `OPEN_WITH_ATTACHED_STOP`
+   - `REDUCE_ONLY_CLOSE`
+   - `STOP_RESIZE_AFTER_PARTIAL_CLOSE`
+   - `CANCEL_STOP`
 
-Within **60 seconds** of the fill, confirm all of the following; any mismatch → abort (§5):
+   After the pilot proves each one on MEXC, re-record it as **Verified** with the order IDs.
 
-| Check | TrendPilot | MEXC |
+## 4. Activate (owner decision; supervised)
+
+Do these in order, with the operator watching:
+1. **Server transport.** Set `LIVE_ORDER_TRANSPORT=enabled` in the server `.env`, then run `pm2 restart all --update-env`.
+   - `/v1/health` must show `"liveOrderTransport":"enabled"`.
+   - Worker log: `live order transport enabled`.
+2. **Platform switch.** Admin → Live Trading → enter a note → **Switch Live on**.
+3. **Investor activation.** Investor → Live Trading → **Activate Live trading** (with confirmation).
+4. **Resume the block.** Investor → Trade Settings → resume the Live order block.
+5. Investor → Live Trading should now read "New Live entries are allowed…".
+
+Nothing is sent until the next matching TradingView alert passes every Paper rule and every Live gate.
+
+### First fill: verify within 60 seconds (any mismatch → §6)
+
+| Check | TrendPilot | MEXC web UI |
 | --- | --- | --- |
-| Position side and size | Trade detail: side, *Remaining contracts* | *Positions*: direction, quantity (contracts) |
-| Average entry | *Average entry* | *Positions*: entry price |
-| Stop exists, close-only, right side of entry | *Stop loss*: price, basis; *Protected · covers N* | *Open orders → TP/SL*: stop-loss trigger price, trigger type (**Fair/Mark** or **Last** as configured), quantity |
-| Stop covers the filled quantity (also on a partial fill) | *covers N* = remaining contracts | TP/SL quantity = position quantity |
-| Order and fills | *Fills*: one fill, fee | *Order history*: one order with the client order ID (`tp-…`), *Trade history*: deals and fees |
-| No other orders or positions | Operations: no alerts | No other position or order on any contract |
+| Side and size | My Holdings → **Live** tab → position | Positions: direction, quantity |
+| Average entry | Holding detail | Positions: entry price |
+| Stop exists, close-only, right side, covers the position (also after a partial fill) | Holding: *Protected · covers N* | Open orders → TP/SL: SL price, trigger type (Fair/Mark or Last), quantity = position, not reversing |
+| One order with the client ID | My Trades → **Live** → trade → fills | Order history: one order `tp-…`; Trade history: deals, fee |
+| Nothing else open | Admin → Operations: no Live alerts | No other position/order on any contract |
 
-Also run `npm run ops:mexc-readonly-check -- --symbol BTC_USDT` and compare: one position, one stop order with the expected `SL` price, basis and `vol`.
+Record the order IDs against the capabilities (§3.5) and in `docs/MEXC_PRIVATE_ADAPTER.md` §5.
 
-Record the observations (screenshots, order IDs) against the capabilities in `docs/MEXC_PRIVATE_ADAPTER.md` §5 (`OPEN_WITH_ATTACHED_STOP`, `READ_STOP_ORDERS`, `READ_ORDER_BY_CLIENT_ID`, `READ_FILLS`).
+## 5. Monitoring
 
-## 4. Halt new entries
+- **Admin → Operations:** Live alerts appear here. They cover:
+  - open Live positions while the transport is off;
+  - unprotected Live positions;
+  - drift per account;
+  - halted accounts;
+  - sync errors;
+  - stale feed;
+  - DEAD jobs.
+- **Admin → Live Trading:**
+  - the switch and halt state;
+  - each account's status, last sync and drift details;
+  - **Sync now**, which runs the private sync on demand.
+- **Worker log:** `pm2 logs worker | grep -E "live sync|paper order|paper close"`. Lines for Live orders contain `LIVE_REFUSED:` (gate refusals), `UNCERTAIN_ORDER` and `PROTECTION_FAILURE`. Sync lines read `live sync <owner>: exitsRecorded=… protectionFailures=… drift=…`.
+- **Feed:** Market Data Feed must stay HEALTHY on WebSocket with REST ticker = 0 (Live and Paper share it).
+- **Health:** `/v1/health` → `liveOrderTransport` and `mode` (`PAPER_AND_LIVE` when the transport and platform switch are both on).
 
-Any of these stops new entries at once; protection, stop resizing and every close (take profit, close on signal, manual close, emergency close) keep working:
+## 6. Halt, emergency close, restore
 
-- Operator: `POST /v1/admin/live-pilot/halt { "reason": "…" }`
-- Investor: `POST /v1/me/live-pilot/halt` (only an operator can resume)
-- Automatic: a fill without a verified stop (`PROTECTION_FAILURE …`) or an uncertain submission (`UNCERTAIN_ORDER …`) halts the pilot by itself.
-- Investor withdrawal: `POST /v1/me/live-pilot/deactivate` (no new entries; closing stays available).
+**Stop new entries (closes keep working). Use the narrowest control that fits:**
+- One account: Admin → Live Trading → account → **Halt entries**, or the investor presses **Halt new entries**.
+- Everyone: Admin → Live Trading → **Halt all new Live entries** (note required).
+- Investor withdraws: **Turn Live off**.
+- Resume is admin-only and needs a note. It is refused while an order is unresolved, a Live position is unprotected, or drift is open.
 
-Resume (operator only): `POST /v1/admin/live-pilot/resume { "note": "…" }` — refused while any order is unresolved or an open position is not protected.
+**Close a position:**
+1. Prefer TrendPilot: My Trades → **Live** → trade → **Close position**. This sends a reduce-only market close capped at the MEXC position.
+2. If TrendPilot cannot act (worker down, errors), close on MEXC: Positions → contract → **Close** → **Market** → full quantity. Then cancel any leftover TP/SL under Open orders.
+   - The next sync books the exchange close (`EXTERNAL_CLOSE`, or `STOP_LOSS` if the stop fired). No manual bookkeeping is needed.
+   - Check Admin → Live Trading: no drift. If there is drift, review it, then **Clear reviewed drift** with a note.
+3. If the position must stay open but is unprotected (only when keeping it is intended), restore the stop on MEXC: Positions → TP/SL → SL at the recorded TrendPilot stop price, same trigger type, full quantity, market. Then run **Sync now**.
 
-## 5. Abort criteria
+**Last resort, everything stops:**
+- Delete the API key in MEXC → API Management. This stops TrendPilot reaching the account at all.
+- Or set `LIVE_ORDER_TRANSPORT=disabled` and run `pm2 restart all --update-env`.
+- Both also stop TrendPilot's closes. The MEXC stops stay at the exchange and keep protecting open positions. Close manually on MEXC if needed.
 
-Halt entries (§4) and, unless the position is verified protected and correct, close it (§6) when any of these occurs:
+**Abort triggers:**
+- the stop is not visible at MEXC within 60 s of a fill, or its quantity or price is wrong;
+- an order stays `SUBMITTING` for more than 2 minutes;
+- MEXC and TrendPilot disagree (drift);
+- signature or permission errors (602, 406, 511);
+- maintenance (604, 801, 11444), or repeated rate limits (510, 2037);
+- the worker or feed stops reporting while a position is open;
+- the investor or operator asks to stop.
 
-- The stop is not visible at MEXC within 60 s of the fill, its quantity differs from the position, its price or trigger type is wrong, or it is not close-only.
-- TrendPilot shows `UNPROTECTED`, an emergency close (`PROTECTION_FAILURE`), or an order stuck `SUBMITTING` for more than 2 minutes.
-- MEXC and TrendPilot disagree on position side, size or entry, or an unexpected order, position or opposite-side exposure appears.
-- MEXC returns signature/permission errors (602, 406, 511), maintenance (604, 801, 11444), repeated rate limits (510, 2037), or any account restriction or freeze notice.
-- The Operations view shows the worker or feed not reporting, a DEAD job, or stale prices while a position is open.
-- Fill price differs from the alert reference by more than the strategy's price-deviation limit.
-- The investor or operator asks to stop.
+## 7. End the pilot / deactivate
 
-## 6. Restore protection or close when TrendPilot cannot
+1. Halt entries (§6) and close Live positions. Confirm My Trades → **Live** shows none open and MEXC shows no positions or orders.
+2. Investor: **Turn Live off**. Admin: **Switch Live off** (note). Optionally **Remove approval**.
+3. Set `LIVE_ORDER_TRANSPORT=disabled` and restart, if Live will not be used for a while.
+4. Optionally the investor removes the key on the Live Trading page (refused while Live exposure remains), and deletes it on MEXC.
+5. Compare TrendPilot Live fills, fees and realized P&L (Dashboard → **Live**, reconciliation) with MEXC Trade history.
 
-Prefer TrendPilot's own close first (*My Trades → Close position*, or the admin halt plus a close-on-signal). If TrendPilot cannot act (worker down, uncertain state, API errors), act directly on MEXC — **close first, restore second**:
+## 8. Evidence: mock vs read-only vs live pilot
 
-1. **Close the position at market (preferred):** MEXC Futures → *Positions* → the pilot contract → *Close* → *Market* → full quantity. Confirm *Positions* is empty and no TP/SL or order remains (*Open orders*: cancel any).
-2. **Or restore the stop** (only if keeping the position is explicitly intended): *Positions* → *TP/SL* → stop-loss at the recorded TrendPilot stop price, trigger type matching the plan (Fair/Mark or Last), quantity = full position, market execution. Confirm it appears in *Open orders → TP/SL*.
-3. **Stop all API activity if anything is unexplained:** in MEXC → *API Management*, delete (or disable) the pilot API key. This also blocks TrendPilot.
-4. **Record it:** halt the pilot (§4) with the reason, note the MEXC order IDs and times. TrendPilot does not yet sync private account state, so an exchange-side close leaves the platform position `OPEN` (drift) — keep the pilot halted and end it (`POST /v1/admin/live-pilot/end`) until the operator drift tool (§1) exists.
-
-## 7. End of pilot: confirm flat
-
-1. Halt entries (§4), then ensure every TrendPilot position on the contract is `CLOSED` (*My Trades*).
-2. MEXC UI: *Positions* empty for the account; *Open orders* and *TP/SL* empty.
-3. Read-only check: `open positions: none`, `stop orders: none`.
-4. Compare TrendPilot fills, fees and realized P&L with MEXC *Trade history* (same order IDs, deal quantities, fee sign and currency); record differences.
-5. Investor `POST /v1/me/live-pilot/deactivate`; operator `POST /v1/admin/live-pilot/end`.
-6. Optionally delete the API key in MEXC.
-
-## 8. Dry run vs. real pilot
-
-| Check | Dry run (mocked MEXC) | Needs the real pilot |
-| --- | --- | --- |
-| Pilot allowlist, approval + activation, roles, audit | **Passed** | — |
-| Opening request carries the stop (redacted request shown) | **Passed** | MEXC creates the stop atomically and lists it |
-| Stop coverage = confirmed fill, incl. partial fill | **Passed** (mock attaches for the filled quantity) | Real partial-fill stop behaviour |
-| Take profit and close on signal: reduce-only market closes that cannot flip | **Passed** | `reduceOnly` / close-side behaviour in the account's position mode |
-| Final position, fees, P&L reconcile with exchange records | **Passed** (against mock deals) | Fee sign/currency, deal records, funding |
-| Missing stop → emergency close + entries halted | **Passed** | How a real attachment failure is reported |
-| Timeout after submission → halt, reconcile before any retry | **Passed** | Real read-after-write delay; unknown-ID response (2040?) |
-| Worker restart after fill → reconciled once | **Passed** | — (platform behaviour) |
-| Limits refuse oversize, over-leveraged and add entries | **Passed** | — |
-| Closing available while entries are halted | **Passed** | — |
-| Account eligibility, key permissions, IP whitelist | n/a | **Required** |
-| Read-only account check | n/a (pending) | **Required** |
-| Duplicate `externalOid` rejected by MEXC | n/a | Observe (not relied on) |
-| Stop resize after partial close at MEXC (auto-shrink vs re-place, gap length) | Passed (both modelled) | **Required** |
-| Rate limits and maintenance behaviour | Partly (codes mapped) | Observe |
+| Behaviour | Mock (automated, this repo) | Read-only account | Live pilot |
+| --- | --- | --- | --- |
+| Gates: transport, platform switch/halt, approval, activation, allowlist, limits, ownership | **Passed** (`liveMode.test.ts`, `live.test.ts`) | — | — |
+| Credentials sealed at rest, never returned by any API | **Passed** | — | — |
+| Opening order with `stopLossPrice` in the same request; stop covers the confirmed (partial) fill | **Passed** | — | **Pending** (atomicity, listing under `orderId`) |
+| Reduce-only market close (`side 4/2`, `reduceOnly`, `positionId`) for manual close and TP | **Passed** | — | **Pending** |
+| Stop resized to the remainder after a partial TP (cancel + place, `stopLossReverse: 2`) | **Passed** | — | **Pending** (auto-shrink vs re-place, gap) |
+| Missing stop → emergency close + account halt | **Passed** | — | Observe |
+| Timeout after accept → halt, reconcile by client ID, one order; still invisible after grace → no resend, drift flagged | **Passed** | — | **Pending** (real visibility delay, unknown-ID code 2040) |
+| Exchange-side stop / manual close booked once by the sync; wallet = MEXC balance; liquidation + funding stored | **Passed** | Pending | **Pending** (deal history shape, `holdFee` sign) |
+| Unknown exposure → drift → halt until reviewed | **Passed** | — | — |
+| Two investors on the same contract: separate exchange accounts and records | **Passed** | — | — |
+| Signing, position mode, balances, positions, stops read | Passed (mock) | **Pending** (no key configured) | — |
+| Account eligibility for automated orders | — | — | **Pending — MEXC written confirmation** |

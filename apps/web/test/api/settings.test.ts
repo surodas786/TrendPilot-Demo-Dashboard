@@ -36,10 +36,14 @@ describe('create', () => {
     expect(r.body.code).toBe('DUPLICATE_BLOCK');
   });
 
-  it('LIVE mode is 422 LIVE_DISABLED', async () => {
+  it('a LIVE block can be saved but not activated without a verified MEXC connection', async () => {
     const r = await create(blockBody({ instrumentId: ETH, strategyVersionId: TEST_VERSION, mode: 'LIVE' }));
-    expect(r.status).toBe(422);
-    expect(r.body.code).toBe('LIVE_DISABLED');
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ mode: 'LIVE', status: 'PAUSED' });
+    const res = await call(resume.POST, { method: 'POST', path: '/x', cookie: a, params: { id: r.body.id }, ifMatch: r.body.revision });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('RESUME_BLOCKED');
+    expect(res.body.message).toMatch(/MEXC/);
   });
 
   it('validates leverage and pair against the catalog', async () => {

@@ -60,7 +60,8 @@ export async function positionsOpenAt(db: Executor, instrumentId: string, at: Da
   const rows = await db
     .select()
     .from(positions)
-    .where(and(eq(positions.instrumentId, instrumentId), lte(positions.openedAt, at), or(isNull(positions.closedAt), gt(positions.closedAt, at))));
+    // Simulated funding is Paper only: MEXC charges Live funding itself (synced into the Live wallet).
+    .where(and(eq(positions.instrumentId, instrumentId), eq(positions.mode, 'PAPER'), lte(positions.openedAt, at), or(isNull(positions.closedAt), gt(positions.closedAt, at))));
   const out: { position: (typeof rows)[number]; contracts: string }[] = [];
   for (const p of rows) {
     // Contracts at `at` = now remaining + everything exited after `at`.

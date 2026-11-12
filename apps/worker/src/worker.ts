@@ -1,12 +1,13 @@
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, type DbHandle, type ProcessResult } from '@trendpilot/db';
-import { assertLiveTransportDisabled } from '@trendpilot/domain';
+import { createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { assertLiveTransportAllowed } from '@trendpilot/domain';
 
 /**
- * TrendPilot background worker (SRS §3). M2 slice 1: claims durable jobs (ARC-01) and routes
- * accepted TradingView signals to private per-investor outcomes. No exchange calls exist; the
- * live order transport stays disabled.
+ * TrendPilot background worker (SRS §3). Claims durable jobs (ARC-01): signal dispatch, entries,
+ * exits, reversals, market ticks and funding for Paper and Live, and runs the private MEXC sync
+ * for Live accounts. Live orders need LIVE_ORDER_TRANSPORT=enabled (production only) plus the
+ * platform and investor gates; with the transport disabled no order-changing request can be sent.
  */
 export interface WorkerOptions {
   env?: Record<string, string | undefined>;
@@ -60,7 +61,7 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
   const log = opts.log ?? ((m: string) => console.log(`[worker] ${new Date().toISOString()} ${m}`));
 
   // OPS-02 / AT-11: checked before any connection is opened.
-  assertLiveTransportDisabled(env);
+  const transport = assertLiveTransportAllowed(env);
 
   const url = env.DATABASE_URL ?? requireEnv('DATABASE_URL');
   const handle: DbHandle = createDb(url, 4);
@@ -68,7 +69,7 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
   const workerId = workerIdentity();
   const clock = signalClockFromEnv(env);
   const hooks = crashHooks(env, log);
-  log(`started as ${workerId}; database reachable; live order transport disabled`);
+  log(`started as ${workerId}; database reachable; live order transport ${transport}`);
 
   let stopping = false;
   let busy: Promise<void> = Promise.resolve();
@@ -137,6 +138,20 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       log(`retention failed: ${(e as Error).message}`);
     }
   };
+  // Live: private MEXC sync (balances, positions, fills, funding, liquidation, stop coverage, drift).
+  let syncBusy: Promise<void> = Promise.resolve();
+  const syncLive = async () => {
+    if (stopping) return;
+    try {
+      for (const r of await syncAllLiveAccounts(handle.db, clock(), { env })) {
+        if (!r.ok) log(`live sync ${r.ownerId}: failed (${r.error})`);
+        else if (r.exitsRecorded || r.protectionFailures || r.drift.length) log(`live sync ${r.ownerId}: exitsRecorded=${r.exitsRecorded} protectionFailures=${r.protectionFailures} drift=${r.drift.map((d) => `${d.kind} ${d.symbol}`).join(', ') || 'none'}`);
+      }
+    } catch (e) {
+      log(`live sync failed: ${(e as Error).message}`);
+    }
+  };
+  const syncTimer = opts.processJobs === false ? null : setInterval(() => (syncBusy = syncBusy.then(syncLive)), Number(env.LIVE_SYNC_MS ?? 30_000));
   const pruneStart = opts.processJobs === false ? null : setTimeout(() => void prune(), 60_000);
   const pruneTimer = opts.processJobs === false ? null : setInterval(() => void prune(), 3_600_000);
 
@@ -146,11 +161,13 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       stopping = true;
       if (pollTimer) clearInterval(pollTimer);
       if (mailTimer) clearInterval(mailTimer);
+      if (syncTimer) clearInterval(syncTimer);
       clearInterval(beatTimer);
       if (pruneStart) clearTimeout(pruneStart);
       if (pruneTimer) clearInterval(pruneTimer);
       await busy;
       await mailBusy;
+      await syncBusy;
       await markStopped(handle.db, 'worker', workerId).catch(() => undefined);
       await handle.close();
       log('stopped');
@@ -162,7 +179,7 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
 export async function runOnce(opts: { env?: Record<string, string | undefined>; log?: (m: string) => void } = {}): Promise<ProcessResult[]> {
   const env = opts.env ?? process.env;
   const log = opts.log ?? ((m: string) => console.log(`[worker] ${m}`));
-  assertLiveTransportDisabled(env);
+  assertLiveTransportAllowed(env);
   const clock = signalClockFromEnv(env);
   const handle = createDb(env.DATABASE_URL ?? requireEnv('DATABASE_URL'), 2);
   try {

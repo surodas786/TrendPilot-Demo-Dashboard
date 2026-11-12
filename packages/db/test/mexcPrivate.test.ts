@@ -55,17 +55,16 @@ describe('signing (integration guide)', () => {
   });
 });
 
-describe('Paper, Demo, replay and CI cannot reach the private order transport', () => {
+describe('development, replay, e2e, test and CI cannot reach the private order transport', () => {
   const envs: [string, Record<string, string | undefined>][] = [
     ['unset (development)', {}],
     ['LIVE_ORDER_TRANSPORT=disabled (Paper staging)', { LIVE_ORDER_TRANSPORT: 'disabled', NODE_ENV: 'production' }],
-    ['Paper process with the flag enabled', { LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'production', TRENDPILOT_MODE: 'PAPER' }],
-    ['Demo process', { LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'production', TRENDPILOT_MODE: 'DEMO' }],
+    ['development with the flag enabled', { LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'development' }],
     ['replay (fixed signal clock)', { LIVE_ORDER_TRANSPORT: 'enabled', TRENDPILOT_MODE: 'LIVE', SIGNAL_TEST_CLOCK: '2026-11-08T09:30:03Z' }],
     ['e2e server (ALLOW_SIGNAL_TEST_CLOCK)', { LIVE_ORDER_TRANSPORT: 'enabled', TRENDPILOT_MODE: 'LIVE', NODE_ENV: 'production', ALLOW_SIGNAL_TEST_CLOCK: 'true' }],
     ['CI', { LIVE_ORDER_TRANSPORT: 'enabled', TRENDPILOT_MODE: 'LIVE', NODE_ENV: 'production', CI: 'true' }],
     ['test runner', { LIVE_ORDER_TRANSPORT: 'enabled', TRENDPILOT_MODE: 'LIVE', NODE_ENV: 'test' }],
-    ['a fully "live" production env — still refused by the build gate (Step 12)', { LIVE_ORDER_TRANSPORT: 'enabled', TRENDPILOT_MODE: 'LIVE', NODE_ENV: 'production' }]
+    ['vitest in a production-like env', { LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'production', VITEST: 'true' }]
   ];
   for (const [name, env] of envs) {
     it(`refuses: ${name}`, () => {
@@ -74,6 +73,12 @@ describe('Paper, Demo, replay and CI cannot reach the private order transport', 
       expect(() => venueForMode({} as never, 'LIVE', env)).toThrow(LiveOrderTransportRefused);
     });
   }
+
+  it('a production process with LIVE_ORDER_TRANSPORT=enabled is granted the transport (the other Live gates still apply per order)', () => {
+    expect(openLiveOrderTransport({ LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'production' })).toEqual({ granted: true });
+    // The legacy mode-only path still refuses: Live venues are built per account (resolveAccountVenue).
+    expect(() => venueForMode({} as never, 'LIVE', { LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'production' })).toThrow(LiveOrderTransportRefused);
+  });
 
   it('the read-only transport refuses order paths and POSTs before anything is sent', async () => {
     const fetchSpy = vi.fn();
@@ -104,7 +109,7 @@ describe('Paper, Demo, replay and CI cannot reach the private order transport', 
     expect(() => resolveVenue({} as never, 'PAPER', fakeVenue, { NODE_ENV: 'production' })).toThrow(LiveOrderTransportRefused);
   });
 
-  it('only the adapter module names private endpoints; only the read-only check builds an HTTP transport', () => {
+  it('only the adapter modules name private endpoints; only the Live modules and the read-only check build an HTTP transport', () => {
     const files: string[] = [];
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
@@ -123,7 +128,9 @@ describe('Paper, Demo, replay and CI cannot reach the private order transport', 
     expect(naming.filter((f) => !f.startsWith('packages/db/src/live/') && f !== 'packages/db/src/cli/mexc-readonly-check.ts')).toEqual([]);
     expect(naming).toEqual(expect.arrayContaining(['packages/db/src/live/mexcPrivate.ts', 'packages/db/src/live/mexcVenue.ts']));
     const building = files.filter((f) => /new MexcHttpTransport\(/.test(readFileSync(f, 'utf8'))).map(rel);
-    expect(building).toEqual(['packages/db/src/cli/mexc-readonly-check.ts']);
+    expect(building.sort()).toEqual(['packages/db/src/cli/mexc-readonly-check.ts', 'packages/db/src/live/liveMode.ts', 'packages/db/src/live/liveSync.ts']);
+    // The sync builds only the read-only transport; ORDERS transports come only from the per-account Live venue.
+    expect(readFileSync(path.join(ROOT, 'packages/db/src/live/liveSync.ts'), 'utf8')).toMatch(/new MexcHttpTransport\(\{ mode: 'READ_ONLY'/);
     expect(readFileSync(path.join(ROOT, 'packages/db/src/cli/mexc-readonly-check.ts'), 'utf8')).toMatch(/mode: 'READ_ONLY'/);
   });
 });

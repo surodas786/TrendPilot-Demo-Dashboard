@@ -25,7 +25,7 @@ export function OrderBlockRow({ block, pairLabel, strategyName, busy, onEdit, on
       <div className="min-w-0 flex-1">
         <p className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-ink">{pairLabel}</span>
-          <StatusPill tone="accent">Paper</StatusPill>
+          {block.mode === 'LIVE' ? <StatusPill tone="warn">Live</StatusPill> : <StatusPill tone="accent">Paper</StatusPill>}
         </p>
         <p className="mt-0.5 truncate text-sm text-muted">
           {strategyName} · {DIRECTION_LABELS[block.direction]}
@@ -72,10 +72,10 @@ export function OrderBlockRow({ block, pairLabel, strategyName, busy, onEdit, on
         )}
       </div>
       <div className="flex gap-2">
-        <Button size="sm" icon={PencilIcon} onClick={onEdit} aria-label={`Edit ${pairLabel} Paper`}>
+        <Button size="sm" icon={PencilIcon} onClick={onEdit} aria-label={`Edit ${pairLabel} ${block.mode === 'LIVE' ? 'Live' : 'Paper'}`}>
           Edit
         </Button>
-        <Button size="sm" variant="ghost" icon={active ? PauseIcon : PlayIcon} onClick={onToggle} loading={busy} aria-label={`${active ? 'Pause' : 'Resume'} ${pairLabel} Paper`}>
+        <Button size="sm" variant="ghost" icon={active ? PauseIcon : PlayIcon} onClick={onToggle} loading={busy} aria-label={`${active ? 'Pause' : 'Resume'} ${pairLabel} ${block.mode === 'LIVE' ? 'Live' : 'Paper'}`}>
           {active ? 'Pause' : 'Resume'}
         </Button>
       </div>

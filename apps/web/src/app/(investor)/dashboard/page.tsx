@@ -6,6 +6,7 @@ import { PageContainer } from '@/components/layout/PageContainer';
 import { LiveQuotesPanel } from '@/components/market/LiveQuotesPanel';
 import { FUNDING_LABEL, fmtTime, pnlTone, usdtOrUnavailable } from '@/components/reporting/format';
 import { StatusPill } from '@/components/ui/StatusPill';
+import { ModeTabs, viewModeOf } from '@/components/ui/ModeTabs';
 import { now } from '@/server/clock';
 import { requirePageRole } from '@/server/pageSession';
 
@@ -23,13 +24,14 @@ function Stat({ label, value, tone, testId, note }: { label: string; value: stri
   );
 }
 
-/** UI-01 Dashboard: the signed-in investor's own paper totals for one reporting day. */
-export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ date?: string }> }) {
+/** UI-01 Dashboard: the signed-in investor's own totals for one reporting day, Paper or Live (never summed). */
+export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ date?: string; mode?: string }> }) {
   const { user } = await requirePageRole('INVESTOR');
-  const { date } = await searchParams;
+  const { date, mode: m } = await searchParams;
+  const mode = viewModeOf(m);
   const at = now();
   const [d, quotes] = await Promise.all([
-    getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined }),
+    getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined, mode }),
     listLatestQuotes(getDb(), at, { publishedOnly: true })
   ]);
   const stale = d.freshness.stale;
@@ -37,10 +39,12 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   return (
     <PageContainer
       title="Dashboard"
-      description="Your own paper balances and results. Daily figures use confirmed paper fills and booked funding for the selected day."
+      description={mode === 'LIVE' ? 'Your own Live (MEXC) balance and results. Daily figures use confirmed MEXC fills and fees for the selected day.' : 'Your own paper balances and results. Daily figures use confirmed paper fills and booked funding for the selected day.'}
       scope={`${user.name} · My Account · Reporting day ${d.day.date} (${d.timezone})`}
       actions={
         <form className="flex items-end gap-2" method="get">
+          <ModeTabs mode={mode} path="/dashboard" params={{ date }} />
+          {mode === 'LIVE' && <input type="hidden" name="mode" value="live" />}
           <label className="text-xs text-subtle">
             Reporting day
             <input type="date" name="date" defaultValue={d.day.date} className="mt-1 block rounded-lg border border-line bg-inset px-2 py-1.5 text-sm text-ink" />
@@ -53,7 +57,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     >
       <div className="flex flex-wrap items-center gap-2" data-testid="dashboard-status">
         <StatusPill tone="warn" icon={FlaskConicalIcon}>
-          Paper
+          {mode === 'LIVE' ? 'Live' : 'Paper'}
         </StatusPill>
         <span className="text-xs text-muted">{d.label}</span>
         {d.positions.open > 0 && (

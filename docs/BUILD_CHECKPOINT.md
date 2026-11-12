@@ -1,11 +1,93 @@
 # TrendPilot build checkpoint
 
-**DEVELOPMENT PAUSED: 2026-11-09 (evening), after the post-Step-12 Paper fixes:** MEXC WebSocket feed, XAU_USDT onboarding, route Edit/Delete, and strategy package controls.
+**CURRENT: 2026-11-12. The Live path is implemented through the normal UI, API and worker flows and ships switched OFF. It is not committed and not deployed.**
+- Live order submission is disabled everywhere:
+  - `LIVE_ORDER_TRANSPORT=disabled`;
+  - the platform switch is Off;
+  - no investor connection is approved or activated.
+- No real order has ever been sent.
+- Real-order testing is a separate, operator-led pilot that starts after the owner's Paper review (`docs/LIVE_PILOT_RUNBOOK.md`).
+
+## Record — 2026-11-12
+
+### Git and deployment
+- **Branch:** `feature/admin-mailbox-settings`. HEAD `63d3986` "Add an optional Trading Window next to Trading Days".
+- **This session's work is uncommitted** (working tree only). No commit, push or deploy was made.
+- **Deployed server `http://192.168.91.16:3000`** (checked 2026-11-12 11:25 UTC from this workstation):
+  - `/v1/health` → `{"status":"ok","web":"up","database":"up","mode":"PAPER","liveOrderTransport":"disabled"}`.
+  - Route fingerprint (401 = route exists, 404 = absent):
+    - `/v1/me/holdings/{id}/chart` → 401, so the build **includes `63d3986`**;
+    - `/v1/me/live` and `/v1/admin/live` → 404, so the Live release is **not deployed**.
+- **Still blocked on the server:** SSH (`pms@` refused; no key or host entry on this workstation) and an admin session. Not verified there:
+  - git HEAD;
+  - migration level (`0018`/`0019` should be applied for `63d3986`);
+  - `pm2 list` (one `market:feed`);
+  - feed logs (WS push, REST ticker 0);
+  - the 5m routes and the investor's v2 block;
+  - a fresh TradingView alert end to end.
+
+### Item 1 — product changes: implemented in `63d3986` (verified locally)
+| Requirement | Where | Evidence |
+| --- | --- | --- |
+| 24-hour trading window next to weekdays. Checked at evaluation and again at submission. Midnight crossing belongs to the start day. Exits never gated | `packages/domain/src/tradingWindow.ts`, `paper/entry.ts` (`entryGate` at submit), the reversal's opening leg goes through the same entry + submit path | `tradingWindow.test.ts`, `windowAllocation.test.ts`, e2e `9-…` |
+| Adds | Not executed by the engine: an entry with a position already open is skipped (`POSITION_NOT_FLAT`), so no add order exists to gate. The window applies by construction if adds are built | — |
+| My Holdings: sidebar entry, SSE prices from TrendPilot's feed, 60 s backend refresh fallback, detail with opening/closing fills and linked signals, exact-contract chart (Lightweight Charts on stored exchange candles; mark-price line fallback) with entry and stop lines | `components/holdings/*`, `paper/holdingChart.ts`, `/v1/me/holdings/{id}/chart` | e2e `9-holdings-window-backspace` |
+| Take Profit: *Position to close (%)* under Trailing Take Profit (0–100); remainder to Take Profit; targets arm on the first favourable touch and close at market on a later pullback through the level (Short mirrored); Backspace crash fixed (`DecimalField`); partial fills and stop coverage of the remainder | `domain/exits.ts`, `paper/exits.ts`, `TakeProfitEditor.tsx` | `armPullback.test.ts`, `splitTrailing.test.ts`, `trailingTakeProfit.test.ts`, `windowAllocation.test.ts`, e2e `9-…` |
+| Admin route and package create/edit/delete/archive; actual version timeframe shown; XAU_USDT validate and publish from MEXC public contract data; fresh 5m BTCUSDT.P alert → route + package | earlier commits `93029ec`, `eaf93d9`, `b919569` | `signalRouteAdmin.test.ts`, `strategyPackageAdmin.test.ts`, `xauPair.test.ts`. **Not verified on the deployed server** (blocked above) |
+| MEXC WebSocket ticker feed; UI updates automatically; zero routine REST ticker calls | `01fcfde` | Verified locally on 2026-11-09 against live MEXC (REST ticker = 0 over ~9.5 min; reconnect 937 ms). **Deployed feed logs not verified** (blocked) |
+
+### Item 2 — Live (real MEXC Futures execution): implemented this session, switched OFF
+
+**Design:** one application with two modes.
+- `paper_accounts` is now keyed by owner **and** mode, so each investor's Live balance, orders, fills, positions and ledger are separate from Paper.
+- Both modes share the same alerts, strategy rules, public feed, intents and worker.
+- The execution adapter is resolved per account: the simulator for Paper, the guarded MEXC adapter for Live.
+
+| Part | Files |
+| --- | --- |
+| Domain gates and limits | `packages/domain/src/live.ts`, `liveTransport.ts` (`enabled` accepted only in a production process), `paperEntry.ts` (`LIVE_NOT_ELIGIBLE`), `exits.ts` (`EXTERNAL_CLOSE`, `LIQUIDATION`), `signals.ts` (LIVE blocks no longer skipped at routing) |
+| Schema | migration `0020_m10_live_mode`: `exchange_connections` (sealed key and secret, verification, approval and limits, activation, halt, sync, drift); `live_control` (platform switch Off, halt, capability evidence); `instruments.live_allowed`; `paper_accounts.mode` and exchange balance; `positions.exchange_*` |
+| Live module | `packages/db/src/live/liveMode.ts`: connection save/verify/revoke, approval, activation, halts and resume, capability evidence, contract allowlist, `resolveAccountVenue`, `liveGuardedVenue` (re-checks every gate in the worker; halts on uncertain orders and missing stops) |
+| Private sync | `packages/db/src/live/liveSync.ts`, worker loop every `LIVE_SYNC_MS` (30 s). It covers: balance → wallet; positionId, liquidation, funding; exchange-side stop or manual close booked once; stop coverage re-check (emergency close); drift → halt |
+| Adapter fixes from the 2026-11-12 docs review | `mexcPrivate.ts` / `mexcVenue.ts`: a reversing stop (`stopLossReverse=1`) is not protective; resize sends `stopLossOrderPrice`, `stopLossReverse 2`, `takeProfitReverse 2`; funding and deal-history read paths allowlisted; the ORDERS transport re-checks the gate on every order request |
+| Flows | `paper/entry.ts`, `paper/exits.ts`, `paper/reversal.ts`: per-account venue resolved before SUBMITTING (an unavailable Live venue rejects cleanly); the stop cancel after a full close is best-effort |
+| Reporting | `readModels.ts`, `reporting.ts`: account, holdings, dashboard and reconciliation per mode; Live liquidation and funding from MEXC; simulated funding is Paper only (`funding.ts`) |
+| Ops | `ops.ts` (Live alerts), `/v1/health` (`liveOrderTransport`, `mode`), worker start-up |
+| API | investor: `/v1/me/live`, `/v1/me/exchange-connection` (+`/verify`), `/v1/me/live/{activate,deactivate,halt}`; admin: `/v1/admin/live`, `…/platform`, `…/halt`, `…/resume`, `…/capabilities`, `…/contracts/{id}`, `…/connections/{id}/{approve,unapprove,halt,resume,clear-drift,sync}`; `/v1/me/holdings` and `/v1/me/dashboard` take `?mode=` |
+| UI | sidebar **Live Trading** (investor and admin); Trade Settings mode **Live (MEXC)** after a verified connection; **Paper / Live** tabs on Dashboard, My Holdings and My Trades |
+
+**Verification of the MEXC execution path:**
+- **Mocks:** all of the flows in `docs/LIVE_PILOT_RUNBOOK.md` §8.
+- **Read-only account:** pending; no authorized key is configured here.
+- **Live pilot:** pending.
+
+### Test results (this session, final code)
+| Check | Result |
+| --- | --- |
+| Baseline at resume (HEAD `63d3986`, before changes) | lint and typecheck clean; `npm test` 45 files / 619 tests passed |
+| `npm run lint`, `npm run typecheck` (final) | Clean |
+| `npm test` (final) | **47 files, 660 tests passed** (adds `liveMode.test.ts` with 14 scenarios, `live.test.ts`; updated transport, mode and holdings tests) |
+| `npm run test:e2e` | **57/57 passed** (10.2 min), including `10-live-off-by-default.spec.ts`. The `npm error … start failed` lines are the intentional crash drills |
+| `npm run build` | Succeeded |
+| Two investors on one contract | `liveMode.test.ts`: separate MEXC accounts, orders and positions; cross-account close returns 404. Paper: `isolation.test.ts`, e2e `7-reporting-isolation` |
+
+### First action when resuming
+1. Review the uncommitted diff and commit it (requested separately). Deploy with `npm ci && npm run db:migrate && npm run build && pm2 restart all`. Keep `LIVE_ORDER_TRANSPORT=disabled`.
+   - Then `/v1/me/live` → 401 and `/v1/health` → `disabled`.
+2. Get SSH or an admin session on `192.168.91.16`, then verify there:
+   - the migration level (`0020`);
+   - one `market:feed`, with WS push and REST ticker 0;
+   - the 5m routes and the investor's v2 block;
+   - a fresh TradingView alert → entry with attached stop → exit → dashboard reconciliation.
+3. After the owner's Paper review: follow `docs/LIVE_PILOT_RUNBOOK.md` §1–§4 for one supervised account.
+
+---
+
+## Pause record — 2026-11-09 evening (superseded by the record above)
+
 - Live order submission is disabled. No live account is activated, and no real order was ever submitted.
 - For this pause nothing was reset, committed, pushed, deployed or reconfigured; only this file was edited.
 - The working tree and all Paper data are preserved.
-
-## Pause record — 2026-11-09 evening
 
 ### Git state (checked at pause)
 - **Branch:** `feature/admin-mailbox-settings`, tracking `origin/feature/admin-mailbox-settings`, **in sync** (not ahead or behind).

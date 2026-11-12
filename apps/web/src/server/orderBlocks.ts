@@ -1,4 +1,4 @@
-import { fixtureQuote, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
+import { connectionFor, fixtureQuote, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
 import {
   assertModeAllowed,
   catalogIssues,
@@ -146,7 +146,7 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
   if (current.status === status) return current;
 
   if (status === 'ACTIVE') {
-    const [instrument, version] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId)]);
+    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), connectionFor(db, owner.id)]);
     const reason =
       owner.status !== 'ACTIVE'
         ? 'Your account is not active.'
@@ -154,8 +154,8 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
           ? 'This pair is no longer available.'
           : !version?.published
             ? 'This strategy version is not published.'
-            : current.mode !== 'PAPER'
-              ? 'Live trading is unavailable in this build.'
+            : current.mode === 'LIVE' && (!conn || conn.status !== 'VERIFIED')
+              ? 'Connect and verify your MEXC account (My Account → Live trading) before activating Live settings.'
               : undefined;
     if (reason) throw new DomainError(422, ErrorCode.RESUME_BLOCKED, reason);
   }

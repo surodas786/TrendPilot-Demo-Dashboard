@@ -69,15 +69,19 @@ interface Props {
   existing?: OrderBlockDto;
   instruments: InstrumentDto[];
   versions: StrategyVersionDto[];
-  /** Instruments that already have a Paper block (new blocks cannot reuse them). */
-  takenInstrumentIds: string[];
+  /** Instruments that already have a block in each mode (one block per pair and mode). */
+  takenByMode: { PAPER: string[]; LIVE: string[] };
+  /** True when the investor's MEXC connection is verified: Live blocks can then be created. */
+  liveConnected: boolean;
   timezone: string;
   onDone: (saved?: OrderBlockDto) => void;
 }
 
 /** Adapted from the MagicPatterns TokenBlockEditor; persists through /v1/me/order-blocks. */
-export function OrderBlockEditor({ existing, instruments, versions, takenInstrumentIds, timezone, onDone }: Props) {
-  const available = instruments.filter((i) => i.status === 'PUBLISHED' && !takenInstrumentIds.includes(i.id));
+export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnected, timezone, onDone }: Props) {
+  const [mode, setMode] = useState<'PAPER' | 'LIVE'>(() => (existing ? (existing.mode as 'PAPER' | 'LIVE') : takenByMode.PAPER.length >= instruments.length && liveConnected ? 'LIVE' : 'PAPER'));
+  const availableFor = (m: 'PAPER' | 'LIVE') => instruments.filter((i) => i.status === 'PUBLISHED' && !takenByMode[m].includes(i.id));
+  const available = availableFor(mode);
   const [draft, setDraft] = useState<Draft>(() => (existing ? draftFromBlock(existing) : newDraft(available[0], available[0] ? versionChoices(versions, available[0].id)[0] : undefined)));
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -133,7 +137,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
     setFormError(null);
     if (issues.length) return;
     setPreviewing(true);
-    const r = await api.previewDraft<PreviewResult>({ ...settingsPayload(draft), instrumentId: draft.instrumentId, mode: 'PAPER' });
+    const r = await api.previewDraft<PreviewResult>({ ...settingsPayload(draft), instrumentId: draft.instrumentId, mode });
     setPreviewing(false);
     if (r.ok) setPreview(r.data);
     else fail(r);
@@ -167,7 +171,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
         if (!r.ok) return fail(r);
         saved = r.data;
       } else {
-        const r = await api.createBlock({ ...settings, instrumentId: draft.instrumentId, mode: 'PAPER' });
+        const r = await api.createBlock({ ...settings, instrumentId: draft.instrumentId, mode });
         if (!r.ok) return fail(r);
         saved = r.data;
         if (activate) {
@@ -235,13 +239,23 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
           />
           <SegmentedControl<'PAPER' | 'LIVE'>
             label="Trading mode"
-            value="PAPER"
-            onChange={() => undefined}
+            value={mode}
+            onChange={(m) => {
+              if (existing) return;
+              setMode(m);
+              // One block per pair and mode: move to a pair that is still free in the new mode.
+              const free = availableFor(m);
+              if (!free.some((i) => i.id === draft.instrumentId) && free[0]) changePair(free[0].id);
+            }}
             options={[
-              { value: 'PAPER', label: 'Paper' },
-              { value: 'LIVE', label: 'Live — unavailable', disabled: true }
+              { value: 'PAPER', label: 'Paper', disabled: Boolean(existing) && mode !== 'PAPER' },
+              { value: 'LIVE', label: liveConnected ? 'Live (MEXC)' : 'Live — connect MEXC first', disabled: existing ? mode !== 'LIVE' : !liveConnected }
             ]}
-            hint="Live trading is disabled in this build. Paper blocks use simulated execution only."
+            hint={
+              mode === 'LIVE'
+                ? 'Live sends real orders to your own MEXC Futures account with the stop loss in the same request. Entries also need the platform switch, administrator approval of your account and limits, your own activation (Live Trading page) and a contract on the Live allowlist. Same strategy rules and prices as Paper; separate balance, orders and positions.'
+                : 'Paper uses the simulator with an isolated paper balance. Same strategy rules and public prices as Live.'
+            }
           />
         </Section>
 

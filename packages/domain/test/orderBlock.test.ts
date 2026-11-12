@@ -217,11 +217,12 @@ describe('catalog checks', () => {
 });
 
 describe('mode gate (D1, OPS-02)', () => {
-  it('allows PAPER and rejects LIVE with LIVE_DISABLED', () => {
+  it('allows PAPER and LIVE and rejects anything else with LIVE_DISABLED', () => {
     expect(() => assertModeAllowed('PAPER')).not.toThrow();
+    expect(() => assertModeAllowed('LIVE')).not.toThrow();
     let caught: unknown;
     try {
-      assertModeAllowed('LIVE');
+      assertModeAllowed('DEMO' as never);
     } catch (e) {
       caught = e;
     }

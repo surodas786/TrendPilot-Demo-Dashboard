@@ -1,8 +1,58 @@
-# MEXC Futures private adapter (Step 11) — pilot handoff
+# MEXC Futures private adapter — Live mode
 
-**Live order submission is disabled.** `openLiveOrderTransport()` refuses in every environment of this build (`LIVE_ACTIVATION_ALLOWED_IN_THIS_BUILD = false`), and `venueForMode('LIVE')` refuses before any adapter is built. No real order was submitted and no credentials exist in the repository. Docs read on **2026-11-09** from the official MEXC Futures API documentation.
+**Status (2026-11-12): the Live path is implemented in the normal UI, API and worker flows and ships switched OFF** (`LIVE_ORDER_TRANSPORT=disabled`, platform switch Off, no approved account, no investor activation). No real order has ever been sent. Activation and the supervised pilot: `docs/LIVE_PILOT_RUNBOOK.md`.
 
-Code: `packages/db/src/live/mexcPrivate.ts` (signing, transports, normalization), `packages/db/src/live/mexcVenue.ts` (the `ExecutionVenue` implementation), `packages/db/src/live/capabilities.ts` (capability registry and gate), `packages/db/src/venue/*` (the exchange interface shared with the paper simulator), `packages/db/src/cli/mexc-readonly-check.ts` (read-only account check).
+Code:
+- `packages/db/src/live/mexcPrivate.ts`: signing, transports, normalization.
+- `packages/db/src/live/mexcVenue.ts`: the `ExecutionVenue` implementation.
+- `packages/db/src/live/liveMode.ts`:
+  - connections (sealed keys);
+  - the platform switch;
+  - capability evidence;
+  - the contract allowlist;
+  - per-account venue resolution;
+  - the Live guard.
+- `packages/db/src/live/liveSync.ts`: private sync and drift.
+- `packages/db/src/live/capabilities.ts`: capability registry.
+- `packages/domain/src/live.ts`: Live gates and limits.
+- `packages/db/src/cli/mexc-readonly-check.ts`: read-only account check.
+
+The Step 12 single-investor pilot API (`/v1/admin/live-pilot`, `/v1/me/live-pilot`, `live_pilots`) is superseded by Live mode. It is kept for its audit history and is not used by the order path.
+
+## 0. Docs review — 2026-11-12 (official MEXC Futures API docs)
+
+The adapter was reviewed against the current pages:
+- place-order;
+- get-order-by-external-id;
+- get-current-take-profitstop-loss-order-list;
+- place-tpsl-order-by-position;
+- get-funding-fee-details;
+- get-historical-order-deal-details;
+- the update log.
+
+| Finding | Action |
+| --- | --- |
+| `order/create`: fields, sides (1/2/3/4), type 5 market, `openType`, `leverage` ("must be provided when opening"), `stopLossPrice` + `lossTrend` (1 last, 2 fair, 3 index), `positionMode` ("Default Hedge Mode"), `reduceOnly` ("only applicable in one-way mode"); rate limit 4 / 2 s. New optional fields `priceProtect`, `stpMode`, `bboTypeNum` (BBO does not support `externalOid`) | Unchanged; the adapter always sends `positionMode` and never uses BBO |
+| TP/SL list: `orderId` = 0 when placed by position; new fields `stopLossReverse` / `takeProfitReverse` (1 = reverse), `triggerSide`, `placeOrderId`, `isFinished`, `volType` | **A stop with `stopLossReverse = 1` is now treated as not protective** (it would open the opposite side when it fires): entry verification, sync and resize all require a non-reversing stop |
+| `stoporder/place`: `stopLossOrderPrice` / `takeProfitOrderPrice` marked required; "If a non-final TP/SL order already exists at the same price, the existing order ID is returned and its quantity is updated asynchronously"; closable-quantity rule | Resize now sends `stopLossType 0`, `stopLossOrderPrice`, `stopLossReverse 2`, `takeProfitReverse 2`. It cancels before placing (closable-quantity rule) |
+| Funding: `GET /api/v1/private/position/funding_records` (20 / 2 s) | Read path allowlisted. The sync stores MEXC's cumulative `holdFee` per position. Funding is also inside the synced wallet |
+| Deal history: `GET /api/v1/private/order/list/order_deals/v3` (`symbol`, `start_time`, `page_num`, `page_size` ≤ 1000); the example returns a bare array while the table describes a paginated wrapper; no `externalOid` | Read path allowlisted. The sync accepts both shapes and matches deals by `orderId` (`mexc:<orderId>`) |
+| Update log: trading API reopened 2026-03-31; base domain `https://api.mexc.com` (2026-01-19); open/close-orders list endpoints removed 2025-12-02 (unused) | Unchanged |
+| No endpoint lists an API key's permissions | Verification proves the read permissions. "Order Placing" is proven only by the first supervised order |
+
+**Verified with mocks:** every row above, plus the flows in `docs/LIVE_PILOT_RUNBOOK.md` §8.
+**Read-only account check:** still pending, because no authorized key is configured on this workstation (`ops:mexc-readonly-check` → PENDING).
+**Needs the live pilot:**
+- attached-stop atomicity and listing;
+- partial-fill stop size;
+- `reduceOnly` in the account's mode;
+- stop auto-shrink vs re-place and the gap;
+- the unknown-ID response and visibility delay;
+- duplicate `externalOid`;
+- the `externalOid` length limit (TrendPilot sends 39 characters: `tp-` + UUID);
+- deal-history shape;
+- fee sign and currency;
+- `holdFee` sign.
 
 ## 1. Account eligibility (blocker for any live order)
 
@@ -38,7 +88,7 @@ Relevant error codes (official error-code page): 401/402 auth, **602** signature
 ## 4. Execution rules implemented
 
 - **Exchange interface:** the entry submit, exits and reversal flows call `ExecutionVenue` only; Paper uses the simulator (`paperVenue`), Live the adapter (`mexcVenue`). Durable `order_intents` and the existing worker drive both.
-- **Capability gate:** an order is sent only when every capability it needs is `VERIFIED` on a live pilot. Today nothing is, so the adapter returns `REJECTED CAPABILITY_UNVERIFIED:OPEN_WITH_ATTACHED_STOP` (or `…:REDUCE_ONLY_CLOSE`) without contacting MEXC.
+- **Capability gate:** an order is sent only when every capability it needs is recorded by an administrator (Admin → Live Trading) as `VERIFIED` (observed on a real account, with order IDs) or `PILOT_ACCEPTED` (accepted for the supervised first trades). Otherwise the adapter returns `REJECTED CAPABILITY_UNVERIFIED:<id>` without contacting MEXC. Nothing is recorded in a fresh install, and the platform switch cannot be turned on until the four order capabilities are.
 - **Stop in the same request:** an opening order without `stopLossPrice` is refused locally (`STOP_REQUIRED`).
 - **Stop verification:** after a fill the stop must be listed `ACTIVE`, on the opposite side, for the filled contracts, on the right side of the entry. Otherwise the position is `UNPROTECTED` and an **emergency close** (`PROTECTION_FAILURE`) is queued immediately (OPS-03).
 - **Uncertain submission:** on timeout, network error or 5xx the adapter only looks the order up by `externalOid`; it never resends. If MEXC has not acknowledged it, the intent stays `SUBMITTING`; the next attempt reconciles first and resubmits only after `reconcileGraceMs` (30 s) with the order still absent. A failing lookup keeps the intent unresolved (no resubmission).
@@ -54,6 +104,7 @@ Relevant error codes (official error-code page): 401/402 auth, **602** signature
 | --- | --- | --- | --- | --- |
 | Signed requests | Yes | Verified | Pending | Pending |
 | Read balances | Yes | Verified | Pending | Pending |
+| Read funding records / deal history (sync) | Partial (example vs table) | Verified | Pending | Pending |
 | Read positions | Yes | Verified | Pending | Pending |
 | Read position mode | Yes | Verified | Pending | Pending |
 | Read order by client order ID | Partial (unknown-ID response) | Verified | Pending | Pending |

@@ -34,7 +34,8 @@ export type EntryReason =
   | 'SIZE_BELOW_MINIMUM'
   | 'RISK_LIMIT'
   | 'PROTECTION_FAILED'
-  | 'INSUFFICIENT_MARGIN';
+  | 'INSUFFICIENT_MARGIN'
+  | 'LIVE_NOT_ELIGIBLE';
 
 export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
   TRAILING_CONVERSION_REQUIRED:
@@ -49,7 +50,8 @@ export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
   SIZE_BELOW_MINIMUM: 'Order cost and leverage are below the contract minimum. Size is never increased automatically.',
   RISK_LIMIT: 'One of your risk limits would be exceeded.',
   PROTECTION_FAILED: 'A valid stop loss could not be attached to the opening order.',
-  INSUFFICIENT_MARGIN: 'Your paper balance cannot cover the margin and fees.'
+  INSUFFICIENT_MARGIN: 'Your available balance (Paper, or the synced MEXC balance in Live) cannot cover the margin and fees.',
+  LIVE_NOT_ELIGIBLE: 'This Live entry is not allowed right now (see the Live reason). Paper is unaffected.'
 };
 
 export interface PaperQuote {

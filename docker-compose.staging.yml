@@ -1,5 +1,5 @@
 # TrendPilot PAPER staging: PostgreSQL, web app, worker, public market feed and a TLS front.
-# No exchange credentials exist in this build; LIVE_ORDER_TRANSPORT is pinned to "disabled".
+# Rehearsal stack: LIVE_ORDER_TRANSPORT is pinned to "disabled", so no Live order can be sent from it.
 #
 #   cp .env.staging.example .env.staging     # fill in the secrets (never commit .env.staging)
 #   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d --build

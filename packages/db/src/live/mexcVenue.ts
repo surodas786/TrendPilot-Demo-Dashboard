@@ -86,7 +86,7 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
   type StopInfo = Extract<SimResult, { status: 'FILLED' }>['stop'];
   /** The stop MEXC attached to this order, or a "missing" marker that never verifies. */
   const attachedStop = async (symbol: string, ord: NormalizedOrder, side: 'LONG' | 'SHORT', expected: { price: string; basis: string }): Promise<StopInfo> => {
-    const s = (await stopsFor(symbol)).find((x) => x.state === 'ACTIVE' && x.stopLossPrice !== null && x.positionSide === side && (x.orderId === ord.orderId || D(x.stopLossPrice).eq(expected.price)));
+    const s = (await stopsFor(symbol)).find((x) => x.state === 'ACTIVE' && !x.reverse && x.stopLossPrice !== null && x.positionSide === side && (x.orderId === ord.orderId || D(x.stopLossPrice).eq(expected.price)));
     if (!s) return { orderId: MISSING_STOP, clientOrderId: MISSING_STOP, triggerPrice: expected.price, basis: expected.basis, contracts: '0', reduceOnly: true };
     return { orderId: stopRef(s.stopId), clientOrderId: stopRef(s.stopId), triggerPrice: s.stopLossPrice!, basis: s.basis, contracts: s.vol, reduceOnly: true };
   };
@@ -167,7 +167,8 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
       const symbol = await o.symbolFor(instrumentId);
       const s = (await stopsFor(symbol)).find((x) => x.stopId === stopIdOf(stopOrderId));
       if (!s) return null;
-      return { status: s.state, side: s.positionSide === 'LONG' ? 'SHORT' : 'LONG', contracts: s.vol, triggerPrice: s.stopLossPrice, basis: s.basis, reduceOnly: true };
+      // A reversing stop would open the opposite side when it fires: not a close-only protection.
+      return { status: s.state, side: s.positionSide === 'LONG' ? 'SHORT' : 'LONG', contracts: s.vol, triggerPrice: s.stopLossPrice, basis: s.basis, reduceOnly: !s.reverse };
     },
 
     async placeReduceOnlyClose(r: CloseRequest): Promise<CloseResult> {
@@ -228,8 +229,12 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
         stopLossPrice: s.stopLossPrice,
         lossTrend: basisToTrend(s.basis),
         profitTrend: TREND.LAST,
+        // Market stop that only closes: never reverse into the opposite side (docs 2026-11).
         stopLossType: 0,
-        takeProfitType: 0
+        stopLossOrderPrice: s.stopLossPrice,
+        stopLossReverse: 2,
+        takeProfitType: 0,
+        takeProfitReverse: 2
       });
       return stopRef(String(id));
     },

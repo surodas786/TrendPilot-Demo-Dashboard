@@ -40,7 +40,8 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
   const panelA = pageA.getByRole('dialog');
   await expect(panelA.getByLabel('Trading pair')).toHaveValue(/.+/);
   await expect(panelA.getByLabel('Trading pair').locator('option:checked')).toHaveText('BTC/USDT');
-  await expect(panelA.getByRole('radio', { name: 'Live — unavailable' })).toBeDisabled();
+  // Live needs the investor's own verified MEXC connection first (Live Trading page).
+  await expect(panelA.getByRole('radio', { name: 'Live — connect MEXC first' })).toBeDisabled();
 
   // All seven weekday controls, Sunday first, all selected by default.
   const chips = panelA.getByRole('checkbox');

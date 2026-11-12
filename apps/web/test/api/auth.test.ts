@@ -65,11 +65,11 @@ describe('sessions', () => {
     expect((await call(blocks.GET, { path: '/v1/me/order-blocks' })).status).toBe(401);
   });
 
-  it('GET /v1/me reflects the signed-in investor with Paper only', async () => {
+  it('GET /v1/me reflects the signed-in investor with Paper and Live modes', async () => {
     const a = await signIn(USERS.investorA.email);
     const res = await call(me.GET, { path: '/v1/me', cookie: a });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ user: { email: USERS.investorA.email, name: 'Nadia Rahman', role: 'INVESTOR' }, allowedModes: ['PAPER'], timezone: 'Asia/Dhaka' });
+    expect(res.body).toMatchObject({ user: { email: USERS.investorA.email, name: 'Nadia Rahman', role: 'INVESTOR' }, allowedModes: ['PAPER', 'LIVE'], timezone: 'Asia/Dhaka' });
     expect(JSON.stringify(res.body)).not.toContain('password');
   });
 

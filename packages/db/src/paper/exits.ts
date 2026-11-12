@@ -25,7 +25,7 @@ import { fills, instruments, marketQuotes, orderIntents, positionExits, position
 import { book } from './accounts';
 import { latestQuote } from './market';
 import { paperVenue } from '../venue/paper';
-import { resolveVenue } from '../venue/select';
+import { resolveAccountVenue } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { listStopFills, triggerStops, type CloseResult, type VenueQuote } from './simulator';
 
@@ -203,7 +203,9 @@ export async function recordExitFill(
     // Confirm zero at the venue before clearing the stop and closing the position.
     const held = await venue.position(p.paperAccountId, p.instrumentId, tx);
     if (D(held.contracts).isZero()) {
-      if (stopId) await venue.cancelOrder(stopId, p.instrumentId);
+      // Best effort: a stop the venue already executed (or removed) may refuse a cancel. The
+      // inspection below decides; a cancel error must not undo the recorded exit.
+      if (stopId) await venue.cancelOrder(stopId, p.instrumentId).catch(() => undefined);
       const s = stopId ? await venue.inspectProtection(stopId, p.instrumentId) : null;
       closed = !s || s.status !== 'ACTIVE';
       protection = { status: 'PENDING', stopContracts: '0' };
@@ -303,6 +305,18 @@ export async function quoteFor(db: Db | Executor, instrumentId: string, now: Dat
 export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: CloseHooks = {}): Promise<CloseSummary> {
   const { intentId } = job.payload as { intentId: string };
 
+  // Paper: the simulator. Live: the MEXC adapter (closes are never gated by the Live entry rules).
+  const [peek] = await db.select().from(orderIntents).where(eq(orderIntents.id, intentId));
+  let venue: ExecutionVenue | null = null;
+  let venueError: string | null = null;
+  if (peek && ['INTENT', 'SUBMITTING'].includes(peek.state)) {
+    try {
+      venue = await resolveAccountVenue(db, { mode: peek.mode, paperAccountId: peek.paperAccountId, ownerId: peek.ownerId }, hooks.venue);
+    } catch (e) {
+      venueError = (e as Error).message.slice(0, 200);
+    }
+  }
+
   const step = await db.transaction(async (tx) => {
     const [intent] = await tx.select().from(orderIntents).where(eq(orderIntents.id, intentId)).for('update');
     if (!intent || intent.kind !== 'CLOSE') throw new Error(`Close intent ${intentId} not found.`);
@@ -321,8 +335,13 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
     };
     // IAM-02 in the worker too: the request's owner must own the position.
     if (!pos || pos.ownerId !== intent.ownerId) return finish('REJECTED', 'OWNERSHIP_MISMATCH');
-    if (intent.state === 'SUBMITTING') return { kind: 'reconcile' as const, intent, pos };
+    if (intent.state === 'SUBMITTING') {
+      if (venueError) throw new Error(`Cannot reconcile close ${intent.clientOrderId}: ${venueError}`);
+      return { kind: 'reconcile' as const, intent, pos };
+    }
     if (pos.status !== 'OPEN' || D(pos.contracts).lte(0)) return finish('CANCELLED', 'POSITION_ALREADY_FLAT');
+    // Nothing was sent: the trigger (or the investor) can request the close again once the venue is back.
+    if (venueError) return finish('REJECTED', `VENUE_UNAVAILABLE: ${venueError}`);
     // EXT-06: recheck the confirmed remaining quantity right before submission.
     const contracts = Decimal.min(intent.contracts, pos.contracts).toFixed();
     await tx.update(orderIntents).set({ state: 'SUBMITTING', contracts, submittedAt: now, updatedAt: sql`now()` }).where(eq(orderIntents.id, intent.id));
@@ -334,7 +353,8 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
   if (step.kind === 'stopped') return { ...base, positionId: step.intent.positionId!, state: step.state, reason: step.reason, reconciled: false, reversalQueued: step.reversalQueued };
 
   const { intent, pos } = step;
-  const venue = resolveVenue(db, intent.mode, hooks.venue);
+  if (!venue) throw new Error(`No venue for close ${intent.clientOrderId}.`);
+  const liveVenue: ExecutionVenue = venue;
   let result: CloseResult | null = null;
   let reconciled = false;
   if (step.kind === 'reconcile') {
@@ -382,7 +402,7 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
       .insert(fills)
       .values({ ownerId: cur!.ownerId, paperAccountId: cur!.paperAccountId, intentId: cur!.id, exchangeFillId: f.fillId, side: cur!.side === 'LONG' ? 'SHORT' : 'LONG', contracts: f.contracts, price: f.price, fee: f.fee, filledAt: f.filledAt })
       .onConflictDoNothing();
-    const rec = await recordExitFill(db, tx, { position: p!, fill: f, reason: cur!.exitReason as ExitReason, intentId: cur!.id, targetLevelId: cur!.targetLevelId, now, venue });
+    const rec = await recordExitFill(db, tx, { position: p!, fill: f, reason: cur!.exitReason as ExitReason, intentId: cur!.id, targetLevelId: cur!.targetLevelId, now, venue: liveVenue });
     const full = result!.status === 'FILLED';
     await tx
       .update(orderIntents)

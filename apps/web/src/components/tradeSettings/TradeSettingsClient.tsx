@@ -21,17 +21,20 @@ interface Props {
   blocks: OrderBlockDto[];
   instruments: InstrumentDto[];
   versions: StrategyVersionDto[];
+  /** The investor's MEXC connection is verified (Live blocks can be created). */
+  liveConnected: boolean;
 }
 
 /** UI-03 Trade Settings for the signed-in investor only. All data arrives owner-scoped from the server. */
-export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions }: Props) {
+export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnected }: Props) {
   const router = useRouter();
   const [editing, setEditing] = useState<string | 'new' | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const existing = editing && editing !== 'new' ? blocks.find((b) => b.id === editing) : undefined;
-  const taken = blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId);
-  const canAdd = instruments.some((i) => !taken.includes(i.id) && versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id)));
+  const takenByMode = { PAPER: blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId), LIVE: blocks.filter((b) => b.mode === 'LIVE').map((b) => b.instrumentId) };
+  const tradable = (i: InstrumentDto) => versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id));
+  const canAdd = instruments.some((i) => tradable(i) && (!takenByMode.PAPER.includes(i.id) || (liveConnected && !takenByMode.LIVE.includes(i.id))));
   const labelOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
     return i ? pairLabel(i) : b.symbol;
@@ -90,7 +93,8 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
             existing={existing}
             instruments={instruments}
             versions={versions}
-            takenInstrumentIds={taken}
+            takenByMode={takenByMode}
+            liveConnected={liveConnected}
             timezone={timezone}
             onDone={(saved) => {
               setEditing(null);

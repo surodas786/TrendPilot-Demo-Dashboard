@@ -9,6 +9,7 @@ import {
   ListChecksIcon,
   MailIcon,
   RadioTowerIcon,
+  ZapIcon,
   SettingsIcon,
   ScrollTextIcon,
   SlidersHorizontalIcon,
@@ -36,6 +37,7 @@ const investorNav: NavItem[] = [
   { path: '/my-holdings', label: 'My Holdings', icon: WalletIcon },
   { path: '/my-account', label: 'My Account', icon: UserRoundIcon },
   { path: '/trade-settings', label: 'Trade Settings', icon: SlidersHorizontalIcon },
+  { path: '/live-trading', label: 'Live Trading', icon: ZapIcon },
   { path: '/signals', label: 'Signals', icon: BellRingIcon },
   { path: '/my-trades', label: 'My Trades', icon: ListChecksIcon }
 ];
@@ -46,6 +48,7 @@ const adminNav: NavItem[] = [
   { path: '/admin/signals', label: 'TradingView Webhook & Routes', icon: WebhookIcon },
   { path: '/admin/strategies', label: 'Strategy Packages', icon: RadioTowerIcon },
   { path: '/admin/pairs', label: 'Trading Pairs & Defaults', icon: CandlestickChartIcon },
+  { path: '/admin/live', label: 'Live Trading', icon: ZapIcon },
   { path: '/admin/operations', label: 'Operations', icon: ServerCogIcon },
   { path: '/admin/market-data', label: 'Market Data Feed', icon: ActivityIcon },
   { path: '/admin/audit', label: 'Audit Log', icon: ScrollTextIcon },

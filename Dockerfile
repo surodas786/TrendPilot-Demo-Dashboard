@@ -1,6 +1,6 @@
-# TrendPilot Paper staging image: one image for the web app, worker, market feed and one-off
-# operator commands (migrate, bootstrap). Paper only: no exchange credentials exist in this build,
-# and the web app, worker and feed refuse to start unless LIVE_ORDER_TRANSPORT=disabled.
+# TrendPilot image: one image for the web app, worker, market feed and one-off operator commands
+# (migrate, bootstrap). LIVE_ORDER_TRANSPORT defaults to "disabled"; "enabled" is accepted only in a
+# production process and still needs the platform and investor Live gates (docs/LIVE_PILOT_RUNBOOK.md).
 #
 #   docker build -t trendpilot:staging .
 #

@@ -78,7 +78,7 @@ export function PriceCell({ price, timezone }: { price: LivePrice; timezone: str
  * Prices stream from TrendPilot (SSE of the stored market feed); if the stream is not live or
  * stays silent, prices and positions are re-read from TrendPilot every 60 seconds.
  */
-export function HoldingsClient({ open: initialOpen, closed, quotes, timezone }: { open: HoldingDto[]; closed: PositionDto[]; quotes: LiveQuoteDto[]; timezone: string }) {
+export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mode = 'PAPER' }: { open: HoldingDto[]; closed: PositionDto[]; quotes: LiveQuoteDto[]; timezone: string; mode?: 'PAPER' | 'LIVE' }) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('open');
   const [open, setOpen] = useState(initialOpen);
@@ -86,12 +86,12 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone }: 
   const { items, connection, nowMs, refresh, busy } = useLiveQuotes(quotes, { fallbackRefreshMs: HOLDINGS_FALLBACK_MS });
 
   const reloadPositions = useCallback(async () => {
-    const r = await request<{ positions: HoldingDto[] }>('GET', '/v1/me/holdings');
+    const r = await request<{ positions: HoldingDto[] }>('GET', `/v1/me/holdings?mode=${mode}`);
     if (r.ok) {
       setOpen(r.data.positions);
       setPolledAt(Date.now());
     }
-  }, []);
+  }, [mode]);
   // Remaining quantity, stop coverage and closes change with exits: re-read them every 60 s.
   useEffect(() => {
     const t = setInterval(() => void reloadPositions(), HOLDINGS_FALLBACK_MS);

@@ -21,7 +21,7 @@ import { fills, instruments, orderBlocks, orderIntents, positions, positionTarge
 import { availableOf, book, lockPaperAccount } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
 import type { SimResult } from './simulator';
-import { resolveVenue } from '../venue/select';
+import { liveEntryEligibility, resolveAccountVenue } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { requestExit } from './exits';
 
@@ -97,7 +97,7 @@ export async function evaluateAndReserveEntry(
   if (existing) return { status: existing.status as EntryOutcome['status'], reason: existing.reason as EntryReason | null };
 
   // ARC-02: the account lock serialises reservations and scope checks for this investor.
-  const account = await lockPaperAccount(tx, block.ownerId);
+  const account = await lockPaperAccount(tx, block.ownerId, block.mode);
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
   const [openInScope] = await tx
     .select({ n: count() })
@@ -145,13 +145,40 @@ export async function evaluateAndReserveEntry(
   }
 
   const s = result.sizing;
+  // Live: the same strategy result must also pass the Live gates (switches, approved account,
+  // activation, allowlist, limits). The worker checks them again right before sending.
+  if (block.mode === 'LIVE') {
+    const live = await liveEntryEligibility(tx, { ownerId: block.ownerId, instrumentId: block.instrumentId, contracts: s.contracts, price: s.entryPrice, leverage: block.leverage, openContracts: '0' });
+    if (!live.verdict.ok) {
+      await tx
+        .insert(signalDecisions)
+        .values({
+          ...base,
+          status: 'SKIPPED',
+          reason: 'LIVE_NOT_ELIGIBLE',
+          detail: { side, reasonText: `${ENTRY_REASON_TEXT.LIVE_NOT_ELIGIBLE} ${live.reasonText}`, liveReason: live.verdict.reason, ...(live.verdict.detail ?? {}), sizing: s, strategyVersion: version.version, blockRevision: block.revision, ...extra }
+        })
+        .onConflictDoNothing();
+      return { status: 'SKIPPED', reason: 'LIVE_NOT_ELIGIBLE' };
+    }
+  }
   const [decision] = await tx
     .insert(signalDecisions)
     .values({
       ...base,
       status: 'ENTRY_APPROVED',
       reason: null,
-      detail: { side, reasonText: null, checks: result.checks, sizing: s, liquidationEstimate: result.liquidationPrice, strategyVersion: version.version, blockRevision: block.revision, note: 'Paper entry approved; the simulated order is submitted next.', ...extra }
+      detail: {
+        side,
+        reasonText: null,
+        checks: result.checks,
+        sizing: s,
+        liquidationEstimate: result.liquidationPrice,
+        strategyVersion: version.version,
+        blockRevision: block.revision,
+        note: block.mode === 'LIVE' ? 'Live entry approved; the MEXC order with its stop loss is submitted next.' : 'Paper entry approved; the simulated order is submitted next.',
+        ...extra
+      }
     })
     .onConflictDoNothing()
     .returning({ id: signalDecisions.id });
@@ -183,7 +210,7 @@ export async function evaluateAndReserveEntry(
       settingsSnapshot: snapshotOf(block, version)
     })
     .returning({ id: orderIntents.id });
-  await book(tx, account, [{ kind: 'ORDER_RESERVE', bucket: 'ORDER_RESERVE', amount: result.requiredUsdt, refType: 'order_intent', refId: intent!.id, memo: 'Margin and fee reserved for paper entry' }]);
+  await book(tx, account, [{ kind: 'ORDER_RESERVE', bucket: 'ORDER_RESERVE', amount: result.requiredUsdt, refType: 'order_intent', refId: intent!.id, memo: `Margin and fee reserved for ${block.mode === 'LIVE' ? 'Live' : 'paper'} entry` }]);
   await enqueueJob(tx, { kind: PAPER_SUBMIT_JOB, dedupeKey: `${PAPER_SUBMIT_JOB}:${intent!.id}`, payload: { intentId: intent!.id }, runAfter: now });
   return { status: 'ENTRY_APPROVED', reason: null, intentId: intent!.id };
 }
@@ -360,6 +387,20 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
 export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: SubmitHooks = {}): Promise<SubmitSummary> {
   const { intentId } = job.payload as { intentId: string };
 
+  // The venue for this order's account: the simulator (Paper) or the guarded MEXC adapter (Live).
+  // Resolved before anything is marked SUBMITTING, so an unavailable Live venue (transport off,
+  // key removed) rejects the order cleanly instead of leaving it uncertain.
+  const [peek] = await db.select().from(orderIntents).where(eq(orderIntents.id, intentId));
+  let venue: ExecutionVenue | null = null;
+  let venueError: string | null = null;
+  if (peek && !['FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED'].includes(peek.state)) {
+    try {
+      venue = await resolveAccountVenue(db, { mode: peek.mode, paperAccountId: peek.paperAccountId, ownerId: peek.ownerId }, hooks.venue);
+    } catch (e) {
+      venueError = (e as Error).message.slice(0, 200);
+    }
+  }
+
   // Step A: decide whether to (re)submit, reconcile, or stop — under the intent lock.
   const step = await db.transaction(async (tx) => {
     const [intent] = await tx.select().from(orderIntents).where(eq(orderIntents.id, intentId)).for('update');
@@ -368,7 +409,16 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
       await completeJob(tx, job);
       return { kind: 'done' as const, intent };
     }
-    if (intent.state === 'SUBMITTING') return { kind: 'reconcile' as const, intent };
+    if (intent.state === 'SUBMITTING') {
+      // Never resubmit or give up on an uncertain order without its venue: retry later.
+      if (venueError) throw new Error(`Cannot reconcile ${intent.clientOrderId}: ${venueError}`);
+      return { kind: 'reconcile' as const, intent };
+    }
+    if (venueError) {
+      await release(tx, intent, 'REJECTED', `VENUE_UNAVAILABLE: ${venueError}`, now);
+      await completeJob(tx, job);
+      return { kind: 'stopped' as const, intent, reason: 'VENUE_UNAVAILABLE' };
+    }
 
     // CFG-04: the trading window and the local weekday are checked again at submission.
     const snap = intent.settingsSnapshot as { block: { weekdays: Weekday[]; timezone: string; tradingWindow?: TradingWindow | null } };
@@ -394,10 +444,16 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
   });
 
   if (step.kind === 'done') return { intentId, state: step.intent.state, reconciled: false };
-  if (step.kind === 'stopped') return { intentId, state: step.intent.state === 'INTENT' ? (step.reason === 'DAY_DISABLED' || step.reason === 'OUTSIDE_TRADING_WINDOW' ? 'CANCELLED' : 'EXPIRED') : step.intent.state, reason: step.reason, reconciled: false };
+  if (step.kind === 'stopped')
+    return {
+      intentId,
+      state: step.intent.state === 'INTENT' ? (step.reason === 'VENUE_UNAVAILABLE' ? 'REJECTED' : step.reason === 'DAY_DISABLED' || step.reason === 'OUTSIDE_TRADING_WINDOW' ? 'CANCELLED' : 'EXPIRED') : step.intent.state,
+      reason: step.reason,
+      reconciled: false
+    };
 
   const intent = step.intent;
-  const venue = resolveVenue(db, intent.mode, hooks.venue);
+  if (!venue) throw new Error(`No venue for ${intent.clientOrderId}.`);
   let sim: SimResult | null = null;
   let reconciled = false;
   if (step.kind === 'reconcile') {
@@ -428,5 +484,5 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
     });
     if (sim.status === 'FILLED') await hooks.afterSimulatorFill?.();
   }
-  return record(db, job, intent, sim, now, reconciled, venue);
+  return record(db, job, intent, sim, now, reconciled, venue!);
 }

@@ -8,7 +8,7 @@ describe('market feed process guards', () => {
     expect(() => assertRealClock({})).not.toThrow();
   });
 
-  it('refuses to start unless live order transport is disabled', async () => {
+  it('refuses an enabled live transport outside a production process', async () => {
     await expect(runFeedOnce({ env: { LIVE_ORDER_TRANSPORT: 'enabled', DATABASE_URL: 'postgres://x@localhost:1/none' } })).rejects.toThrow(/LIVE_ORDER_TRANSPORT|live/i);
   });
 });

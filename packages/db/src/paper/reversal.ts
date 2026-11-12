@@ -4,7 +4,8 @@ import type { Db } from '../client';
 import { completeJob, type JobRow } from '../jobs';
 import { orderBlocks, orderIntents, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
 import { ENTRY_STEP, evaluateAndReserveEntry, windowOf } from './entry';
-import { resolveVenue } from '../venue/select';
+import { resolveAccountVenue } from '../live/liveMode';
+import type { ExecutionVenue } from '../venue/types';
 
 /**
  * STR-06 close and reverse — the opening leg. Runs only after the closing leg is terminal
@@ -28,7 +29,7 @@ export interface ReverseSummary {
   intentId?: string;
 }
 
-export async function processPaperReverse(db: Db, job: JobRow, now: Date): Promise<ReverseSummary> {
+export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks: { venue?: ExecutionVenue } = {}): Promise<ReverseSummary> {
   const { closeIntentId } = job.payload as { closeIntentId: string };
   return db.transaction(async (tx) => {
     const [close] = await tx.select().from(orderIntents).where(eq(orderIntents.id, closeIntentId));
@@ -77,11 +78,24 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date): Promi
 
     // 1. Confirmed flat, terminal orders, obsolete protection gone (AT-09: partial or unknown cannot reverse).
     if (pos!.status !== 'CLOSED' || !new Decimal(pos!.contracts).isZero()) return withhold('REVERSAL_CLOSE_INCOMPLETE', { remainingContracts: new Decimal(pos!.contracts).toFixed() });
-    const venue = await resolveVenue(db, pos!.mode).position(pos!.paperAccountId, pos!.instrumentId, tx);
-    if (!new Decimal(venue.contracts).isZero()) return withhold('REVERSAL_NOT_FLAT', { venueContracts: venue.contracts });
+    let venue: ExecutionVenue;
+    let held: { contracts: string };
+    try {
+      venue = await resolveAccountVenue(db, { mode: pos!.mode, paperAccountId: pos!.paperAccountId, ownerId: pos!.ownerId }, hooks.venue);
+      held = await venue.position(pos!.paperAccountId, pos!.instrumentId, tx);
+    } catch (e) {
+      return withhold('REVERSAL_NOT_FLAT', { venueError: (e as Error).message.slice(0, 200) });
+    }
+    if (!new Decimal(held.contracts).isZero()) return withhold('REVERSAL_NOT_FLAT', { venueContracts: held.contracts });
     if (pos!.stopOrderRef) {
-      const [stop] = await tx.select({ status: simOrders.status }).from(simOrders).where(eq(simOrders.clientOrderId, pos!.stopOrderRef));
-      if (stop?.status === 'ACTIVE') return withhold('REVERSAL_PROTECTION_UNRECONCILED');
+      if (pos!.mode === 'PAPER') {
+        const [stop] = await tx.select({ status: simOrders.status }).from(simOrders).where(eq(simOrders.clientOrderId, pos!.stopOrderRef));
+        if (stop?.status === 'ACTIVE') return withhold('REVERSAL_PROTECTION_UNRECONCILED');
+      } else {
+        const stopId = await venue.stopOrderIdFor(pos!.stopOrderRef, tx);
+        const prot = stopId ? await venue.inspectProtection(stopId, pos!.instrumentId).catch(() => ({ status: 'UNKNOWN' })) : null;
+        if (prot?.status === 'ACTIVE' || prot?.status === 'UNKNOWN') return withhold('REVERSAL_PROTECTION_UNRECONCILED');
+      }
     }
     const [busy] = await tx
       .select({ id: orderIntents.id })
