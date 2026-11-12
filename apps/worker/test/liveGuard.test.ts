@@ -1,10 +1,10 @@
-// AT-11, OPS-02: the worker refuses to start with live order transport enabled.
+// AT-11, OPS-02: the worker refuses an invalid transport setting, and "enabled" outside production.
 import { describe, expect, it } from 'vitest';
 import { LiveTransportError } from '@trendpilot/domain';
 import { startWorker } from '../src/worker';
 
 describe('worker live-transport guard', () => {
-  it.each(['enabled', 'true', 'live'])('refuses LIVE_ORDER_TRANSPORT=%s before touching the database', async (value) => {
+  it.each(['enabled', 'true', 'live'])('refuses LIVE_ORDER_TRANSPORT=%s in a test process before touching the database', async (value) => {
     // An unreachable database URL proves the guard runs before any connection attempt.
     const env = { LIVE_ORDER_TRANSPORT: value, NODE_ENV: 'test', DATABASE_URL: 'postgres://nobody:nothing@127.0.0.1:1/none' };
     await expect(startWorker({ env, log: () => {} })).rejects.toBeInstanceOf(LiveTransportError);

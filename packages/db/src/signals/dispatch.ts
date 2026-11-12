@@ -223,7 +223,7 @@ export async function processNextJob(
       return { job: ref, outcome: 'DONE', close };
     }
     if (job.kind === PAPER_REVERSE_JOB) {
-      const reverse = await processPaperReverse(db, job, now);
+      const reverse = await processPaperReverse(db, job, now, opts.hooks);
       return { job: ref, outcome: 'DONE', reverse };
     }
     if (job.kind === PAPER_FUNDING_JOB) {

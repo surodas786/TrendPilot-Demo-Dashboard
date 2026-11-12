@@ -22,6 +22,8 @@ export * from './live/capabilities';
 export * from './live/mexcPrivate';
 export * from './live/mexcVenue';
 export * from './live/pilot';
+export * from './live/liveMode';
+export * from './live/liveSync';
 export * from './venue/paper';
 export * from './venue/select';
 export * from './venue/types';

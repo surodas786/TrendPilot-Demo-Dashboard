@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { Decimal, marketSourceLabel, trailingTakeProfitContracts, type MarketSource, type TrailingKind } from '@trendpilot/domain';
 import type { Executor } from '../client';
+import { availableOf } from './accounts';
 import { fills, instruments, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions, positionTargets, signalDecisions, signalEvents } from '../schema';
 
 /**
@@ -12,24 +13,30 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const n = (v: string | null) => (v === null ? null : new Decimal(v).toFixed());
 
 export interface PaperAccountDto {
+  mode: 'PAPER' | 'LIVE';
   currency: string;
   walletBalanceUsdt: string;
   positionMarginUsdt: string;
   orderReserveUsdt: string;
   availableUsdt: string;
-  label: 'Paper — simulated balance';
+  label: string;
+  /** LIVE: the last synced MEXC figures (null for Paper or before the first sync). */
+  exchange: { equityUsdt: string | null; availableUsdt: string | null; syncedAt: string | null } | null;
 }
 
-export async function getMyPaperAccount(db: Executor, ownerId: string): Promise<PaperAccountDto | null> {
-  const [a] = await db.select().from(paperAccounts).where(eq(paperAccounts.ownerId, ownerId));
+/** The investor's account for one mode. Paper and Live balances are always separate. */
+export async function getMyPaperAccount(db: Executor, ownerId: string, mode: 'PAPER' | 'LIVE' = 'PAPER'): Promise<PaperAccountDto | null> {
+  const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode)));
   if (!a) return null;
   return {
+    mode,
     currency: a.currency,
     walletBalanceUsdt: n(a.walletBalance)!,
     positionMarginUsdt: n(a.positionMargin)!,
     orderReserveUsdt: n(a.orderReserve)!,
-    availableUsdt: new Decimal(a.walletBalance).minus(a.positionMargin).minus(a.orderReserve).toFixed(),
-    label: 'Paper — simulated balance'
+    availableUsdt: availableOf(a),
+    label: mode === 'LIVE' ? 'Live — MEXC Futures account (synced)' : 'Paper — simulated balance',
+    exchange: mode === 'LIVE' ? { equityUsdt: n(a.exchangeEquity), availableUsdt: n(a.exchangeAvailable), syncedAt: a.exchangeSyncedAt?.toISOString() ?? null } : null
   };
 }
 
@@ -68,6 +75,8 @@ export interface PositionDto {
   targets: TargetDto[];
   /** EXT-04 persisted trailing exit state (null = no trailing exit). */
   trailing: TrailingDto | null;
+  /** LIVE: what MEXC reports for the position at the last private sync (null for Paper). */
+  venueSync: { positionRef: string | null; liquidationPrice: string | null; fundingUsdt: string | null; syncedAt: string | null } | null;
 }
 
 export interface TargetDto {
@@ -192,6 +201,10 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
     openedAt: p.openedAt.toISOString(),
     orderId: p.openIntentId,
     signal: ev ? { eventId: ev.id, action: ev.action, barOpenAt: ev.barOpenAt.toISOString(), barCloseAt: ev.barCloseAt.toISOString() } : null,
+    venueSync:
+      p.mode === 'LIVE'
+        ? { positionRef: p.exchangePositionRef, liquidationPrice: n(p.exchangeLiquidationPrice), fundingUsdt: n(p.exchangeFundingUsdt), syncedAt: p.exchangeSyncedAt?.toISOString() ?? null }
+        : null,
     targets: [],
     trailing:
       p.trailingStatus === 'OFF'
@@ -235,6 +248,7 @@ export interface OrderDto {
   id: string;
   clientOrderId: string;
   symbol: string;
+  mode: string;
   kind: string;
   side: string;
   state: string;
@@ -266,6 +280,7 @@ async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$infer
       id: i.id,
       clientOrderId: i.clientOrderId,
       symbol,
+      mode: i.mode,
       kind: i.kind,
       side: i.side,
       state: i.state,

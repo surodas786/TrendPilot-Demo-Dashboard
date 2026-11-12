@@ -271,7 +271,7 @@ export function catalogIssues(s: Pick<OrderBlockSettings, 'leverage' | 'directio
   return issues;
 }
 
-/** D1, OPS-02: only Paper can be configured in this build. */
+/** D1, OPS-02: Paper and Live can be configured; Live orders still pass every gate in live.ts. */
 export function assertModeAllowed(mode: Mode): void {
   if (!(ALLOWED_MODES as readonly string[]).includes(mode)) {
     throw new DomainError(422, ErrorCode.LIVE_DISABLED, 'Live trading is unavailable in this build.');

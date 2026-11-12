@@ -104,6 +104,8 @@ export const instruments = pgTable(
     suggestedTrailingPct: numeric('suggested_trailing_pct', { precision: 10, scale: 4 }).notNull(),
     /** True for seeded fixture metadata that is not verified against the live exchange. */
     isFixture: boolean('is_fixture').notNull().default(false),
+    /** Live allowlist: Live opening orders are refused on contracts an administrator has not allowed. */
+    liveAllowed: boolean('live_allowed').notNull().default(false),
     revision: integer('revision').notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt()
@@ -541,7 +543,13 @@ export const marketQuotes = pgTable(
   (t) => [primaryKey({ columns: [t.instrumentId, t.asOf] }), check('market_quotes_book', sql`${t.ask} >= ${t.bid} AND ${t.bid} > 0`)]
 );
 
-/** SCP-03 isolated paper balance per investor. available = wallet − positionMargin − orderReserve. */
+/**
+ * SCP-03 trading account per investor AND mode (the table keeps its historical name).
+ * PAPER: the isolated simulated balance. LIVE: the investor's MEXC Futures account as TrendPilot
+ * sees it — wallet follows the synced exchange balance (EXCHANGE_BALANCE_SYNC ledger rows), and
+ * positions, orders, fills and the ledger are separate from Paper because they are keyed by account.
+ * available = wallet − positionMargin − orderReserve (Live is also capped by exchange_available).
+ */
 export const paperAccounts = pgTable(
   'paper_accounts',
   {
@@ -549,7 +557,12 @@ export const paperAccounts = pgTable(
     ownerId: uuid('owner_id')
       .notNull()
       .references(() => users.id),
+    mode: tradingMode('mode').notNull().default('PAPER'),
     currency: text('currency').notNull().default('USDT'),
+    /** LIVE only: last synced MEXC equity and available-to-open balance (USDT). */
+    exchangeEquity: numeric('exchange_equity', { precision: 28, scale: 8 }),
+    exchangeAvailable: numeric('exchange_available', { precision: 28, scale: 8 }),
+    exchangeSyncedAt: timestamp('exchange_synced_at', { withTimezone: true }),
     walletBalance: money('wallet_balance').notNull(),
     positionMargin: money('position_margin').notNull().default('0'),
     orderReserve: money('order_reserve').notNull().default('0'),
@@ -558,7 +571,7 @@ export const paperAccounts = pgTable(
     updatedAt: updatedAt()
   },
   (t) => [
-    uniqueIndex('paper_accounts_owner_key').on(t.ownerId),
+    uniqueIndex('paper_accounts_owner_mode_key').on(t.ownerId, t.mode),
     check('paper_accounts_nonnegative', sql`${t.walletBalance} >= 0 AND ${t.positionMargin} >= 0 AND ${t.orderReserve} >= 0`)
   ]
 );
@@ -775,6 +788,11 @@ export const positions = pgTable(
     closedAt: timestamp('closed_at', { withTimezone: true }),
     protectionStatus: protectionStatus('protection_status').notNull().default('PENDING'),
     protectionVerifiedAt: timestamp('protection_verified_at', { withTimezone: true }),
+    /** LIVE: MEXC positionId, liquidation price and cumulative funding from the private sync. */
+    exchangePositionRef: text('exchange_position_ref'),
+    exchangeLiquidationPrice: price('exchange_liquidation_price'),
+    exchangeFundingUsdt: money('exchange_funding_usdt'),
+    exchangeSyncedAt: timestamp('exchange_synced_at', { withTimezone: true }),
     settingsSnapshot: jsonb('settings_snapshot').notNull(),
     openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
     createdAt: createdAt(),
@@ -1073,4 +1091,86 @@ export const livePilots = pgTable(
     check('live_pilots_limits_positive', sql`${t.maxOrderContracts} > 0 AND ${t.maxOrderNotionalUsdt} > 0 AND ${t.maxExposureUsdt} > 0 AND ${t.maxLeverage} BETWEEN 1 AND 20`),
     uniqueIndex('live_pilots_one_open').on(sql`(true)`).where(sql`${t.status} <> 'ENDED'`)
   ]
+);
+
+/* ───────────────────────── Live mode: exchange connections and the platform switch ───────────────────────── */
+
+/**
+ * OPS-01 one MEXC Futures connection per investor. The API key and secret are sealed with
+ * AES-256-GCM (DATA_ENCRYPTION_KEY) and are only opened on the server to sign requests; no API
+ * returns them. Live opening orders need: VERIFIED (read checks passed), approved by an
+ * administrator with limits, activated by the investor (default Off), and not halted.
+ */
+export const exchangeConnections = pgTable(
+  'exchange_connections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    exchange: text('exchange').notNull().default('MEXC'),
+    /** Non-secret account reference (e.g. UID suffix). */
+    accountRef: text('account_ref').notNull(),
+    apiKeySealed: text('api_key_sealed').notNull(),
+    secretSealed: text('secret_sealed').notNull(),
+    /** Last 4 characters of the API key, for display only. */
+    keyFingerprint: text('key_fingerprint').notNull(),
+    status: text('status').notNull().default('PENDING'),
+    /** Result of the read-only verification: position mode, balances, open positions, errors. */
+    verification: jsonb('verification').notNull().default({}),
+    verifiedAt: timestamp('verified_at', { withTimezone: true }),
+    positionMode: text('position_mode'),
+    approvedBy: uuid('approved_by').references(() => users.id),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    maxOrderContracts: numeric('max_order_contracts', { precision: 28, scale: 12 }),
+    maxOrderNotionalUsdt: numeric('max_order_notional_usdt', { precision: 28, scale: 8 }),
+    maxLeverage: integer('max_leverage'),
+    maxExposureUsdt: numeric('max_exposure_usdt', { precision: 28, scale: 8 }),
+    /** Investor activation of Live trading. Default Off. */
+    liveEnabled: boolean('live_enabled').notNull().default(false),
+    activatedAt: timestamp('activated_at', { withTimezone: true }),
+    entriesHalted: boolean('entries_halted').notNull().default(false),
+    haltReason: text('halt_reason'),
+    haltedAt: timestamp('halted_at', { withTimezone: true }),
+    lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
+    lastSyncError: text('last_sync_error'),
+    /** Differences between MEXC and TrendPilot found by the private sync (OPS-03). */
+    drift: jsonb('drift').notNull().default([]),
+    revision: integer('revision').notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('exchange_connections_owner_key').on(t.ownerId),
+    check('exchange_connections_status_valid', sql`${t.status} IN ('PENDING', 'VERIFIED', 'FAILED', 'REVOKED')`),
+    check('exchange_connections_position_mode_valid', sql`${t.positionMode} IS NULL OR ${t.positionMode} IN ('ONE_WAY', 'HEDGE')`),
+    check(
+      'exchange_connections_limits_valid',
+      sql`(${t.approvedAt} IS NULL) OR (${t.maxOrderContracts} > 0 AND ${t.maxOrderNotionalUsdt} > 0 AND ${t.maxExposureUsdt} >= ${t.maxOrderNotionalUsdt} AND ${t.maxLeverage} BETWEEN 1 AND 125)`
+    ),
+    check('exchange_connections_activation_needs_approval', sql`${t.liveEnabled} = false OR (${t.approvedAt} IS NOT NULL AND ${t.status} = 'VERIFIED')`)
+  ]
+);
+
+/**
+ * The platform Live switch (single row, id = 1). Default Off. `entries_halted` stops every new
+ * Live entry at once while protection and closes keep running. `capability_evidence` holds the
+ * operator's record for each MEXC order capability (VERIFIED with evidence, or PILOT_ACCEPTED for
+ * the supervised first trades).
+ */
+export const liveControl = pgTable(
+  'live_control',
+  {
+    id: integer('id').primaryKey().default(1),
+    liveEnabled: boolean('live_enabled').notNull().default(false),
+    entriesHalted: boolean('entries_halted').notNull().default(false),
+    haltReason: text('halt_reason'),
+    haltedAt: timestamp('halted_at', { withTimezone: true }),
+    capabilityEvidence: jsonb('capability_evidence').notNull().default({}),
+    note: text('note'),
+    updatedBy: uuid('updated_by').references(() => users.id),
+    revision: integer('revision').notNull().default(1),
+    updatedAt: updatedAt()
+  },
+  (t) => [check('live_control_singleton', sql`${t.id} = 1`)]
 );

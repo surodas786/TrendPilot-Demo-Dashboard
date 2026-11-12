@@ -62,7 +62,9 @@ describe('holdings and unrealized P&L (mark price)', () => {
     expect(pa.unrealizedPnlUsdt).toBe(unrealizedPnl('LONG', pa.avgEntryPrice, '65400', pa.contracts, MULT));
     expect(pa.liquidation).toMatchObject({ price: pa.liquidationEstimate, label: expect.stringMatching(/Estimated/) });
     expect(Number(pa.stop.contracts)).toBe(Number(pa.contracts));
-    expect(a.body.mode).toBe('PAPER');
+    expect(a.body.mode).toBe('ALL'); // no ?mode=: both modes, each position carries its own
+    expect(a.body.positions.every((p: any) => p.mode === 'PAPER')).toBe(true);
+    expect(a.body.accounts.paper.mode).toBe('PAPER');
   });
 
   it('dashboard: available, used margin, equity = wallet + unrealized, fresh prices', async () => {

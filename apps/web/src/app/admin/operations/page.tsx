@@ -13,7 +13,7 @@ export default async function AdminOperationsPage() {
     <PageContainer
       title="Operations"
       description="Health of the database, worker and public market feed, the durable job queue and recent failures."
-      scope="Paper release: orders are simulated and live order submission is disabled. No investor data is shown here."
+      scope="Paper and Live: Live account health shows status and drift only — no balances, keys or private trades."
     >
       <OperationsAdmin initial={initial} timezone={user.timezone} />
     </PageContainer>

@@ -71,6 +71,11 @@ export class MockMexc implements MexcRequester {
   stops = new Map<number, MockStop>();
   positions = new Map<string, MockPosition>();
   calls: { method: string; path: string; body?: unknown }[] = [];
+  /** USDT account figures returned by account/assets. */
+  assets = { equity: '1000', availableOpen: '1000', unrealized: '0' };
+  /** Cumulative funding per position (holdFee) and liquidation price returned by open_positions. */
+  holdFee = '0';
+  liquidatePrice = '0';
   faults: MockFaults = this.defaults();
   /** Exchange clock (ms). Tests on a fixed signal clock drive it from that clock. */
   now: () => number = () => Date.now();
@@ -95,12 +100,21 @@ export class MockMexc implements MexcRequester {
       return (this.faults.duplicateDeals ? [...list, ...list] : list) as T;
     }
     if (method === 'GET' && path === '/api/v1/private/stoporder/open_orders') return [...this.stops.values()].filter((s) => s.state === 1 || s.state === 5) as T;
-    if (method === 'GET' && path === '/api/v1/private/position/open_positions') return [...this.positions.values()].filter((p) => D(p.holdVol).gt(0)).map((p) => ({ ...p, state: 1, openAvgPrice: p.holdAvgPrice })) as T;
+    if (method === 'GET' && path === '/api/v1/private/position/open_positions')
+      return [...this.positions.values()].filter((p) => D(p.holdVol).gt(0)).map((p) => ({ ...p, state: 1, openAvgPrice: p.holdAvgPrice, holdFee: this.holdFee, liquidatePrice: this.liquidatePrice })) as T;
+    if (method === 'GET' && path === '/api/v1/private/account/assets')
+      return [{ currency: 'USDT', equity: this.assets.equity, availableBalance: this.assets.availableOpen, availableOpen: this.assets.availableOpen, positionMargin: '0', frozenBalance: '0', unrealized: this.assets.unrealized, bonus: '0' }] as T;
+    if (method === 'GET' && path === '/api/v1/private/order/list/order_deals/v3') {
+      const sym = (params as Record<string, unknown> | null)?.symbol;
+      return [...this.deals.values()].flat().filter((d) => !sym || d.symbol === sym) as T;
+    }
     if (method === 'GET' && path === '/api/v1/private/position/position_mode') return this.positionMode as T;
     if (method === 'POST' && path === '/api/v1/private/stoporder/cancel') {
       for (const o of (params as { orders: { stopPlanOrderId: number }[] }).orders) {
         const s = this.stops.get(o.stopPlanOrderId);
-        if (s && s.state === 1) s.state = 2;
+        // Like an exchange: a stop that already fired or was cancelled cannot be cancelled again.
+        if (!s || s.state !== 1) throw new MexcPrivateError('stoporder/cancel: order state cannot be cancelled', 'API', 2041);
+        s.state = 2;
       }
       return undefined as T;
     }
@@ -184,6 +198,41 @@ export class MockMexc implements MexcRequester {
       throw new MexcPrivateError('POST /api/v1/private/order/create: timed out', 'TIMEOUT');
     }
     return { orderId: String(id), ts: this.now() };
+  }
+
+  /** The exchange triggers a resting stop: the position closes at `price` outside TrendPilot. */
+  triggerStop(stopId: number, price: string) {
+    const st = this.stops.get(stopId);
+    if (!st || st.state !== 1) throw new Error('mock: stop not active');
+    const pos = [...this.positions.values()].find((p) => p.positionId === st.positionId)!;
+    const vol = Decimal.min(st.vol, pos.holdVol);
+    const id = this.seq++;
+    const side = st.positionType === 1 ? 4 : 2;
+    const fee = vol.times('0.0001').times(price).times('0.0004').toDecimalPlaces(8);
+    this.orders.set(`stop-${id}`, { orderId: id, externalOid: `stop-${id}`, symbol: st.symbol, side, vol: vol.toFixed(), dealVol: vol.toFixed(), dealAvgPrice: price, state: 3, takerFee: fee.toFixed(), createTime: this.now() });
+    this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol: st.symbol, side, vol: vol.toFixed(), price, fee: fee.toFixed(), timestamp: this.now() }]);
+    pos.holdVol = D(pos.holdVol).minus(vol).toFixed();
+    st.state = 3;
+    return id;
+  }
+
+  /** A manual close on the MEXC web UI (no externalOid from TrendPilot). */
+  manualClose(symbol: string, positionType: 1 | 2, vol: string, price: string) {
+    const pos = this.positions.get(`${symbol}:${positionType}`)!;
+    const id = this.seq++;
+    const side = positionType === 1 ? 4 : 2;
+    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: '0', createTime: this.now() });
+    this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol, side, vol, price, fee: '0', timestamp: this.now() }]);
+    pos.holdVol = D(pos.holdVol).minus(vol).toFixed();
+    for (const s of this.stops.values()) if (s.positionId === pos.positionId && s.state === 1 && D(pos.holdVol).isZero()) s.state = 2;
+  }
+
+  /** Exposure opened directly on MEXC (unknown to TrendPilot). */
+  externalOpen(symbol: string, positionType: 1 | 2, vol: string, price: string) {
+    const key = `${symbol}:${positionType}`;
+    const p = this.positions.get(key) ?? { positionId: this.seq++, symbol, positionType, holdVol: '0', holdAvgPrice: price, leverage: 5, openType: 1 };
+    p.holdVol = D(p.holdVol).plus(vol).toFixed();
+    this.positions.set(key, p);
   }
 
   private placeStop(b: Record<string, unknown>) {

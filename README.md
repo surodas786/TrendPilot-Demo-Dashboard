@@ -759,3 +759,57 @@ The trailing exit is now **Trailing Take Profit**. It locks in profit after an e
 | `apps/web/test/api/trailingTakeProfit.test.ts` | Paper, end to end: the Short example with the stop attached to the opening order, the 74863.2 move, below-activation rebound, activation, restart after activation (fresh worker, re-run tick), pullback close as `TRAILING_TAKE_PROFIT` in profit; the Long equivalent; split targets with Trailing Take Profit on the remainder (66 + 28 + 39 = 133, nothing closed twice; *Done* state); legacy block migration flag, held entries, unrelated edit refused, explicit conversion, next entry opens with Trailing Take Profit |
 | `apps/web/test/api/splitTrailing.test.ts` | Trailing Take Profit on a split remainder; legacy positions (trailing stop from entry, competing triggers) keep their saved behaviour |
 | `apps/web/e2e/6-split-trailing-reverse.spec.ts` | The replay commands above, with the My Trades and trade detail views (state, closing level, managed contracts) |
+
+## Live mode — Paper and Live in one application (2026-11-12)
+
+TrendPilot is one application with two modes. **Paper** uses the simulator and an isolated paper balance. **Live** sends real orders to each investor's own MEXC Futures account. Both modes use:
+- the same TradingView alerts and strategy rules;
+- the same public MEXC price feed;
+- the same durable order intents and worker.
+
+What differs per mode:
+- **Account.** Balance, orders, fills, positions and ledger are separate (`paper_accounts` is keyed by owner and mode).
+- **Execution adapter.** Paper uses the simulator; Live uses the MEXC adapter behind the Live guard.
+
+**Live ships switched OFF.** A Live opening order needs all of the following (`docs/LIVE_PILOT_RUNBOOK.md` §0):
+- `LIVE_ORDER_TRANSPORT=enabled` in a production process;
+- the admin platform switch, which cannot be turned on before the order capabilities are recorded;
+- a verified MEXC connection, approved by an admin with limits (contracts per order, notional per order, leverage, exposure);
+- the investor's own activation;
+- the contract on the Live allowlist.
+
+The worker re-checks every gate right before it sends. Stops, take profits, trailing take profit, close-on-signal, manual and emergency closes are never gated.
+
+| Area | Where |
+| --- | --- |
+| Investor: connect MEXC, activate or deactivate, halt | Sidebar → **Live Trading** (`/live-trading`); API `/v1/me/live`, `/v1/me/exchange-connection` (+ `/verify`), `/v1/me/live/{activate,deactivate,halt}` |
+| Investor: Live order blocks | Trade Settings → Trading mode **Live (MEXC)** (one block per pair and mode) |
+| Investor: results | Dashboard, My Holdings and My Trades each have **Paper / Live** tabs (`?mode=live`). Paper and Live are never summed |
+| Admin: switch, halt, capability evidence, approvals and limits, contract allowlist, sync now, drift | Admin → **Live Trading** (`/admin/live`); API `/v1/admin/live/**` |
+| Monitoring | Admin → Operations (Live alerts), `/v1/health` (`liveOrderTransport`, `mode`) |
+| Private sync | Worker, every `LIVE_SYNC_MS` (default 30 s) |
+
+- **Credentials.** API keys are sealed with AES-256-GCM (`DATA_ENCRYPTION_KEY`) and opened only on the server to sign requests. No API returns them; only `…1234` is shown.
+- **Migration.** `0020_m10_live_mode` adds:
+  - `exchange_connections` and `live_control` (with the switch Off);
+  - `instruments.live_allowed`;
+  - `paper_accounts.mode` and the synced exchange balance;
+  - the synced exchange fields on `positions`.
+
+  The routing screen no longer skips LIVE blocks with `LIVE_DISABLED`; Live entries are gated by the Live rules instead. An ineligible Live entry is recorded as `LIVE_NOT_ELIGIBLE` with a `liveReason`.
+
+**Tests:**
+- `apps/web/test/api/liveMode.test.ts` (14 scenarios, mocked MEXC per investor):
+  - Off by default and sealed keys;
+  - attached stop on a partial fill, and reduce-only close;
+  - stop resize after a partial take profit;
+  - operator, investor and worker-time halts;
+  - missing stop leading to an emergency close;
+  - uncertain submission (reconciled, or never resent);
+  - sync of the balance, an exchange-side stop, a manual MEXC close, and drift;
+  - two investors on one contract;
+  - transport off;
+  - limits.
+- `packages/domain/test/live.test.ts`: every gate.
+- `packages/domain/test/liveTransport.test.ts`: `enabled` is accepted only in production.
+- `apps/web/e2e/10-live-off-by-default.spec.ts`: the Live UI is Off by default; Paper and Live tabs.

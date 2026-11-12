@@ -135,7 +135,7 @@ export type DecisionStatus = 'READY_FOR_EVALUATION' | 'SKIPPED';
 
 export const DECISION_REASON_TEXT: Record<DecisionReason, string> = {
   ACCOUNT_SUSPENDED: 'Your account is not active.',
-  LIVE_DISABLED: 'Live trading is disabled in this build.',
+  LIVE_DISABLED: 'Live trading was disabled in the build that evaluated this signal.',
   PAUSED: 'This order block is paused.',
   STRATEGY_MISMATCH: 'The signal interval does not match the strategy version this block is pinned to.',
   DIRECTION_DISABLED: 'This direction is not enabled for the block or its strategy.',
@@ -175,7 +175,8 @@ export function evaluateBlockForSignal(i: BlockEvaluationInput): BlockEvaluation
   const ageSeconds = Math.max(0, Math.round((i.evaluatedAt.getTime() - i.barCloseAt.getTime()) / 1000));
 
   if (i.user.status !== 'ACTIVE') failed.push('ACCOUNT_SUSPENDED');
-  if (i.block.mode !== 'PAPER') failed.push('LIVE_DISABLED');
+  // LIVE blocks pass the routing screen; their entries are gated by the Live rules (live.ts) at
+  // evaluation and again in the worker. LIVE_DISABLED remains only for decisions recorded earlier.
   if (i.block.status !== 'ACTIVE') failed.push('PAUSED');
   if (INTERVAL_TIMEFRAME[i.interval] !== i.version.timeframe) failed.push('STRATEGY_MISMATCH');
 

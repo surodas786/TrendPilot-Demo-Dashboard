@@ -7,16 +7,21 @@ import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
 import { EXIT_LABEL, signedUsdt as signed, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, targetSummary, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
+import { ModeTabs, viewModeOf } from '@/components/ui/ModeTabs';
 
 export const dynamic = 'force-dynamic';
 
 const usdt = (v: string) => `${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT`;
 
-/** UI-04 My Trades (paper): the signed-in investor's own positions and orders only. */
-export default async function MyTradesPage() {
+/** UI-04 My Trades: the signed-in investor's own positions and orders only, Paper or Live (separately). */
+export default async function MyTradesPage({ searchParams }: { searchParams: Promise<{ mode?: string }> }) {
   const { user } = await requirePageRole('INVESTOR');
+  const mode = viewModeOf((await searchParams).mode);
+  const live = mode === 'LIVE';
   const db = getDb();
-  const [account, positions, orders] = await Promise.all([getMyPaperAccount(db, user.id), listMyPositions(db, user.id), listMyOrders(db, user.id)]);
+  const [account, allPositions, allOrders] = await Promise.all([getMyPaperAccount(db, user.id, mode), listMyPositions(db, user.id), listMyOrders(db, user.id)]);
+  const positions = allPositions.filter((p) => p.mode === mode);
+  const orders = allOrders.filter((o) => o.mode === mode);
   const open = positions.filter((p) => p.status !== 'CLOSED');
   const closed = positions.filter((p) => p.status === 'CLOSED');
   const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: user.timezone, dateStyle: 'medium', timeStyle: 'short' });
@@ -24,13 +29,18 @@ export default async function MyTradesPage() {
   return (
     <PageContainer
       title="My Trades"
-      description="Paper positions opened from shared signals with your own settings, each with its attached stop loss."
-      scope={`${user.name} · My Account · Paper — simulated orders and fills on fixture or public MEXC prices. No order reaches a real exchange.`}
+      description={`${live ? 'Live' : 'Paper'} positions opened from shared signals with your own settings, each with its attached stop loss.`}
+      scope={
+        live
+          ? `${user.name} · My Account · Live — real orders and fills on your own MEXC Futures account.`
+          : `${user.name} · My Account · Paper — simulated orders and fills on fixture or public MEXC prices. No order reaches a real exchange.`
+      }
+      actions={<ModeTabs mode={mode} path="/my-trades" />}
     >
       {account && (
         <dl className="grid gap-3 rounded-xl border border-line bg-surface p-4 text-sm sm:grid-cols-4" data-testid="paper-balance">
           <div>
-            <dt className="text-xs text-subtle">Paper wallet</dt>
+            <dt className="text-xs text-subtle">{live ? 'Live wallet (MEXC, synced)' : 'Paper wallet'}</dt>
             <dd className="text-ink">{usdt(account.walletBalanceUsdt)}</dd>
           </div>
           <div>
@@ -49,7 +59,11 @@ export default async function MyTradesPage() {
       )}
 
       {open.length === 0 ? (
-        <EmptyState icon={ListChecksIcon} title="No open paper positions" body="When a shared signal passes all your entry checks, the simulated position and its stop appear here." />
+        <EmptyState
+          icon={ListChecksIcon}
+          title={live ? 'No open Live positions' : 'No open paper positions'}
+          body={live ? 'When Live is active and a shared signal passes every entry and Live check, the MEXC position and its stop appear here.' : 'When a shared signal passes all your entry checks, the simulated position and its stop appear here.'}
+        />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-line bg-surface">
           <table className="w-full min-w-[980px] text-left text-sm">

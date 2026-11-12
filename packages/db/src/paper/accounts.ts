@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { Decimal, PAPER_POLICY } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { ledgerEntries, paperAccounts } from '../schema';
@@ -44,19 +44,34 @@ export async function book(tx: Executor, account: Pick<PaperAccountRow, 'id' | '
   return booked;
 }
 
-/** Locks (creating on first use) the investor's paper account. All reservations go through this lock. */
-export async function lockPaperAccount(tx: Executor, ownerId: string): Promise<PaperAccountRow> {
+export type AccountMode = 'PAPER' | 'LIVE';
+
+/**
+ * Locks (creating on first use) the investor's account for a mode. All reservations go through
+ * this lock. A PAPER account starts with the fixture balance; a LIVE account starts at zero and
+ * follows the synced MEXC balance (`syncLiveBalance`).
+ */
+export async function lockPaperAccount(tx: Executor, ownerId: string, mode: AccountMode = 'PAPER'): Promise<PaperAccountRow> {
   const inserted = await tx
     .insert(paperAccounts)
-    .values({ ownerId, walletBalance: '0' })
-    .onConflictDoNothing({ target: paperAccounts.ownerId })
+    .values({ ownerId, mode, walletBalance: '0' })
+    .onConflictDoNothing({ target: [paperAccounts.ownerId, paperAccounts.mode] })
     .returning();
-  if (inserted[0]) {
+  if (inserted[0] && mode === 'PAPER') {
     await book(tx, inserted[0], [{ kind: 'OPENING_BALANCE', bucket: 'WALLET', amount: PAPER_POLICY.startingBalanceUsdt, refType: 'paper_account', refId: inserted[0].id, memo: 'Fixture paper balance' }]);
   }
-  const [row] = await tx.select().from(paperAccounts).where(eq(paperAccounts.ownerId, ownerId)).for('update');
+  const [row] = await tx.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode))).for('update');
   return row!;
 }
 
-export const availableOf = (a: Pick<PaperAccountRow, 'walletBalance' | 'positionMargin' | 'orderReserve'>) =>
-  new Decimal(a.walletBalance).minus(a.positionMargin).minus(a.orderReserve).toFixed();
+/**
+ * Balance available for a new order. Paper: wallet − margin − reservations. Live: the same, and
+ * never more than MEXC's last synced available-to-open balance minus local reservations; a Live
+ * account that was never synced has nothing available.
+ */
+export const availableOf = (a: Pick<PaperAccountRow, 'walletBalance' | 'positionMargin' | 'orderReserve'> & Partial<Pick<PaperAccountRow, 'mode' | 'exchangeAvailable'>>) => {
+  const local = new Decimal(a.walletBalance).minus(a.positionMargin).minus(a.orderReserve);
+  if (a.mode !== 'LIVE') return local.toFixed();
+  if (a.exchangeAvailable === null || a.exchangeAvailable === undefined) return '0';
+  return Decimal.max(0, Decimal.min(local, new Decimal(a.exchangeAvailable).minus(a.orderReserve))).toFixed();
+};

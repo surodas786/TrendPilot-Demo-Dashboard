@@ -103,7 +103,6 @@ describe('per-investor screening', () => {
     ['SIGNAL_STALE', { evaluatedAt: at(121) }],
     ['STRATEGY_MISMATCH', { version: { timeframe: '5m' } }],
     ['ACCOUNT_SUSPENDED', { user: { status: 'SUSPENDED' } }],
-    ['LIVE_DISABLED', { block: { mode: 'LIVE' } }],
     ['NO_MANAGED_POSITION', { action: 'CLOSE_LONG' }]
   ] as const)('skips with %s', (reason, o) => {
     const r = ev(o as never);

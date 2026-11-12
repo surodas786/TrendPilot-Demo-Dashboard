@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { Decimal } from '@trendpilot/domain';
+import { Decimal, liveTransportRefusal } from '@trendpilot/domain';
 
 /**
  * MEXC Futures PRIVATE API client (Step 11, M4). Server-side only.
@@ -14,10 +14,11 @@ import { Decimal } from '@trendpilot/domain';
  *  - Envelope: { success, code, data } / { success: false, code, message }.
  *
  * Two transports exist and neither is reachable from Paper, Demo, replay or CI:
- *  - READ_ONLY: GET on an allowlist of account/position/order *query* paths. Needs explicitly
- *    configured read-only credentials (ops:mexc-readonly-check).
- *  - ORDERS: POST order/cancel/stop paths. Construction calls `openLiveOrderTransport`, which
- *    refuses in this build (live activation is disabled until the Step 12 gate).
+ *  - READ_ONLY: GET on an allowlist of account/position/order *query* paths (connection
+ *    verification, private sync, ops:mexc-readonly-check). It can never send an order.
+ *  - ORDERS: the read paths plus POST order/cancel/stop paths. Construction calls
+ *    `openLiveOrderTransport`, which refuses unless LIVE_ORDER_TRANSPORT=enabled in a production
+ *    process (never in development, demo, replay, test or CI).
  * Credentials are never logged: errors carry the path and MEXC code only.
  */
 
@@ -110,7 +111,9 @@ export const READ_ONLY_PATHS: RegExp[] = [
   /^\/api\/v1\/private\/order\/get\/\d+$/,
   /^\/api\/v1\/private\/order\/deal_details\/\d+$/,
   /^\/api\/v1\/private\/stoporder\/open_orders$/,
-  /^\/api\/v1\/private\/account\/risk_limit$/
+  /^\/api\/v1\/private\/account\/risk_limit$/,
+  /^\/api\/v1\/private\/position\/funding_records$/,
+  /^\/api\/v1\/private\/order\/list\/order_deals\/v3$/
 ];
 
 /** Order-changing paths (POST). Reachable only through the ORDERS transport. */
@@ -119,10 +122,12 @@ export const ORDER_PATHS: RegExp[] = [/^\/api\/v1\/private\/order\/create$/, /^\
 /* ───────────────────────── Live gate ───────────────────────── */
 
 /**
- * Build-level switch. Live order activation is NOT part of this release: Step 12 must change this
- * deliberately (with its review), not an environment variable alone.
+ * This build contains the Live order path. Activation is a runtime decision with several
+ * independent gates, all Off by default: LIVE_ORDER_TRANSPORT=enabled (deployment), the platform
+ * Live switch (administrator), the investor's approved connection and own activation, and the
+ * contract allowlist. See `docs/LIVE_PILOT_RUNBOOK.md`.
  */
-export const LIVE_ACTIVATION_ALLOWED_IN_THIS_BUILD = false as boolean;
+export const LIVE_ACTIVATION_ALLOWED_IN_THIS_BUILD = true as boolean;
 
 export class LiveOrderTransportRefused extends Error {
   constructor(reason: string) {
@@ -132,15 +137,15 @@ export class LiveOrderTransportRefused extends Error {
 }
 
 /**
- * The only way to obtain permission to send order-changing requests. Refuses in Paper, Demo,
- * replay, test and CI environments, and refuses everywhere in this build.
+ * The only way to obtain permission to send order-changing requests. Refuses unless
+ * LIVE_ORDER_TRANSPORT=enabled in a production process; always refuses in development, demo,
+ * replay, test and CI environments. Paper orders never reach this function.
  */
 export function openLiveOrderTransport(env: Record<string, string | undefined> = process.env): { readonly granted: true } {
   if (env.LIVE_ORDER_TRANSPORT !== 'enabled') throw new LiveOrderTransportRefused(`LIVE_ORDER_TRANSPORT is "${env.LIVE_ORDER_TRANSPORT ?? 'unset'}"`);
-  if (env.SIGNAL_TEST_CLOCK || env.ALLOW_SIGNAL_TEST_CLOCK) throw new LiveOrderTransportRefused('a replay clock is configured');
-  if (env.CI || env.VITEST || env.NODE_ENV === 'test') throw new LiveOrderTransportRefused('test or CI environment');
-  if (env.TRENDPILOT_MODE !== 'LIVE') throw new LiveOrderTransportRefused('process mode is not LIVE (Paper and Demo never send orders)');
-  if (!LIVE_ACTIVATION_ALLOWED_IN_THIS_BUILD) throw new LiveOrderTransportRefused('live activation is disabled in this build (Step 12 gate)');
+  const refusal = liveTransportRefusal(env);
+  if (refusal) throw new LiveOrderTransportRefused(refusal);
+  if (!LIVE_ACTIVATION_ALLOWED_IN_THIS_BUILD) throw new LiveOrderTransportRefused('live activation is disabled in this build');
   return { granted: true };
 }
 
@@ -171,8 +176,10 @@ export interface MexcHttpOptions {
 /** Real HTTP transport. READ_ONLY refuses anything but allowlisted GETs before sending. */
 export class MexcHttpTransport implements MexcRequester {
   private readonly o: Required<Omit<MexcHttpOptions, 'env'>>;
+  private readonly env: Record<string, string | undefined>;
   constructor(o: MexcHttpOptions) {
-    if (o.mode === 'ORDERS') openLiveOrderTransport(o.env ?? process.env);
+    this.env = o.env ?? process.env;
+    if (o.mode === 'ORDERS') openLiveOrderTransport(this.env);
     if (!o.credentials.apiKey || !o.credentials.secretKey) throw new MexcPrivateError('MEXC credentials are not configured', 'REFUSED');
     this.o = { baseUrl: MEXC_PRIVATE_DEFAULT_BASE_URL, timeoutMs: 8_000, fetch, now: Date.now, ...o } as Required<Omit<MexcHttpOptions, 'env'>>;
   }
@@ -181,6 +188,7 @@ export class MexcHttpTransport implements MexcRequester {
     const readOnly = method === 'GET' && READ_ONLY_PATHS.some((r) => r.test(path));
     const order = method === 'POST' && ORDER_PATHS.some((r) => r.test(path));
     if (this.o.mode === 'READ_ONLY' && !readOnly) throw new MexcPrivateError(`Refusing ${method} ${path} on the read-only transport`, 'REFUSED');
+    if (order) openLiveOrderTransport(this.env); // re-checked on every order-changing request
     if (!readOnly && !order) throw new MexcPrivateError(`Refusing ${method} ${path}: not an allowlisted endpoint`, 'REFUSED');
     const req = buildSignedRequest(this.o.credentials, method, path, params, String(this.o.now()), 10);
     let res: Response;
@@ -336,6 +344,8 @@ export interface NormalizedStop {
   vol: string;
   state: StopState;
   errorCode: number;
+  /** stopLossReverse = 1: the stop would open the opposite side when it fires. Never protective. */
+  reverse: boolean;
 }
 export const normalizeStops = (data: unknown): NormalizedStop[] =>
   (Array.isArray(data) ? data : []).map((s: Record<string, unknown>) => ({
@@ -348,5 +358,6 @@ export const normalizeStops = (data: unknown): NormalizedStop[] =>
     basis: trendToBasis(Number(s.lossTrend ?? 1)),
     vol: dec(s.vol),
     state: STOP_STATE[Number(s.state)] ?? 'INVALID',
-    errorCode: Number(s.errorCode ?? 0)
+    errorCode: Number(s.errorCode ?? 0),
+    reverse: Number(s.stopLossReverse ?? 2) === 1
   }));
