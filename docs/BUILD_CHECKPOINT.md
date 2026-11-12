@@ -1,12 +1,58 @@
 # TrendPilot build checkpoint
 
-**CURRENT: 2026-11-12. The Live path is implemented through the normal UI, API and worker flows and ships switched OFF. It is not committed and not deployed.**
+**CURRENT: 2026-11-12. The Live path (commit `2b2a8ce`) is deployed with activation OFF. Release acceptance on the server is blocked on access; see the acceptance record below.**
 - Live order submission is disabled everywhere:
   - `LIVE_ORDER_TRANSPORT=disabled`;
   - the platform switch is Off;
   - no investor connection is approved or activated.
 - No real order has ever been sent.
 - Real-order testing is a separate, operator-led pilot that starts after the owner's Paper review (`docs/LIVE_PILOT_RUNBOOK.md`).
+
+## Release acceptance — 2026-11-12 12:00 UTC (Paper only; Live activation Off)
+
+**Result: partially verified.** All server-side acceptance checks (items 1–2 and the feed) are **BLOCKED**: there is no shell or app access to the deployed host from this workstation. Item 3 passed against the mocked exchange.
+
+### Deployed revision
+- `origin/feature/admin-mailbox-settings` = `2b2a8ce` "Live Trading Integrated" (the Live work plus `63d3986`). The local tree is clean.
+- `http://192.168.91.16:3000` was probed at 12:03 UTC. `/v1/health` → `{"status":"ok","web":"up","database":"up","mode":"PAPER","liveOrderTransport":"disabled"}`.
+- Route fingerprint: `/v1/me/live`, `/v1/admin/live`, `/v1/me/holdings/{id}/chart` and `/v1/market/quotes/stream` all → 401 (exist). At 11:25 UTC the Live routes returned 404.
+- **So the deployed build contains the `2b2a8ce` code.** The exact commit and migration `0020` need a shell on the host.
+
+### Results
+| Check | Result | Evidence / blocker |
+| --- | --- | --- |
+| 1. Fresh TradingView alert on the deployed app: route → decision → opening fill → attached stop → exit fill → P&L; two investors isolated | **BLOCKED** | No SSH user or key for the host (the server has no `~/.ssh` setup for this workstation), no admin or investor credentials, and no ingress token (stored only as a hash on the server). Locally: e2e `3-…`, `4-…`, `5-…`, `7-reporting-isolation` pass (57/57) |
+| 2a. Trading window: inside eligible, outside skipped, an open position still closes | **BLOCKED on the server** | Locally: `windowAllocation.test.ts`, `tradingWindow.test.ts`, e2e `9-…` pass |
+| 2b. My Holdings auto-update; entry and stop lines on the right contract chart | **BLOCKED on the server** | Locally: e2e `9-holdings-window-backspace` passes |
+| 2c. Trailing Take Profit 40% / Take Profit 60%; arm on first touch, close on pullback; Backspace keeps the editor open | **BLOCKED on the server** | Locally: `windowAllocation.test.ts`, `armPullback.test.ts`, e2e `9-…` pass |
+| 2d. Deployed worker receives WebSocket ticks; REST fallback reported separately | **BLOCKED** | Needs the feed log or DB (`market_feed_status.quote_channel`, `market_quotes.channel`, the feed heartbeat's REST counters) |
+| 3. Live readiness with activation Off | **PASS (mock)** | `vitest` Live and adapter suites: **6 files, 97 tests passed** (`liveMode`, `liveAdapter`, `pilotRehearsal`, `mexcPrivate`, `live`, `liveTransport`). Health shows `liveOrderTransport: disabled` on the server |
+| 3. Attached stop coverage | PASS (mock) | The opening request carries `stopLossPrice` + `lossTrend` (Long side 1, Short side 3). A partial fill books only the filled contracts and the stop must cover exactly them. A missing or failed stop leads to an immediate reduce-only close and an account halt |
+| 3. Reduce-only market closes | PASS (mock) | Manual, TP and signal closes send `side 4/2`, `type 5`, `reduceOnly`, `positionId`, capped at the MEXC position (never flips). A partial TP leads to a stop resize to the remainder (`stopLossReverse 2`). A rejected close (2008) leaves the position open and protected |
+| 3. Recovery after an uncertain order | PASS (mock) | Timeout after accept: reconciled by client order ID, one order. Not yet visible: waits for the 30 s grace. Still invisible after the grace: no resend while halted, and the sync flags `UNKNOWN_EXPOSURE`. A lookup failure is never treated as "absent". Worker restart: reconciles, nothing resent |
+| 3. Read-only account check | **PENDING** | `ops:mexc-readonly-check` → "PENDING: no authorized read-only MEXC account is configured … Nothing was sent." (exit 3) |
+| 3. Needs the operator-led live pilot | PENDING | Written MEXC eligibility; KYC, key permissions and IP whitelist; attached-stop atomicity and listing; partial-fill stop size; `reduceOnly` in the account's mode; stop auto-shrink vs re-place; unknown-ID code and visibility delay; duplicate and length of `externalOid`; deal-history shape; fee and `holdFee` signs |
+
+### Added this session
+- `scripts/acceptance-check.ts`: a read-only DB snapshot for the server. It shows:
+  - migrations and the Live switch;
+  - the feed channel per contract, quotes by channel, and the feed's REST counters;
+  - routes, alerts, decisions, intents, positions, exits and targets;
+  - the ledger reconciliation per account and mode.
+
+  It runs in one `READ ONLY` transaction and was validated against the local e2e DB. On the server, from the app directory: `npx tsx scripts/acceptance-check.ts --since <ISO time>`.
+
+### To unblock (owner/operator)
+- Either give SSH access (user name and an authorized key for this workstation), or run on the server and share the output of:
+  - `git log -1 --oneline`;
+  - `pm2 list`;
+  - `pm2 logs market-feed --lines 200 --nostream | grep -E "sub.ticker|push.ticker|REST|510"`;
+  - `npx tsx scripts/acceptance-check.ts`.
+- For the end-to-end Paper alert, one of:
+  - a real TradingView alert on the next bar of an enabled route; or
+  - the route's webhook URL for a replayed alert;
+
+  plus two investor test accounts on that contract and an admin login.
 
 ## Record — 2026-11-12
 
