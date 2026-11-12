@@ -14,3 +14,4 @@ export * from './reporting';
 export * from './signals';
 export * from './strategy';
 export * from './weekdays';
+export * from './tradingWindow';

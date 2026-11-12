@@ -32,8 +32,14 @@ export interface Draft {
   trailingEnabled: boolean;
   trailingActivationPct: string;
   trailingPct: string;
+  /** "Position to close (%)": Trailing Take Profit's share of the opening quantity. '' = not entered (0 is a value). */
+  trailingClosePct: string;
   trailingBasis: PriceBasis;
   weekdays: Weekday[];
+  /** CFG-04 trading window: All day, or Start–End (HH:mm) in the block timezone. */
+  windowMode: 'ALL_DAY' | 'HOURS';
+  windowStart: string;
+  windowEnd: string;
   allowAdds: boolean;
   maxAdds: string;
   risk: Record<keyof RiskSettings, string>;
@@ -69,11 +75,12 @@ export const pairLabel = (i: Pick<InstrumentDto, 'base' | 'quote'>) => `${i.base
  * by the targets, neither of which a suggestion can choose. Its trail distance is prefilled
  * from the suggestion for when the investor turns it on.
  */
-export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tpMode' | 'targets' | 'trailingEnabled' | 'trailingPct' | 'trailingActivationPct'> {
+export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tpMode' | 'targets' | 'trailingEnabled' | 'trailingPct' | 'trailingActivationPct' | 'trailingClosePct'> {
   return {
     stopType: 'PERCENT',
     stopPct: i?.suggested.stopPct ?? '',
     trailingActivationPct: '',
+    trailingClosePct: '',
     tpMode: 'FIXED',
     targets: [{ id: newTargetId(), movePct: i?.suggested.takeProfitPct ?? '', closePct: '100' }],
     trailingEnabled: false,
@@ -98,6 +105,9 @@ export function newDraft(i: InstrumentDto | undefined, v: StrategyVersionDto | u
     stopBasis: 'MARK',
     trailingBasis: 'MARK',
     weekdays: [...ALL_WEEKDAYS],
+    windowMode: 'ALL_DAY',
+    windowStart: '',
+    windowEnd: '',
     allowAdds: false,
     maxAdds: '1',
     risk: emptyRisk()
@@ -120,8 +130,12 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
     trailingEnabled: b.trailing.enabled,
     trailingPct: b.trailing.distancePct ?? '',
     trailingActivationPct: b.trailing.activationPct ?? '',
+    trailingClosePct: b.trailing.closePct ?? '',
     trailingBasis: b.trailing.basis,
     weekdays: [...b.weekdays],
+    windowMode: b.tradingWindow ? 'HOURS' : 'ALL_DAY',
+    windowStart: b.tradingWindow?.start ?? '',
+    windowEnd: b.tradingWindow?.end ?? '',
     allowAdds: b.allowAdds,
     maxAdds: b.maxAdds === null ? '1' : String(b.maxAdds),
     risk: Object.fromEntries(RISK_FIELDS.map((f) => [f.key, b.risk[f.key] === null ? '' : String(b.risk[f.key])])) as Draft['risk']
@@ -130,8 +144,9 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
 
 /** The settings payload sent to the API (PATCH body; POST adds instrumentId and mode). */
 export function settingsPayload(d: Draft) {
-  // A fixed target closes 100% unless Trailing Take Profit manages part of the position.
-  const levels = d.tpMode === 'OFF' ? [] : d.tpMode === 'FIXED' ? [{ ...d.targets[0]!, closePct: d.trailingEnabled ? d.targets[0]!.closePct : '100' }] : d.targets;
+  // A fixed target manages the whole Take Profit share; split targets divide it between them.
+  // The Take Profit / Trailing Take Profit split itself is Trailing Take Profit's "Position to close (%)".
+  const levels = d.tpMode === 'OFF' ? [] : d.tpMode === 'FIXED' ? [{ ...d.targets[0]!, closePct: '100' }] : d.targets;
   return {
     strategyVersionId: d.strategyVersionId,
     direction: d.direction,
@@ -144,9 +159,12 @@ export function settingsPayload(d: Draft) {
       enabled: d.trailingEnabled,
       activationPct: d.trailingEnabled && d.trailingActivationPct.trim() ? d.trailingActivationPct.trim() : null,
       distancePct: d.trailingEnabled && d.trailingPct.trim() ? d.trailingPct.trim() : null,
+      // Empty stays null (reported as missing); "0" is sent as 0.
+      closePct: d.trailingEnabled && d.trailingClosePct.trim() !== '' ? d.trailingClosePct.trim() : null,
       basis: d.trailingBasis
     },
     weekdays: d.weekdays,
+    tradingWindow: d.windowMode === 'HOURS' ? { start: d.windowStart.trim(), end: d.windowEnd.trim() } : null,
     allowAdds: d.allowAdds,
     maxAdds: d.allowAdds ? Number(d.maxAdds) : null,
     risk: Object.fromEntries(
@@ -164,8 +182,14 @@ export function validateDraft(d: Draft, instrument: InstrumentDto | undefined, v
   if (!instrument) issues.push({ path: 'instrumentId', message: 'Select a trading pair.' });
   if (!version) issues.push({ path: 'strategyVersionId', message: 'Select a strategy.' });
   if (d.leverage === null) issues.push({ path: 'leverage', message: 'Select a leverage available for this pair.' });
-  const parsed = parseWith(orderBlockSettingsSchema, settingsPayload(d));
-  if (!parsed.ok) issues.push(...parsed.issues);
+  // Runs on every keystroke: a validation failure must become a field message, never an
+  // exception that would take the editor down (e.g. a field cleared with Backspace).
+  try {
+    const parsed = parseWith(orderBlockSettingsSchema, settingsPayload(d));
+    if (!parsed.ok) issues.push(...parsed.issues);
+  } catch {
+    issues.push({ path: '', message: 'Some values could not be checked. Review the highlighted fields.' });
+  }
   if (instrument && version && d.leverage !== null) issues.push(...catalogIssues({ leverage: d.leverage, direction: d.direction }, { instrument, version }));
   return issues;
 }

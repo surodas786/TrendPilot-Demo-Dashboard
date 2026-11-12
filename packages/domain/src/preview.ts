@@ -1,7 +1,7 @@
 import { Decimal } from './decimal';
-import { planTargets, trailingActivationPrice } from './exits';
+import { planExits, trailingActivationPrice } from './exits';
 import type { MarketSource } from './marketFeed';
-import type { OrderBlockSettings, PriceBasis } from './orderBlock';
+import { exitAllocation, type OrderBlockSettings, type PriceBasis } from './orderBlock';
 
 /**
  * EXE-01 order preview: sizing, stop, targets and fees from a quote, without placing
@@ -47,7 +47,7 @@ export interface SidePreview {
   takeProfits: { id: string; price: string; closePct: string; contracts: string }[];
   /**
    * Trailing Take Profit: arms at `activationPrice` and manages `contracts` (`managesPct` of
-   * the position) — the quantity no target reserves.
+   * the position, its "Position to close (%)").
    */
   trailing: { activationPrice: string | null; distancePct: string; managesPct: string; contracts: string } | null;
   reasons: { code: PreviewReason; message: string }[];
@@ -111,10 +111,9 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
     reasons.push({ code: 'RISK_LIMIT', message: `Loss to stop ${fmt(lossToStop, 2)} USDT exceeds your cap of ${s.risk.maxStopRiskUsdt} USDT.` });
   }
 
-  const planned = planTargets(dir, fmt(p), fmt(contracts), s.takeProfit, { priceTick: spec.priceTick, qtyStep: spec.qtyStep });
-  const tps = planned.map((t) => ({ id: t.levelId, price: t.triggerPrice, closePct: t.closePct, contracts: t.plannedContracts }));
-  const targetsContracts = planned.reduce((sum, t) => sum.plus(t.plannedContracts), D(0));
-  const targetsPct = s.takeProfit.mode === 'OFF' ? D(0) : s.takeProfit.levels.reduce((sum, l) => sum.plus(l.closePct), D(0));
+  const plan = planExits(dir, fmt(p), fmt(contracts), s, { priceTick: spec.priceTick, qtyStep: spec.qtyStep });
+  const tps = plan.targets.map((t) => ({ id: t.levelId, price: t.triggerPrice, closePct: t.closePct, contracts: t.plannedContracts }));
+  const allocation = exitAllocation(s);
 
   // Same activation rounding as the running position (never closer than configured).
   const trailing =
@@ -122,8 +121,8 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
       ? {
           activationPrice: trailingActivationPrice(dir, fmt(p), s.trailing.activationPct, spec.priceTick),
           distancePct: s.trailing.distancePct,
-          managesPct: Decimal.max(0, D(100).minus(targetsPct)).toFixed(),
-          contracts: Decimal.max(0, contracts.minus(targetsContracts)).toFixed()
+          managesPct: allocation.trailingPct,
+          contracts: plan.trailingContracts
         }
       : null;
 

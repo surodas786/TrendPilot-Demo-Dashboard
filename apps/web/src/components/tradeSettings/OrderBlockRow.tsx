@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { CalendarOffIcon, CircleDotIcon, PauseIcon, PencilIcon, PlayIcon } from 'lucide-react';
-import { Decimal, weekdaysSummary, type OrderBlockDto } from '@trendpilot/domain';
+import { Decimal, tradingWindowSummary, weekdaysSummary, type OrderBlockDto } from '@trendpilot/domain';
 import { Button } from '../ui/Button';
 import { StatusPill } from '../ui/StatusPill';
 import { DIRECTION_LABELS } from './draft';
@@ -31,7 +31,7 @@ export function OrderBlockRow({ block, pairLabel, strategyName, busy, onEdit, on
           {strategyName} · {DIRECTION_LABELS[block.direction]}
         </p>
         <p className="mt-0.5 text-xs text-subtle" data-testid="trading-days">
-          Trading days: <span className={noDays ? 'text-warn' : 'text-muted'}>{weekdaysSummary(block.weekdays)}</span> · {block.timezone}
+          Trading days: <span className={noDays ? 'text-warn' : 'text-muted'}>{weekdaysSummary(block.weekdays)}</span> · Window: <span className="text-muted" data-testid="trading-window-label">{tradingWindowSummary(block.tradingWindow)}</span> · {block.timezone}
         </p>
       </div>
       <dl className="grid grid-cols-3 gap-4 text-sm tabular-nums lg:w-[340px]">

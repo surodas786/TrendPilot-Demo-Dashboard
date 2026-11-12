@@ -5,10 +5,13 @@ import { CalculatorIcon, InfoIcon, LockIcon, RotateCcwIcon } from 'lucide-react'
 import { toast } from 'sonner';
 import {
   Decimal,
+  crossesMidnight,
   directionPermitted,
   isDecimalString,
+  isHhMm,
   NO_DAYS_WARNING,
   TRADING_DAYS_HELP,
+  TRADING_WINDOW_HELP,
   WEEKDAY_LABELS,
   WEEKDAYS,
   type Direction,
@@ -23,6 +26,7 @@ import { api, type ApiFailure } from '@/lib/api';
 import { Button } from '../ui/Button';
 import { ChipCheckboxGroup } from '../ui/ChipCheckboxGroup';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { DecimalField } from '../ui/DecimalField';
 import { FilterSelect } from '../ui/FilterSelect';
 import { SegmentedControl } from '../ui/SegmentedControl';
 import { Switch } from '../ui/Switch';
@@ -79,6 +83,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
   const [previewing, setPreviewing] = useState(false);
   const [exitsTouched, setExitsTouched] = useState(Boolean(existing));
   const [touched, setTouched] = useState(false);
+  /** Fields the investor has left (blur): their messages show before Save is pressed. */
+  const [left, setLeft] = useState<ReadonlySet<string>>(() => new Set());
   const [serverIssues, setServerIssues] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -88,7 +94,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
   const version = versions.find((v) => v.id === draft.strategyVersionId);
   const issues = useMemo(() => validateDraft(draft, instrument, version), [draft, instrument, version]);
   const errors = { ...errorMap(issues), ...serverIssues };
-  const err = (path: string) => (touched ? errors[path] : undefined);
+  const err = (path: string) => (touched || left.has(path) ? errors[path] : undefined);
+  const commit = (path: string) => setLeft((cur) => (cur.has(path) ? cur : new Set(cur).add(path)));
 
   const update = (patch: Partial<Draft>) => {
     setServerIssues({});
@@ -256,14 +263,62 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
               {NO_DAYS_WARNING}
             </p>
           )}
+          <div className="space-y-3" data-testid="trading-window">
+            <SegmentedControl<'ALL_DAY' | 'HOURS'>
+              label={`Trading window · Timezone: ${timezone} · 24-hour HH:mm`}
+              value={draft.windowMode}
+              onChange={(v) => update({ windowMode: v })}
+              options={[
+                { value: 'ALL_DAY', label: 'All day' },
+                { value: 'HOURS', label: 'Set hours' }
+              ]}
+              hint={TRADING_WINDOW_HELP}
+            />
+            {draft.windowMode === 'HOURS' && (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <TextField
+                    label="Start (from)"
+                    inputMode="numeric"
+                    placeholder="HH:mm"
+                    maxLength={5}
+                    autoComplete="off"
+                    value={draft.windowStart}
+                    onChange={(v) => update({ windowStart: v })}
+                    onBlur={() => commit('tradingWindow.start')}
+                    error={err('tradingWindow.start')}
+                  />
+                  <TextField
+                    label="End (until, not included)"
+                    inputMode="numeric"
+                    placeholder="HH:mm"
+                    maxLength={5}
+                    autoComplete="off"
+                    value={draft.windowEnd}
+                    onChange={(v) => update({ windowEnd: v })}
+                    onBlur={() => commit('tradingWindow.end')}
+                    error={err('tradingWindow.end') ?? err('tradingWindow')}
+                  />
+                </div>
+                {isHhMm(draft.windowStart.trim()) && isHhMm(draft.windowEnd.trim()) && draft.windowStart.trim() !== draft.windowEnd.trim() && (
+                  <p className="text-xs text-muted" data-testid="trading-window-summary">
+                    {crossesMidnight({ start: draft.windowStart.trim(), end: draft.windowEnd.trim() })
+                      ? `Overnight: from ${draft.windowStart.trim()} on each selected day until ${draft.windowEnd.trim()} the next morning (${timezone}). The day the window starts decides.`
+                      : `From ${draft.windowStart.trim()} until ${draft.windowEnd.trim()} on each selected day (${timezone}).`}{' '}
+                    Stop loss, take profit, trailing take profit and close signals keep working outside the window.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
         </Section>
 
         <Section title="Order size">
-          <TextField
+          <DecimalField
             label="Order cost (USDT)"
-            inputMode="decimal"
             value={draft.orderCostUsdt}
             onChange={(v) => update({ orderCostUsdt: v })}
+            onCommit={() => commit('orderCostUsdt')}
             hint="The margin allocated to each new entry, before fees."
             error={err('orderCostUsdt')}
           />
@@ -338,11 +393,11 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
               options={(['MARK', 'LAST'] as const).map((b) => ({ value: b, label: BASIS_LABELS[b] }))}
             />
           </div>
-          <TextField
+          <DecimalField
             label="Stop loss"
-            inputMode="decimal"
             value={draft.stopPct}
             onChange={(v) => updateExits({ stopPct: v })}
+            onCommit={() => commit('stop')}
             hint={
               draft.stopType === 'PERCENT'
                 ? 'Required. Distance from entry: below for longs, above for shorts. Sent with the opening order; protects the whole position before and after Trailing take profit activates.'
@@ -351,7 +406,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
             error={err('stop')}
             trailing={draft.stopType === 'PERCENT' ? pct : <span className="pr-2 text-xs text-subtle">USDT</span>}
           />
-          <TakeProfitEditor draft={draft} errors={errors} showErrors={touched} onChange={updateExits} />
+          <TakeProfitEditor draft={draft} err={err} commit={commit} onChange={updateExits} />
           <div className="space-y-3 rounded-lg border border-line p-3" data-testid="trailing-take-profit">
             <Switch
               label="Trailing take profit"
@@ -359,23 +414,37 @@ export function OrderBlockEditor({ existing, instruments, versions, takenInstrum
               checked={draft.trailingEnabled}
               onChange={(v) => updateExits({ trailingEnabled: v })}
             />
+            {!draft.trailingEnabled && draft.tpMode !== 'OFF' && <p className="text-xs text-subtle">Off: Take profit manages the whole position.</p>}
             {draft.trailingEnabled && (
               <>
+                <DecimalField
+                  label="Position to close (%)"
+                  value={draft.trailingClosePct}
+                  onChange={(v) => updateExits({ trailingClosePct: v })}
+                  onCommit={() => commit('trailing.closePct')}
+                  error={err('trailing.closePct')}
+                  hint={
+                    draft.tpMode === 'OFF'
+                      ? 'Required, 0-100% of the confirmed opening quantity. Take profit is off, so the rest stays open under the stop loss and close signals.'
+                      : 'Required, 0-100% of the confirmed opening quantity. Take profit manages the rest: 0% leaves everything to Take profit, 100% gives everything to Trailing take profit.'
+                  }
+                  trailing={pct}
+                />
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <TextField
+                  <DecimalField
                     label="Activate after profit (%)"
-                    inputMode="decimal"
                     value={draft.trailingActivationPct}
                     onChange={(v) => updateExits({ trailingActivationPct: v })}
+                    onCommit={() => commit('trailing.activationPct')}
                     error={err('trailing.activationPct')}
                     hint="Required. Long: price rises this much; Short: price falls this much."
                     trailing={pct}
                   />
-                  <TextField
+                  <DecimalField
                     label="Trail distance (%)"
-                    inputMode="decimal"
                     value={draft.trailingPct}
                     onChange={(v) => updateExits({ trailingPct: v })}
+                    onCommit={() => commit('trailing.distancePct')}
                     error={err('trailing.distancePct')}
                     hint="Required. Pullback from the highest (Long) or lowest (Short) price."
                     trailing={pct}

@@ -132,8 +132,21 @@ describe('fixed TP: two investors, different targets — only A closes', () => {
     expect(new Decimal(pb.takeProfitPrice!).toFixed()).toBe('68900.5'); // 65000.5 × 1.06
   });
 
-  it('a price reaching only A\'s target closes A at market; B stays open with stop coverage', async () => {
+  it('reaching A\'s target only arms it: nothing closes on the first touch', async () => {
     await tick('67000');
+    const results = await drain();
+    expect(results.find((r) => r.tick)?.tick).toMatchObject({ takeProfitsRequested: 0, targetsArmed: 1, stopsTriggered: 0 });
+    expect(results.find((r) => r.close)).toBeUndefined();
+    const pa = await positionOf(USERS.investorA.email);
+    expect(pa.status).toBe('OPEN');
+    const [t] = await direct.db.select().from(schema.positionTargets).where(eq(schema.positionTargets.positionId, pa.id));
+    expect(t).toMatchObject({ triggerRule: 'ARM_PULLBACK', status: 'PENDING' });
+    expect(t!.armedAt).not.toBeNull();
+    expect(new Decimal(t!.armedPrice!).toFixed()).toBe('67000');
+  });
+
+  it('a later pullback through A\'s target closes A at market; B stays open with stop coverage', async () => {
+    await tick('66900'); // back below 66950.5
     const results = await drain();
     expect(results.find((r) => r.tick)?.tick).toMatchObject({ takeProfitsRequested: 1, stopsTriggered: 0 });
     expect(results.find((r) => r.close)?.close).toMatchObject({ state: 'FILLED', closed: true, filled: '153', remaining: '0' });
@@ -142,10 +155,10 @@ describe('fixed TP: two investors, different targets — only A closes', () => {
     expect(pa).toMatchObject({ status: 'CLOSED', closeReason: 'TAKE_PROFIT' });
     expect(new Decimal(pa.contracts).toFixed()).toBe('0');
     const [x] = await exitsOf(pa.id);
-    const pnl = new Decimal('66999.5').minus('65000.5').times('153').times(M);
-    const fee = new Decimal('153').times(M).times('66999.5').times('0.0004').toDecimalPlaces(8, Decimal.ROUND_UP);
+    const pnl = new Decimal('66899.5').minus('65000.5').times('153').times(M);
+    const fee = new Decimal('153').times(M).times('66899.5').times('0.0004').toDecimalPlaces(8, Decimal.ROUND_UP);
     expect(x).toMatchObject({ reason: 'TAKE_PROFIT' });
-    expect(new Decimal(x!.price).toFixed()).toBe('66999.5'); // a Long closes at the bid
+    expect(new Decimal(x!.price).toFixed()).toBe('66899.5'); // a Long closes at the bid
     expect(new Decimal(x!.realizedPnl).toFixed()).toBe(pnl.toFixed());
     expect(new Decimal(x!.fee).toFixed()).toBe(fee.toFixed());
     expect(new Decimal(x!.marginReleased).toFixed()).toBe(new Decimal('153').times(M).times('65000.5').div(10).toDecimalPlaces(8, Decimal.ROUND_UP).toFixed());
@@ -175,7 +188,7 @@ describe('fixed TP: two investors, different targets — only A closes', () => {
   });
 
   it('the same price again does nothing more', async () => {
-    await tick('67000');
+    await tick('66900');
     await drain();
     expect(await exitsOf((await positionOf(USERS.investorA.email)).id)).toHaveLength(1);
     expect((await positionOf(USERS.investorB.email)).status).toBe('OPEN');
@@ -212,17 +225,21 @@ describe('stop loss on each position\'s saved trigger basis (Long)', () => {
 describe('Short: TP below entry, stop above entry', () => {
   beforeAll(() => openBoth({ side: 'SHORT' }));
 
-  it('a price at A\'s short target closes A at the ask; B (6 %) stays open', async () => {
+  it('a price at A\'s short target arms it; a later rise back above it closes A at the ask; B (6 %) stays open', async () => {
     const pa0 = await positionOf(USERS.investorA.email);
     expect(pa0.side).toBe('SHORT');
     expect(new Decimal(pa0.takeProfitPrice!).toFixed()).toBe('63049.6'); // 64999.5 × 0.97, toward entry
     await tick('63000');
+    const armed = await drain();
+    expect(armed.find((r) => r.tick)?.tick).toMatchObject({ takeProfitsRequested: 0, targetsArmed: 1 });
+    expect((await positionOf(USERS.investorA.email)).status).toBe('OPEN');
+    await tick('63100'); // back above 63049.6
     await drain();
     const pa = await positionOf(USERS.investorA.email);
     expect(pa).toMatchObject({ status: 'CLOSED', closeReason: 'TAKE_PROFIT' });
     const [x] = await exitsOf(pa.id);
-    expect(new Decimal(x!.price).toFixed()).toBe('63000.5'); // closing a Short buys at the ask
-    expect(new Decimal(x!.realizedPnl).toFixed()).toBe(new Decimal('64999.5').minus('63000.5').times(pa.initialContracts).times(M).toFixed());
+    expect(new Decimal(x!.price).toFixed()).toBe('63100.5'); // closing a Short buys at the ask
+    expect(new Decimal(x!.realizedPnl).toFixed()).toBe(new Decimal('64999.5').minus('63100.5').times(pa.initialContracts).times(M).toFixed());
     expect((await positionOf(USERS.investorB.email)).status).toBe('OPEN');
   });
 
@@ -339,7 +356,9 @@ describe('races and restart', () => {
   it('TP close and a stop race: the venue stop wins, the close is refused reduce-only, nothing flips', async () => {
     await openBoth();
     const pa = await positionOf(USERS.investorA.email);
-    await tick('67000'); // TP for A requested (not yet sent)
+    await tick('67000'); // arms A's target
+    await drain();
+    await tick('66900'); // pullback: TP for A requested (not yet sent)
     const t1 = await work(); // only the tick job runs
     expect(t1.tick).toMatchObject({ takeProfitsRequested: 1 });
     // Before the close job runs, the venue triggers A's stop (platform has not recorded it yet).

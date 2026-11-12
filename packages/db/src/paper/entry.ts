@@ -3,12 +3,14 @@ import {
   Decimal,
   emaAtSignalBar,
   takeProfitPrice,
+  planExits,
   planTargets,
   trailingActivationPrice,
   ENTRY_REASON_TEXT,
+  entryGate,
   evaluatePaperEntry,
-  isEntryDay,
-  localWeekday,
+  localTime,
+  type TradingWindow,
   PAPER_POLICY,
   type EntryReason,
   type Weekday
@@ -50,8 +52,18 @@ export interface EntryOutcome {
 
 const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
 
+/**
+ * Exit rules saved with every new intent and position. V2: explicit Take Profit / Trailing Take
+ * Profit allocation and arm-then-pullback targets. Snapshots without it keep the earlier rules.
+ */
+export const EXIT_RULES_VERSION = 'V2';
+
+export const windowOf = (b: Pick<BlockRow, 'tradingWindowStart' | 'tradingWindowEnd'>): TradingWindow | null =>
+  b.tradingWindowStart && b.tradingWindowEnd ? { start: b.tradingWindowStart, end: b.tradingWindowEnd } : null;
+
 function snapshotOf(block: BlockRow, version: VersionRow) {
   return {
+    exitRules: EXIT_RULES_VERSION,
     block: {
       id: block.id,
       revision: block.revision,
@@ -63,6 +75,7 @@ function snapshotOf(block: BlockRow, version: VersionRow) {
       takeProfit: block.takeProfit,
       trailing: block.trailing,
       weekdays: block.weekdays,
+      tradingWindow: windowOf(block),
       timezone: block.timezone,
       risk: block.risk
     },
@@ -202,16 +215,20 @@ export interface SubmitSummary {
 
 type IntentRow = typeof orderIntents.$inferSelect;
 type ExitPlanTp = { mode: 'FIXED' | 'SPLIT' | 'OFF'; levels: { id: string; movePct: string; closePct: string }[] };
-type ExitPlanTrailing = { enabled: boolean; activationPct: string | null; distancePct: string | null; basis: string } | undefined;
+type ExitPlanTrailing = { enabled: boolean; activationPct: string | null; distancePct: string | null; closePct?: string | null; basis: string } | undefined;
 
 /**
  * Trailing Take Profit columns for a new position. It always waits for the activation move,
  * measured from the confirmed average entry on the saved basis; it is never active from entry.
  * A plan without an activation value (only possible in a legacy snapshot) gets no trailing exit.
+ * `plannedContracts`: its allocated quantity (null = legacy: what no target reserves); an
+ * allocation of 0 contracts gives no trailing exit.
  */
-export function trailingAtEntry(side: 'LONG' | 'SHORT', entry: string, tr: NonNullable<ExitPlanTrailing>, tick: string, now: Date) {
+export function trailingAtEntry(side: 'LONG' | 'SHORT', entry: string, tr: NonNullable<ExitPlanTrailing>, tick: string, now: Date, plannedContracts: string | null = null) {
   if (!tr.activationPct || !tr.distancePct) return {};
+  if (plannedContracts !== null && new Decimal(plannedContracts).lte(0)) return {};
   return {
+    trailingPlannedContracts: plannedContracts,
     trailingKind: 'TAKE_PROFIT' as const,
     trailingStatus: 'WAITING' as const,
     trailingBasis: tr.basis,
@@ -254,13 +271,20 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
     const qty = new Decimal(f.contracts).times(inst!.contractMultiplier);
     const margin = qty.times(f.price).div(cur!.leverage).toDecimalPlaces(8, Decimal.ROUND_UP);
     const sizing = cur!.sizing as { liquidationEstimate: string };
-    const snap = cur!.settingsSnapshot as { block: { takeProfit: ExitPlanTp; trailing: ExitPlanTrailing }; strategyVersion: { id: string } };
+    const snap = cur!.settingsSnapshot as { exitRules?: string; block: { takeProfit: ExitPlanTp; trailing: ExitPlanTrailing }; strategyVersion: { id: string } };
     const side = cur!.side as 'LONG' | 'SHORT';
-    const tpLevel = snap.block.takeProfit.mode === 'FIXED' ? snap.block.takeProfit.levels[0] : undefined;
+    const tr = snap.block.trailing;
+    const spec = { priceTick: inst!.priceTick, qtyStep: inst!.qtyStep };
+    // Exit allocation from the confirmed opening quantity (V2), or the rules an older intent was
+    // saved with: targets close their share of the whole position and trailing manages the rest.
+    const v2 = snap.exitRules === EXIT_RULES_VERSION;
+    const plan = v2
+      ? planExits(side, f.price, f.contracts, { takeProfit: snap.block.takeProfit, trailing: { enabled: Boolean(tr?.enabled), closePct: tr?.closePct ?? null } }, spec)
+      : { targets: planTargets(side, f.price, f.contracts, snap.block.takeProfit, spec), trailingContracts: null };
+    const tpLevel = snap.block.takeProfit.mode === 'FIXED' && plan.targets.length ? snap.block.takeProfit.levels[0] : undefined;
     const tpPrice = tpLevel ? takeProfitPrice(side, f.price, tpLevel.movePct, inst!.priceTick) : null;
     // EXT-04: trailing state from the saved plan, persisted on the position.
-    const tr = snap.block.trailing;
-    const trailing = tr?.enabled && tr.distancePct ? trailingAtEntry(side, f.price, tr, inst!.priceTick, now) : {};
+    const trailing = tr?.enabled && tr.distancePct ? trailingAtEntry(side, f.price, tr, inst!.priceTick, now, plan.trailingContracts) : {};
 
     // EXE-03: verify the venue's resting stop against the filled exposure. Never trust the ack alone.
     const prot = await venue.inspectProtection(sim.stop.orderId, cur!.instrumentId);
@@ -309,9 +333,10 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
       .returning({ id: positions.id });
     if (pos) {
       // EXT-03: targets from the saved plan and the confirmed fill (base quantity = filled contracts).
-      const targets = planTargets(side, f.price, f.contracts, snap.block.takeProfit, { priceTick: inst!.priceTick, qtyStep: inst!.qtyStep });
-      if (targets.length) {
-        await tx.insert(positionTargets).values(targets.map((t) => ({ ownerId: cur!.ownerId, positionId: pos.id, ...t, triggerBasis: sim.stop.basis })));
+      if (plan.targets.length) {
+        await tx
+          .insert(positionTargets)
+          .values(plan.targets.map((t) => ({ ownerId: cur!.ownerId, positionId: pos.id, ...t, triggerBasis: sim.stop.basis, triggerRule: v2 ? ('ARM_PULLBACK' as const) : ('TOUCH' as const) })));
       }
     }
 
@@ -345,12 +370,13 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
     }
     if (intent.state === 'SUBMITTING') return { kind: 'reconcile' as const, intent };
 
-    // CFG-04: the local weekday is checked again at submission.
-    const snap = intent.settingsSnapshot as { block: { weekdays: Weekday[]; timezone: string } };
-    if (!isEntryDay(snap.block.weekdays, now, snap.block.timezone)) {
-      await release(tx, intent, 'CANCELLED', `DAY_DISABLED at submission (${localWeekday(now, snap.block.timezone)})`, now);
+    // CFG-04: the trading window and the local weekday are checked again at submission.
+    const snap = intent.settingsSnapshot as { block: { weekdays: Weekday[]; timezone: string; tradingWindow?: TradingWindow | null } };
+    const gate = entryGate(snap.block.weekdays, snap.block.tradingWindow, now, snap.block.timezone);
+    if (!gate.ok) {
+      await release(tx, intent, 'CANCELLED', `${gate.reason} at submission (${localTime(now, snap.block.timezone)} ${snap.block.timezone})`, now);
       await completeJob(tx, job);
-      return { kind: 'stopped' as const, intent, reason: 'DAY_DISABLED' };
+      return { kind: 'stopped' as const, intent, reason: gate.reason };
     }
     // MKT-02 and slippage policy at submission.
     const q = await latestQuote(tx, intent.instrumentId, now);
@@ -368,7 +394,7 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
   });
 
   if (step.kind === 'done') return { intentId, state: step.intent.state, reconciled: false };
-  if (step.kind === 'stopped') return { intentId, state: step.intent.state === 'INTENT' ? (step.reason === 'DAY_DISABLED' ? 'CANCELLED' : 'EXPIRED') : step.intent.state, reason: step.reason, reconciled: false };
+  if (step.kind === 'stopped') return { intentId, state: step.intent.state === 'INTENT' ? (step.reason === 'DAY_DISABLED' || step.reason === 'OUTSIDE_TRADING_WINDOW' ? 'CANCELLED' : 'EXPIRED') : step.intent.state, reason: step.reason, reconciled: false };
 
   const intent = step.intent;
   const venue = resolveVenue(db, intent.mode, hooks.venue);

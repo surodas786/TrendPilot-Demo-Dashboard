@@ -35,8 +35,8 @@ beforeAll(async () => {
       leverage: 3,
       direction: 'LONG_ONLY',
       stop: { type: 'PERCENT', value: '3', basis: 'MARK' },
-      takeProfit: { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '2', closePct: '50' }, { id: 'tp2', movePct: '5', closePct: '30' }] },
-      trailing: { enabled: true, activationPct: '1', distancePct: '1.2', basis: 'MARK' },
+      takeProfit: { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '2', closePct: '62.5' }, { id: 'tp2', movePct: '5', closePct: '37.5' }] },
+      trailing: { enabled: true, activationPct: '1', distancePct: '1.2', closePct: '20', basis: 'MARK' },
       weekdays: ['SAT', 'SUN']
     })
   });
@@ -69,7 +69,7 @@ describe('same token, different settings', () => {
       direction: 'LONG_ONLY',
       weekdays: ['SUN', 'SAT'],
       takeProfit: { mode: 'SPLIT' },
-      trailing: { enabled: true, activationPct: '1', distancePct: '1.2', basis: 'MARK' },
+      trailing: { enabled: true, activationPct: '1', distancePct: '1.2', closePct: '20', basis: 'MARK' },
       trailingConversionRequired: false
     });
   });

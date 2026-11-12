@@ -3,7 +3,7 @@ import { Decimal, DECISION_REASON_TEXT, evaluateBlockForSignal, REVERSAL_REASON_
 import type { Db } from '../client';
 import { completeJob, type JobRow } from '../jobs';
 import { orderBlocks, orderIntents, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
-import { ENTRY_STEP, evaluateAndReserveEntry } from './entry';
+import { ENTRY_STEP, evaluateAndReserveEntry, windowOf } from './entry';
 import { resolveVenue } from '../venue/select';
 
 /**
@@ -96,7 +96,7 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date): Promi
       barCloseAt: event!.barCloseAt,
       evaluatedAt: now,
       user: { status: c!.user.status },
-      block: { status: c!.block.status, mode: c!.block.mode, direction: c!.block.direction, weekdays: c!.block.weekdays as Weekday[], timezone: c!.block.timezone },
+      block: { status: c!.block.status, mode: c!.block.mode, direction: c!.block.direction, weekdays: c!.block.weekdays as Weekday[], timezone: c!.block.timezone, tradingWindow: windowOf(c!.block) },
       version: { timeframe: c!.version.timeframe, permittedDirections: c!.version.permittedDirections, signalMaxAgeSeconds: c!.version.signalMaxAgeSeconds }
     });
     if (screen.status !== 'READY_FOR_EVALUATION' || !screen.side) {

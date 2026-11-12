@@ -34,6 +34,7 @@ function toDto(r: Row, inst: { symbol: string; exchange: string }): OrderBlockDt
     trailing: r.trailing as OrderBlockDto['trailing'],
     weekdays: r.weekdays as Weekday[],
     timezone: r.timezone,
+    tradingWindow: r.tradingWindowStart && r.tradingWindowEnd ? { start: r.tradingWindowStart, end: r.tradingWindowEnd } : null,
     allowAdds: r.allowAdds,
     maxAdds: r.maxAdds,
     risk: r.risk as OrderBlockDto['risk'],
@@ -60,6 +61,8 @@ const settingsColumns = (s: OrderBlockSettings) => ({
   takeProfit: s.takeProfit,
   trailing: s.trailing,
   weekdays: s.weekdays,
+  // Omitted (an older client) keeps the stored window on update; create defaults to All day.
+  ...(s.tradingWindow !== undefined ? { tradingWindowStart: s.tradingWindow?.start ?? null, tradingWindowEnd: s.tradingWindow?.end ?? null } : {}),
   allowAdds: s.allowAdds,
   maxAdds: s.maxAdds,
   risk: s.risk

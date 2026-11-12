@@ -20,7 +20,8 @@ import { ALL_DAYS, clock, cookies, D, deliver, drain, exitsOf, M15, n, openFromA
 
 const A = USERS.investorA.email;
 const ENTRY = '74788.4';
-const TTP = { enabled: true, activationPct: '0.3', distancePct: '0.1', basis: 'MARK' };
+/** Take profit is off in the example: Trailing Take Profit closes 100 % of the position. */
+const TTP = { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '100', basis: 'MARK' };
 const EXAMPLE = { stop: { type: 'PERCENT', value: '0.3', basis: 'MARK' }, takeProfit: { mode: 'OFF', levels: [] }, trailing: TTP };
 
 afterAll(async () => {
@@ -123,7 +124,7 @@ describe('Short example: entry 74788.4, stop 0.3 %, Trailing Take Profit 0.3 % /
     expect(await reconciled()).toBe(true);
     // My Trades records the exit reason.
     const detail = (await call(trade.GET, { path: '/x', cookie: cookies.a, params: { id } })).body;
-    expect(detail).toMatchObject({ closeReason: 'TRAILING_TAKE_PROFIT', trailing: { kind: 'TAKE_PROFIT', status: 'ACTIVE' } });
+    expect(detail).toMatchObject({ closeReason: 'TRAILING_TAKE_PROFIT', trailing: { kind: 'TAKE_PROFIT', status: 'DONE', plannedContracts: '133', filledContracts: '133' } });
     expect(detail.exits.map((e: { reason: string }) => e.reason)).toEqual(['TRAILING_TAKE_PROFIT']);
   });
 });
@@ -162,51 +163,58 @@ describe('Long equivalent: entry 74788.4, stop 0.3 %, Trailing Take Profit 0.3 %
   });
 });
 
-describe('split targets with Trailing Take Profit on the remainder never close the same quantity', () => {
-  // 133 contracts: target 1 closes 50 % (66), target 2 30 % (39); Trailing Take Profit manages 28.
-  const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '0.5', closePct: '50' }, { id: 'tp2', movePct: '1', closePct: '30' }] };
+describe('split targets and Trailing Take Profit each close only their own allocation', () => {
+  // 133 contracts. Trailing Take Profit: Position to close 20 % → 26. Take Profit manages the
+  // other 107: target 1 62.5 % of it (66), target 2 the rest (41).
+  const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '0.5', closePct: '62.5' }, { id: 'tp2', movePct: '1', closePct: '37.5' }] };
+  const TTP20 = { ...TTP, closePct: '20' };
 
   it('Holdings shows the quantity each exit manages', async () => {
-    await openFromAlert({ price: '74787.9', a: { ...EXAMPLE, takeProfit: SPLIT }, b: null });
+    await openFromAlert({ price: '74787.9', a: { ...EXAMPLE, takeProfit: SPLIT, trailing: TTP20 }, b: null });
     const p = (await openPositionOf(A))!;
     expect((await targetsOf(p.id)).map((t) => [t.levelId, n(t.triggerPrice), n(t.plannedContracts)])).toEqual([
       ['tp1', '75162.3', '66'],
-      ['tp2', '75536.2', '39']
+      ['tp2', '75536.2', '41']
     ]);
-    expect((await holdingOf()).trailing).toMatchObject({ status: 'WAITING', contracts: '28' });
+    expect((await holdingOf()).trailing).toMatchObject({ status: 'WAITING', contracts: '26', plannedContracts: '26', filledContracts: '0' });
   });
 
-  it('target 1 fills its 66; then a pullback closes only the trailing 28 — target 2 keeps its 39', async () => {
-    const [t1] = await ticks(['75170']); // arms Trailing Take Profit (high 75170) and reaches target 1
-    expect(t1).toMatchObject({ trailingActivated: 1, takeProfitsRequested: 1 });
-    let p = (await openPositionOf(A))!;
-    expect([n(p.contracts), n(p.trailingStopPrice)]).toEqual(['67', '75094.8']);
-    expect((await holdingOf()).trailing).toMatchObject({ status: 'ACTIVE', contracts: '28' });
+  it('the first touch of target 1 only arms it (Trailing Take Profit activates on the same move); nothing closes', async () => {
+    const [t1] = await ticks(['75170']);
+    expect(t1).toMatchObject({ trailingActivated: 1, targetsArmed: 1, takeProfitsRequested: 0 });
+    const p = (await openPositionOf(A))!;
+    expect([n(p.contracts), n(p.trailingStopPrice)]).toEqual(['133', '75094.8']);
+    expect((await holdingOf()).trailing).toMatchObject({ status: 'ACTIVE', contracts: '26' });
+  });
 
+  it('a pullback closes the trailing 26 and target 1\'s 66 — each only its own; target 2 keeps its 41', async () => {
     const [pull] = await ticks(['75094.8']);
-    expect(pull).toMatchObject({ trailingTakeProfitsRequested: 1, takeProfitsRequested: 0 });
-    p = (await openPositionOf(A))!;
-    expect(n(p.contracts)).toBe('39');
-    expect(n((await stopOf(p)).contracts)).toBe('39'); // the stop still covers everything left
-    const [, tp2] = await targetsOf(p.id);
-    expect([tp2!.status, n(tp2!.filledContracts)]).toEqual(['PENDING', '0']);
-
-    // Its quantity is closed: the next price marks it Done; it never touches target 2's 39.
-    await ticks(['75000', '75094.8']);
-    p = (await openPositionOf(A))!;
-    expect([p.trailingStatus, n(p.contracts)]).toEqual(['DONE', '39']);
-    expect((await holdingOf()).trailing).toMatchObject({ status: 'DONE' });
+    expect(pull).toMatchObject({ trailingTakeProfitsRequested: 1 });
+    const p = (await openPositionOf(A))!;
+    expect(n(p.contracts)).toBe('41');
+    expect(n((await stopOf(p)).contracts)).toBe('41'); // the stop still covers everything left
+    expect([p.trailingStatus, n(p.trailingFilledContracts)]).toEqual(['DONE', '26']);
+    const [tp1, tp2] = await targetsOf(p.id);
+    expect([tp1!.status, n(tp1!.filledContracts)]).toEqual(['DONE', '66']);
+    expect([tp2!.status, n(tp2!.filledContracts), tp2!.armedAt]).toEqual(['PENDING', '0', null]);
+    expect((await exitsOf(p.id)).map((x) => [x.reason, n(x.contracts)])).toEqual([
+      ['TRAILING_TAKE_PROFIT', '26'],
+      ['TAKE_PROFIT', '66']
+    ]);
   });
 
-  it('target 2 closes its own 39; every contract was closed exactly once', async () => {
+  it('target 2 arms at its price and closes its own 41 on the pullback; every contract was closed exactly once', async () => {
     const id = (await openPositionOf(A))!.id;
-    await ticks(['75536.2']);
+    const [arm] = await ticks(['75536.2']);
+    expect(arm).toMatchObject({ targetsArmed: 1, takeProfitsRequested: 0 });
+    expect(n((await openPositionOf(A))!.contracts)).toBe('41');
+    await ticks(['75500']);
     const [p] = await positionsOf(A);
     expect(p).toMatchObject({ id, status: 'CLOSED', closeReason: 'TAKE_PROFIT' });
     expect((await exitsOf(id)).map((x) => [x.reason, n(x.contracts)])).toEqual([
+      ['TRAILING_TAKE_PROFIT', '26'],
       ['TAKE_PROFIT', '66'],
-      ['TRAILING_TAKE_PROFIT', '28'],
-      ['TAKE_PROFIT', '39']
+      ['TAKE_PROFIT', '41']
     ]);
     expect(await reconciled()).toBe(true);
   });
@@ -264,34 +272,35 @@ describe('an order block saved with the old trailing stop', () => {
     expect((await get()).trailingConversionRequired).toBe(true);
   });
 
-  it('saving Trailing Take Profit with an explicit activation converts it (and the quantity rules apply)', async () => {
+  it('saving Trailing Take Profit with an explicit activation converts it (and an explicit Position to close is required)', async () => {
     let b = await get();
-    // The Fixed target still closes 100 %: nothing would be left for Trailing Take Profit.
-    const clash = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: blockId }, ifMatch: b.revision, body: { trailing: TTP } });
+    // The allocation is never assumed: without Position to close (%) the save is refused.
+    const { closePct: _omit, ...noAllocation } = TTP;
+    const clash = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: blockId }, ifMatch: b.revision, body: { trailing: noAllocation } });
     expect(clash.status).toBe(400);
-    expect(clash.body.issues.map((i: { path: string }) => i.path)).toContain('takeProfit.levels.0.closePct');
+    expect(clash.body.issues.map((i: { path: string }) => i.path)).toContain('trailing.closePct');
     const ok = await call(block.PATCH, {
       method: 'PATCH',
       path: '/x',
       cookie: cookies.a,
       params: { id: blockId },
       ifMatch: b.revision,
-      body: { takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '60' }] }, trailing: TTP }
+      body: { takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] }, trailing: { ...TTP, closePct: '40' } }
     });
     expect(ok.status).toBe(200);
     b = await get();
-    expect(b).toMatchObject({ trailingConversionRequired: false, trailing: TTP });
+    expect(b).toMatchObject({ trailingConversionRequired: false, trailing: { ...TTP, closePct: '40' } });
     const [audit] = await direct.db.select().from(schema.auditEvents).where(and(eq(schema.auditEvents.action, 'ORDER_BLOCK_UPDATE'), eq(schema.auditEvents.targetId, blockId)));
     expect(audit!.metadata).toMatchObject({ trailingConvertedToTakeProfit: true });
   });
 
-  it('the next alert opens a position with Trailing Take Profit on the 40 % the fixed target leaves', async () => {
+  it('the next alert opens a position with Trailing Take Profit on 40 % and the fixed target on the other 60 %', async () => {
     await nextAlert();
     expect(await entryDecision()).toMatchObject({ status: 'ENTRY_APPROVED' });
     const p = (await openPositionOf(A))!;
-    expect([p.trailingKind, p.trailingStatus]).toEqual(['TAKE_PROFIT', 'WAITING']);
+    expect([p.trailingKind, p.trailingStatus, n(p.trailingPlannedContracts)]).toEqual(['TAKE_PROFIT', 'WAITING', '61']); // floor(153 × 40 %)
     const [t] = await targetsOf(p.id);
-    expect([n(t!.closePct), n(t!.plannedContracts), n(p.contracts)]).toEqual(['60', '91', '153']);
-    expect((await holdingOf()).trailing).toMatchObject({ contracts: '62' });
+    expect([n(t!.closePct), n(t!.plannedContracts), n(p.contracts)]).toEqual(['100', '92', '153']); // the exact rest
+    expect((await holdingOf()).trailing).toMatchObject({ contracts: '61' });
   });
 });

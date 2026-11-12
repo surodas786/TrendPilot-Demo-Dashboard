@@ -134,6 +134,13 @@
       "when": 1794289326562,
       "tag": "0018_m8_trailing_take_profit",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794469206641,
+      "tag": "0019_m9_window_alloc_arming",
+      "breakpoints": true
     }
   ]
 }

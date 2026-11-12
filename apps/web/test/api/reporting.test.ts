@@ -97,13 +97,16 @@ describe('holdings and unrealized P&L (mark price)', () => {
 
 describe('partial and full exits, duplicates, funding, and the reporting-day boundary', () => {
   it('a partial take-profit counts its own realized P&L and fee; a duplicate tick books nothing', async () => {
-    await tickAt('2026-11-08T09:40:00Z', '65700'); // A tp1 (+1 %) reached; B has no target
+    await tickAt('2026-11-08T09:40:00Z', '65700'); // A tp1 (+1 %) reached: armed only; B has no target
+    await drain();
+    expect(await direct.db.select().from(schema.positionExits).where(eq(schema.positionExits.positionId, posA))).toHaveLength(0);
+    await tickAt('2026-11-08T09:41:00Z', '65600'); // pullback through tp1 closes its share
     await drain();
     const exitsA = await direct.db.select().from(schema.positionExits).where(eq(schema.positionExits.positionId, posA));
     expect(exitsA).toHaveLength(1);
     expect(Number(exitsA[0]!.remainingContracts)).toBeGreaterThan(0);
     // The same tick again (same time and prices) is deduplicated.
-    await recordMarketTick(direct.db, { instrumentId: BTC, asOf: clock.now, bid: '65699.5', ask: '65700.5', mark: '65700', last: '65700' });
+    await recordMarketTick(direct.db, { instrumentId: BTC, asOf: clock.now, bid: '65599.5', ask: '65600.5', mark: '65600', last: '65600' });
     await drain();
     expect(await direct.db.select().from(schema.positionExits).where(eq(schema.positionExits.positionId, posA))).toHaveLength(1);
 

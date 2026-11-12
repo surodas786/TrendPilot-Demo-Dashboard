@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { Decimal } from './decimal';
 import { directionPermitted, type BlockStatus, type Direction, type Mode } from './orderBlock';
-import { isEntryDay, type Weekday } from './weekdays';
+import { entryGate, OUTSIDE_WINDOW_TEXT, type TradingWindow } from './tradingWindow';
+import type { Weekday } from './weekdays';
 
 /**
  * SRS §6 TradingView intake (SIG-01…SIG-05) and the per-investor routing decision of the
@@ -126,6 +127,7 @@ export type DecisionReason =
   | 'STRATEGY_MISMATCH'
   | 'DIRECTION_DISABLED'
   | 'DAY_DISABLED'
+  | 'OUTSIDE_TRADING_WINDOW'
   | 'SIGNAL_STALE'
   | 'NO_MANAGED_POSITION';
 
@@ -138,6 +140,7 @@ export const DECISION_REASON_TEXT: Record<DecisionReason, string> = {
   STRATEGY_MISMATCH: 'The signal interval does not match the strategy version this block is pinned to.',
   DIRECTION_DISABLED: 'This direction is not enabled for the block or its strategy.',
   DAY_DISABLED: 'New entries are not allowed on this weekday.',
+  OUTSIDE_TRADING_WINDOW: `${OUTSIDE_WINDOW_TEXT}.`,
   SIGNAL_STALE: 'The signal was too old by the time it was evaluated.',
   NO_MANAGED_POSITION: 'Close signals only act on a managed position; there is none.'
 };
@@ -148,7 +151,7 @@ export interface BlockEvaluationInput {
   barCloseAt: Date;
   evaluatedAt: Date;
   user: { status: 'ACTIVE' | 'SUSPENDED' | 'INVITED' };
-  block: { status: BlockStatus; mode: Mode; direction: Direction; weekdays: Weekday[]; timezone: string };
+  block: { status: BlockStatus; mode: Mode; direction: Direction; weekdays: Weekday[]; timezone: string; tradingWindow?: TradingWindow | null };
   version: { timeframe: '5m' | '15m'; permittedDirections: Direction; signalMaxAgeSeconds: number };
 }
 
@@ -182,8 +185,10 @@ export function evaluateBlockForSignal(i: BlockEvaluationInput): BlockEvaluation
   } else {
     const wanted: Direction = side === 'LONG' ? 'LONG_ONLY' : 'SHORT_ONLY';
     if (!directionPermitted(wanted, i.block.direction) || !directionPermitted(wanted, i.version.permittedDirections)) failed.push('DIRECTION_DISABLED');
-    // CFG-04: local weekday at evaluation; rechecked again at submission in a later slice.
-    if (!isEntryDay(i.block.weekdays, i.evaluatedAt, i.block.timezone)) failed.push('DAY_DISABLED');
+    // CFG-04: trading window and the weekday its session started on, at evaluation; both are
+    // checked again at submission.
+    const gate = entryGate(i.block.weekdays, i.block.tradingWindow, i.evaluatedAt, i.block.timezone);
+    if (!gate.ok) failed.push(gate.reason);
     // Recheck freshness after any queue delay against the pinned version's expiry.
     if (ageSeconds > i.version.signalMaxAgeSeconds) failed.push('SIGNAL_STALE');
   }

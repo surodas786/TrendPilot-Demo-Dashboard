@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { BellRingIcon } from 'lucide-react';
 import { getDb, listMyOutcomes, orderBlocksFor } from '@trendpilot/db';
+import { OUTSIDE_WINDOW_TEXT } from '@trendpilot/domain';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { StatusPill } from '@/components/ui/StatusPill';
@@ -9,6 +10,12 @@ import { requirePageRole } from '@/server/pageSession';
 export const dynamic = 'force-dynamic';
 
 const ACTION_LABEL: Record<string, string> = { BULLISH_FLIP: 'Bullish flip', BEARISH_FLIP: 'Bearish flip', CLOSE_LONG: 'Close long', CLOSE_SHORT: 'Close short' };
+
+/** Reason codes with an investor-facing label; others show their code. */
+const REASON_LABEL: Record<string, string> = { OUTSIDE_TRADING_WINDOW: OUTSIDE_WINDOW_TEXT, DAY_DISABLED: 'Day not selected' };
+const reasonLabel = (code: string | null | undefined) => (code ? (REASON_LABEL[code] ?? code) : '');
+/** An entry cancelled at submission records "<CODE> at submission (…)" on the order. */
+const submissionBlock = (stateReason: string | null | undefined) => (stateReason ? (/^(OUTSIDE_TRADING_WINDOW|DAY_DISABLED) at submission/.exec(stateReason)?.[1] ?? null) : null);
 
 /** The signed-in investor's own signal outcomes (SIG-05: one private decision per investor). */
 export default async function SignalsPage() {
@@ -68,7 +75,7 @@ export default async function SignalsPage() {
                                   Reversed · Paper {o.side === 'LONG' ? 'Long' : 'Short'} {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
                                 </StatusPill>
                               ) : (
-                                <StatusPill tone="neutral">Stayed flat · {o.entry.reason}</StatusPill>
+                                <StatusPill tone="neutral">Stayed flat · {reasonLabel(o.entry.reason)}</StatusPill>
                               )}
                             </span>
                           )}
@@ -77,15 +84,17 @@ export default async function SignalsPage() {
                         <StatusPill tone="neutral">Position kept open · {o.exit.reason}</StatusPill>
                       )
                     ) : o.status !== 'READY_FOR_EVALUATION' ? (
-                      <StatusPill tone="neutral">Skipped · {o.reason}</StatusPill>
+                      <StatusPill tone="neutral">Skipped · {reasonLabel(o.reason)}</StatusPill>
                     ) : !o.entry ? (
                       <StatusPill tone="accent">Ready for evaluation{o.side ? ` · ${o.side === 'LONG' ? 'Long' : 'Short'}` : ''}</StatusPill>
+                    ) : o.entry.status === 'ENTRY_APPROVED' && o.entry.orderState === 'CANCELLED' && submissionBlock(o.entry.orderStateReason) ? (
+                      <StatusPill tone="neutral">Entry cancelled · {reasonLabel(submissionBlock(o.entry.orderStateReason))}</StatusPill>
                     ) : o.entry.status === 'ENTRY_APPROVED' ? (
                       <StatusPill tone="gain">
                         Paper {o.side === 'LONG' ? 'Long' : 'Short'} · {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
                       </StatusPill>
                     ) : (
-                      <StatusPill tone="neutral">Entry skipped · {o.entry.reason}</StatusPill>
+                      <StatusPill tone="neutral">Entry skipped · {reasonLabel(o.entry.reason)}</StatusPill>
                     )}
                   </td>
                   <td className="px-4 py-2.5 text-xs text-muted">
@@ -108,7 +117,11 @@ export default async function SignalsPage() {
                         View position and stop
                       </Link>
                     ) : (
-                      (o.entry?.reasonText ?? o.entry?.orderStateReason ?? o.reasonText ?? 'Passed pause, direction, weekday and freshness checks.')
+                      (o.entry?.reasonText ??
+                      (submissionBlock(o.entry?.orderStateReason) === 'OUTSIDE_TRADING_WINDOW' ? `${OUTSIDE_WINDOW_TEXT} when the order was submitted (${o.entry?.orderStateReason?.replace(/^.*\(|\)$/g, '')}).` : null) ??
+                      o.entry?.orderStateReason ??
+                      o.reasonText ??
+                      'Passed pause, direction, weekday, trading window and freshness checks.')
                     )}
                   </td>
                 </tr>

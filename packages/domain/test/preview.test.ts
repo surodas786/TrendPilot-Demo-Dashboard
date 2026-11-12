@@ -41,17 +41,22 @@ describe('previewOrder', () => {
     expect(long.trailing).toBeNull();
   });
 
-  it('shows which quantity each exit manages: the fixed target its share, Trailing Take Profit the rest', () => {
-    const p = previewOrder(settings({ takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '60' }] }, trailing: { enabled: true, activationPct: '1', distancePct: '0.5', basis: 'LAST' } }), BTC, quote);
+  it('shows which quantity each exit manages: Trailing Take Profit its Position to close (%), the fixed target the rest', () => {
+    const trailing = (closePct: string) => ({ enabled: true, activationPct: '1', distancePct: '0.5', closePct, basis: 'LAST' as const });
+    const FIXED = { mode: 'FIXED' as const, levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] };
+    const p = previewOrder(settings({ takeProfit: FIXED, trailing: trailing('40') }), BTC, quote);
     const long = p.sides.find((s) => s.side === 'LONG')!;
     const short = p.sides.find((s) => s.side === 'SHORT')!;
-    // 153 × 60 % = 91.8 → 91 contracts (rounded down to the step); the other 62 trail.
-    expect(long.takeProfits).toEqual([{ id: 'tp1', price: '66950', closePct: '60', contracts: '91' }]);
+    // 153 × 40 % = 61.2 → 61 trail (rounded down to the step); the fixed target gets the exact other 92.
+    expect(long.takeProfits).toEqual([{ id: 'tp1', price: '66950', closePct: '100', contracts: '92' }]);
     // Activation is never closer than configured: Long 65000 × 1.01 rounded up, Short 64990.5 × 0.99 rounded down.
-    expect(long.trailing).toEqual({ activationPrice: '65650', distancePct: '0.5', managesPct: '40', contracts: '62' });
+    expect(long.trailing).toEqual({ activationPrice: '65650', distancePct: '0.5', managesPct: '40', contracts: '61' });
     expect(short.trailing).toMatchObject({ activationPrice: '64340.5', managesPct: '40' });
-    // Take profit off: Trailing Take Profit manages the whole position.
-    const all = previewOrder(settings({ takeProfit: { mode: 'OFF', levels: [] }, trailing: { enabled: true, activationPct: '1', distancePct: '0.5', basis: 'LAST' } }), BTC, quote).sides[0]!;
+    // 0 %: Take Profit manages everything; 100 %: Trailing Take Profit does and the target gets nothing.
+    const zero = previewOrder(settings({ takeProfit: FIXED, trailing: trailing('0') }), BTC, quote).sides[0]!;
+    expect([zero.takeProfits[0]?.contracts, zero.trailing?.contracts]).toEqual([zero.contracts, '0']);
+    const all = previewOrder(settings({ takeProfit: FIXED, trailing: trailing('100') }), BTC, quote).sides[0]!;
+    expect(all.takeProfits).toEqual([]);
     expect(all.trailing).toMatchObject({ managesPct: '100', contracts: all.contracts });
   });
 

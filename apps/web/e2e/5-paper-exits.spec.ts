@@ -14,7 +14,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.
 const DB_URL = process.env.DATABASE_URL_E2E ?? 'postgres://trendpilot:trendpilot@localhost:5433/trendpilot_e2e';
 const PASSWORD = process.env.SEED_PASSWORD ?? 'TrendPilot-dev-only-1';
 const CLOCK = '2026-11-08T09:30:03Z'; // the e2e web server's fixed signal clock (Sunday in Dhaka)
-const T1 = '2026-11-08T09:31:00Z'; // replayed TP price
+const T0 = '2026-11-08T09:30:50Z'; // replayed price that reaches A's target (arms it only)
+const T1 = '2026-11-08T09:31:00Z'; // replayed pullback through A's target (closes it)
 const T2 = '2026-11-08T09:31:05Z'; // worker clock for B's manual close
 const env = { ...process.env, DATABASE_URL: DB_URL, SIGNAL_TEST_CLOCK: CLOCK, LIVE_ORDER_TRANSPORT: 'disabled' };
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -53,8 +54,15 @@ test('prepare: exits profile (A TP 3 %, B TP 6 %), replay the alert, open both L
   expect(await count("SELECT count(*) AS n FROM positions WHERE status = 'OPEN' AND protection_status = 'PROTECTED'")).toBe(2);
 });
 
-test('a price reaching only A\'s target; the worker crashes after the simulated close fill', async () => {
-  expect(run(['run', 'market:tick', '--', '--price', '67000', '--at', T1])).toContain('FIXTURE tick BTCUSDT');
+test('a price reaching only A\'s target arms it; nothing closes on the first touch', async () => {
+  expect(run(['run', 'market:tick', '--', '--price', '67000', '--at', T0])).toContain('FIXTURE tick BTCUSDT');
+  expect(run(['run', 'worker:once'], { SIGNAL_TEST_CLOCK: T0 })).toMatch(/takeProfitsRequested=0 .*targetsArmed=1/);
+  expect(await count("SELECT count(*) AS n FROM sim_orders WHERE kind = 'MARKET_CLOSE'")).toBe(0);
+  expect(await count(`SELECT count(*) AS n FROM position_targets WHERE owner_id = ${A} AND armed_at IS NOT NULL AND trigger_rule = 'ARM_PULLBACK'`)).toBe(1);
+});
+
+test('the pullback through A\'s target closes it; the worker crashes after the simulated close fill', async () => {
+  expect(run(['run', 'market:tick', '--', '--price', '66900', '--at', T1])).toContain('FIXTURE tick BTCUSDT');
   let output = '';
   try {
     output = run(['run', 'worker:once'], { SIGNAL_TEST_CLOCK: T1, PAPER_SIM_CRASH_AFTER_FILL: '1' });
@@ -89,7 +97,7 @@ test('A sees the closed Paper trade with exit reason, remaining quantity and rea
   await expect(row).toHaveAttribute('data-reason', 'TAKE_PROFIT');
   await expect(row.getByTestId('exit-reason')).toHaveText('Take profit');
   await expect(row.getByTestId('remaining')).toHaveText('153 · 0');
-  await expect(row.getByTestId('realized-pnl')).toHaveText('+30.5847 USDT');
+  await expect(row.getByTestId('realized-pnl')).toHaveText('+29.0547 USDT'); // (66899.5 bid − 65000.5) × 153 × 0.0001
   await expect(row.getByText('Paper')).toBeVisible();
   await row.getByRole('link', { name: 'Details' }).click();
   await expect(page.getByTestId('exit')).toHaveCount(1);
