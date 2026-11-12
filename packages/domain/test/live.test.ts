@@ -1,11 +1,12 @@
 // Live entry gates (OPS-01/02): every opening order passes these; closes never do.
 import { describe, expect, it } from 'vitest';
-import { checkLiveEntry, keyFingerprint, validateAccountRef, validateLiveLimits, type LiveConnectionState, type LiveControlState, type LiveEntryRequest } from '../src';
+import { checkLiveEntry, keyFingerprint, liveAccountBlockers, LIVE_REFUSAL_TEXT, validateAccountRef, validateLiveLimits, type LiveConnectionState, type LiveControlState, type LiveEntryRequest } from '../src';
 
 const control: LiveControlState = { transportEnabled: true, platformEnabled: true, platformEntriesHalted: false };
 const conn: LiveConnectionState = {
   ownerId: 'u1',
   status: 'VERIFIED',
+  positionMode: 'ONE_WAY',
   approved: true,
   liveEnabled: true,
   entriesHalted: false,
@@ -26,6 +27,8 @@ describe('checkLiveEntry', () => {
     ['LIVE_CONNECTION_MISSING', { conn: null }],
     ['LIVE_OWNERSHIP_MISMATCH', { conn: { ownerId: 'u2' } }],
     ['LIVE_CONNECTION_NOT_VERIFIED', { conn: { status: 'FAILED' } }],
+    ['LIVE_POSITION_MODE', { conn: { positionMode: 'HEDGE' } }],
+    ['LIVE_POSITION_MODE', { conn: { positionMode: null } }],
     ['LIVE_ACCOUNT_NOT_APPROVED', { conn: { approved: false } }],
     ['LIVE_ACCOUNT_NOT_APPROVED', { conn: { limits: null } }],
     ['LIVE_NOT_ACTIVATED', { conn: { liveEnabled: false } }],
@@ -41,6 +44,21 @@ describe('checkLiveEntry', () => {
     const r = checkLiveEntry({ ...control, ...(o.control ?? {}) }, c, { ...req, ...(o.req ?? {}) });
     expect(r.ok).toBe(false);
     expect(!r.ok && r.reason).toBe(reason);
+  });
+});
+
+describe('One-way position mode', () => {
+  it('Hedge mode blocks new entries with the One-way reason; an unverified connection is reported as that first', () => {
+    expect(checkLiveEntry(control, { ...conn, positionMode: 'HEDGE' }, req)).toEqual({ ok: false, reason: 'LIVE_POSITION_MODE', detail: { positionMode: 'HEDGE' } });
+    expect(LIVE_REFUSAL_TEXT.LIVE_POSITION_MODE).toMatch(/^One-way position mode required/);
+    expect(liveAccountBlockers(control, { ...conn, status: 'FAILED', positionMode: 'HEDGE' }, 'u1', true).map((b) => b.reason)).toEqual(['LIVE_CONNECTION_NOT_VERIFIED']);
+  });
+
+  it('lists every blocker in gate order, so an operator halt does not hide the position mode', () => {
+    const halted = { ...control, platformEntriesHalted: true, platformHaltReason: 'verification' };
+    expect(liveAccountBlockers(halted, { ...conn, positionMode: 'HEDGE' }, 'u1', true).map((b) => b.reason)).toEqual(['LIVE_PLATFORM_HALTED', 'LIVE_POSITION_MODE']);
+    expect(checkLiveEntry(halted, { ...conn, positionMode: 'HEDGE' }, req)).toMatchObject({ ok: false, reason: 'LIVE_PLATFORM_HALTED' });
+    expect(liveAccountBlockers(control, conn, 'u1', true)).toEqual([]);
   });
 });
 

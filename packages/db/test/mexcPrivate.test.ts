@@ -178,11 +178,19 @@ describe('capability gate', () => {
 
   it('an unverified venue refuses to open or close without contacting MEXC', async () => {
     const requester = { request: vi.fn() };
-    const v = mexcVenue({ requester, symbolFor: async () => 'BTC_USDT', positionMode: 'HEDGE' });
+    const v = mexcVenue({ requester, symbolFor: async () => 'BTC_USDT', positionMode: 'ONE_WAY' });
     const open = await v.placeOpeningOrderWithStop({ paperAccountId: 'a', clientOrderId: 'tp-1', instrumentId: 'i', side: 'LONG', contracts: '10', contract: { multiplier: '0.0001', qtyStep: '1', minQty: '1', takerFeeRate: '0.0004' }, quote: { bid: '1', ask: '2' }, stop: { price: '1', basis: 'MARK' }, now: new Date(), leverage: 5 } as never);
     expect(open).toMatchObject({ status: 'REJECTED', reason: 'CAPABILITY_UNVERIFIED:OPEN_WITH_ATTACHED_STOP' });
     const close = await v.placeReduceOnlyClose({ paperAccountId: 'a', clientOrderId: 'tp-2', instrumentId: 'i', positionSide: 'LONG', contracts: '10', contract: { multiplier: '0.0001', qtyStep: '1', takerFeeRate: '0.0004' }, quote: { bid: '1', ask: '2', mark: '1', last: '1' }, now: new Date() });
     expect(close).toMatchObject({ status: 'REJECTED', reason: 'CAPABILITY_UNVERIFIED:REDUCE_ONLY_CLOSE' });
+    expect(requester.request).not.toHaveBeenCalled();
+  });
+
+  it('a Hedge-mode venue refuses to open before any call, whatever the capabilities', async () => {
+    const requester = { request: vi.fn() };
+    const v = mexcVenue({ requester, symbolFor: async () => 'BTC_USDT', positionMode: 'HEDGE', capabilities: { OPEN_WITH_ATTACHED_STOP: 'VERIFIED' } });
+    const r = await v.placeOpeningOrderWithStop({ clientOrderId: 'tp-4', instrumentId: 'i', side: 'LONG', contracts: '1', stop: { price: '1', basis: 'MARK' }, leverage: 5 } as never);
+    expect(r).toMatchObject({ status: 'REJECTED', reason: 'POSITION_MODE_ONE_WAY_REQUIRED' });
     expect(requester.request).not.toHaveBeenCalled();
   });
 

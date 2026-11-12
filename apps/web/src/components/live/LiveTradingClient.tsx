@@ -8,6 +8,7 @@ import { request } from '@/lib/api';
 import { Button } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { StatusPill } from '../ui/StatusPill';
+import { connectionStatusLabel, positionModeLabel } from './connectionLabels';
 import { TextField } from '../ui/TextField';
 
 export interface LiveStatus {
@@ -30,7 +31,7 @@ export interface LiveStatus {
     drift: unknown[];
   } | null;
   liveContracts: { id: string; symbol: string; exchangeSymbol: string }[];
-  entries: { allowed: boolean; reason: string | null; reasonText: string | null };
+  entries: { allowed: boolean; reason: string | null; reasonText: string | null; blockers: { reason: string; text: string }[] };
 }
 
 const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
@@ -93,7 +94,16 @@ export function LiveTradingClient({ initial }: { initial: LiveStatus }) {
           <Row label="Live order submission (deployment)">{yes(status.platform.transportEnabled, 'Enabled', 'Off')}</Row>
           <Row label="Platform Live switch">{yes(status.platform.liveEnabled, 'On', 'Off')}</Row>
           <Row label="Platform entries">{status.platform.entriesHalted ? <StatusPill tone="warn">Halted</StatusPill> : <StatusPill tone="neutral">Not halted</StatusPill>}</Row>
-          <Row label="Your MEXC connection">{c ? <StatusPill tone={c.status === 'VERIFIED' ? 'gain' : c.status === 'FAILED' ? 'loss' : 'neutral'}>{c.status === 'VERIFIED' ? 'Verified' : c.status === 'FAILED' ? 'Check failed' : 'Pending'}</StatusPill> : <StatusPill tone="neutral">Not connected</StatusPill>}</Row>
+          <Row label="Your MEXC connection">
+            <StatusPill tone={connectionStatusLabel(c?.status).tone}>{connectionStatusLabel(c?.status).text}</StatusPill>
+          </Row>
+          {c && (
+            <Row label="Position mode">
+              <span data-testid="live-position-mode">
+                <StatusPill tone={positionModeLabel(c.positionMode).tone}>{positionModeLabel(c.positionMode).text}</StatusPill>
+              </span>
+            </Row>
+          )}
           <Row label="Approved by administrator">{yes(!!c?.approved, 'Approved', 'Not yet')}</Row>
           <Row label="Your Live activation">{yes(!!c?.liveEnabled, 'On', 'Off')}</Row>
           <Row label="Your Live entries">{c?.entriesHalted ? <StatusPill tone="warn">Halted</StatusPill> : <StatusPill tone="neutral">Not halted</StatusPill>}</Row>
@@ -101,7 +111,20 @@ export function LiveTradingClient({ initial }: { initial: LiveStatus }) {
         </div>
         <p className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${status.entries.allowed ? 'bg-gain/10 text-gain' : 'bg-inset text-muted'}`} data-testid="live-entries">
           <CircleAlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-          {status.entries.allowed ? 'New Live entries are allowed on the contracts above, within your limits.' : `New Live entries are not possible now: ${status.entries.reasonText}`}
+          {status.entries.allowed ? (
+            'New Live entries are allowed on the contracts above, within your limits.'
+          ) : (
+            <span>
+              New Live entries are not possible now:
+              <ul className="mt-1 list-disc space-y-0.5 pl-4" data-testid="live-blockers">
+                {status.entries.blockers.map((b) => (
+                  <li key={b.reason} data-reason={b.reason}>
+                    {b.text}
+                  </li>
+                ))}
+              </ul>
+            </span>
+          )}
         </p>
         {c?.haltReason && c.entriesHalted && <p className="mt-2 text-xs text-warn">Halt reason: {c.haltReason}. An administrator resumes entries after review.</p>}
         <p className="mt-3 text-xs text-subtle">Turning Live off or halting stops new Live entries only. Your stop losses, take profit, trailing take profit, close-on-signal and manual closes keep working on open Live positions.</p>

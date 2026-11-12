@@ -11,8 +11,11 @@ import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, n
  * Safety rules:
  *  - An order is never sent unless its capability is verified on a live pilot (capabilities.ts).
  *  - An opening order always carries its stop (stopLossPrice + lossTrend) in the same request.
+ *  - Opening orders require One-way position mode: checked from the verified connection and read
+ *    again from MEXC right before sending (MEXC documents reduceOnly for One-way mode only).
  *  - Closes are capped at the venue position on that side and use the close sides (4 / 2), plus
- *    reduceOnly in one-way mode, so they cannot open exposure in the opposite direction.
+ *    reduceOnly in one-way mode, so they cannot open exposure in the opposite direction. Closes
+ *    are never refused for the position mode, so an existing Hedge position can still be closed.
  *  - After an uncertain submission (timeout, network error, 5xx) the adapter only looks the order
  *    up by client order ID; it never resends. Absence must be confirmed after a grace period
  *    before the execution flow may resubmit (reconcileGraceMs).
@@ -32,6 +35,8 @@ export interface MexcVenueOptions {
 }
 
 const MISSING_STOP = 'mexc-sl:missing';
+/** Rejection reason for an opening order on an account that is not in One-way mode. */
+export const POSITION_MODE_REQUIRED = 'POSITION_MODE_ONE_WAY_REQUIRED';
 const stopRef = (id: string) => `mexc-sl:${id}`;
 const stopIdOf = (ref: string) => ref.replace(/^mexc-sl:/, '');
 const D = (v: Decimal.Value) => new Decimal(v);
@@ -126,11 +131,15 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
 
     async placeOpeningOrderWithStop(r: OpeningRequest & { leverage?: number; marginMode?: 'ISOLATED' | 'CROSS' }): Promise<SimResult> {
       if (!r.stop) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'STOP_REQUIRED' };
+      if (o.positionMode !== 'ONE_WAY') return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: POSITION_MODE_REQUIRED };
       if (!verified('OPEN_WITH_ATTACHED_STOP')) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'CAPABILITY_UNVERIFIED:OPEN_WITH_ATTACHED_STOP' };
       if (!r.leverage) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'LEVERAGE_REQUIRED' };
       const symbol = await o.symbolFor(r.instrumentId);
       const existing = await getOrder(symbol, r.clientOrderId);
       if (!existing) {
+        // The account's mode can change at MEXC after it was verified: read it again before sending.
+        const mode = Number(await o.requester.request<number>('GET', '/api/v1/private/position/position_mode'));
+        if (mode !== 2) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: POSITION_MODE_REQUIRED };
         const sent = await submit(symbol, r.clientOrderId, {
           symbol,
           price: num(r.side === 'LONG' ? r.quote.ask : r.quote.bid),
@@ -142,7 +151,7 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
           externalOid: r.clientOrderId,
           stopLossPrice: num(r.stop.price),
           lossTrend: basisToTrend(r.stop.basis),
-          positionMode: o.positionMode === 'HEDGE' ? 1 : 2
+          positionMode: 2 // One-way only (checked above)
         });
         if ('rejected' in sent) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: sent.rejected };
       }

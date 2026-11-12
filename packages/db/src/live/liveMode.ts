@@ -7,7 +7,9 @@ import {
   ErrorCode,
   keyFingerprint,
   LIVE_REFUSAL_TEXT,
+  liveAccountBlockers,
   liveAccountGate,
+  type LiveRefusal,
   validateAccountRef,
   validateLiveLimits,
   type LiveConnectionState,
@@ -24,7 +26,7 @@ import { paperVenue } from '../venue/paper';
 import type { ExecutionVenue } from '../venue/types';
 import type { CapabilityId, CapabilityState } from './capabilities';
 import { MexcHttpTransport, MexcPrivateError, MEXC_PRIVATE_DEFAULT_BASE_URL, normalizeAssets, normalizePositions, normalizeStops, type MexcCredentials, type MexcRequester } from './mexcPrivate';
-import { mexcVenue, UncertainSubmissionError } from './mexcVenue';
+import { mexcVenue, POSITION_MODE_REQUIRED, UncertainSubmissionError } from './mexcVenue';
 
 /**
  * Live mode (OPS-01/02/03): exchange connections, the platform switch, the contract allowlist,
@@ -83,6 +85,7 @@ export const limitsOf = (c: ConnectionRow): LiveLimits | null =>
 export const connectionState = (c: ConnectionRow): LiveConnectionState => ({
   ownerId: c.ownerId,
   status: c.status,
+  positionMode: c.positionMode,
   approved: !!c.approvedAt,
   liveEnabled: c.liveEnabled,
   entriesHalted: c.entriesHalted,
@@ -104,7 +107,9 @@ export async function connectionFor(db: Executor, ownerId: string): Promise<Conn
 
 export interface LiveEligibility {
   verdict: LiveVerdict;
+  /** Text of every account-level blocker (e.g. an operator halt AND the position mode), or of the refusal. */
   reasonText: string | null;
+  blockers: LiveRefusal[];
 }
 
 /**
@@ -118,7 +123,9 @@ export async function liveEntryEligibility(
   const control = await getLiveControl(tx);
   const conn = await connectionFor(tx, r.ownerId);
   const [inst] = await tx.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier }).from(instruments).where(eq(instruments.id, r.instrumentId));
-  const verdict = checkLiveEntry(controlState(control), conn ? connectionState(conn) : null, {
+  const state = controlState(control);
+  const cs = conn ? connectionState(conn) : null;
+  const verdict = checkLiveEntry(state, cs, {
     ownerId: r.ownerId,
     contractLiveAllowed: !!inst?.liveAllowed,
     contracts: r.contracts,
@@ -128,7 +135,10 @@ export async function liveEntryEligibility(
     hasStop: true,
     openContracts: r.openContracts
   });
-  return { verdict, reasonText: verdict.ok ? null : LIVE_REFUSAL_TEXT[verdict.reason] };
+  if (verdict.ok) return { verdict, reasonText: null, blockers: [] };
+  const account = liveAccountBlockers(state, cs, r.ownerId, !!inst?.liveAllowed).map((b) => b.reason);
+  const blockers = account.length ? account : [verdict.reason];
+  return { verdict, reasonText: blockers.map((b) => LIVE_REFUSAL_TEXT[b]).join(' '), blockers };
 }
 
 /* ───────────────────────── Capabilities ───────────────────────── */
@@ -247,6 +257,15 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
         if (e instanceof UncertainSubmissionError) await halt(`UNCERTAIN_ORDER ${r.clientOrderId}`);
         throw e;
       }
+      if (result.status === 'REJECTED' && result.reason === POSITION_MODE_REQUIRED) {
+        // MEXC reports Hedge although the last check said One-way: record it and stop new entries.
+        await db
+          .update(exchangeConnections)
+          .set({ positionMode: 'HEDGE', revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
+          .where(eq(exchangeConnections.ownerId, o.ownerId));
+        await halt(`POSITION_MODE ${r.clientOrderId}: MEXC account is not in One-way mode`);
+        return { ...result, reason: `LIVE_REFUSED:LIVE_POSITION_MODE` };
+      }
       if (result.status === 'FILLED') {
         const prot = await inner.inspectProtection(result.stop.orderId, r.instrumentId);
         if (!prot || prot.status !== 'ACTIVE' || !prot.reduceOnly) await halt(`PROTECTION_FAILURE ${r.clientOrderId}`);
@@ -355,7 +374,10 @@ export async function verifyConnection(db: Db, ownerId: string, correlationId = 
       checkedAt,
       signedRequests: 'OK',
       positionMode,
-      positionModeNote: positionMode === 'ONE_WAY' ? 'One-way mode (preferred).' : 'Hedge mode: closes use the close sides; a contract holding both Long and Short is refused.',
+      positionModeNote:
+        positionMode === 'ONE_WAY'
+          ? 'One-way mode: required for Live entries.'
+          : 'Hedge mode: Live entries need One-way mode. Switch the MEXC Futures account to One-way, then press Save and check again. Closes of any open position still work.',
       usdt: usdt ? { equity: usdt.equity, available: usdt.availableOpen } : null,
       openPositions: open.map((p) => ({ symbol: p.symbol, side: p.side, contracts: p.contracts })),
       activeStops: stops.length,

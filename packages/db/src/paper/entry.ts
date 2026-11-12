@@ -165,7 +165,7 @@ export async function evaluateAndReserveEntry(
           ...base,
           status: 'SKIPPED',
           reason: 'LIVE_NOT_ELIGIBLE',
-          detail: { side, reasonText: `${ENTRY_REASON_TEXT.LIVE_NOT_ELIGIBLE} ${live.reasonText}`, liveReason: live.verdict.reason, ...(live.verdict.detail ?? {}), sizing: s, strategyVersion: version.version, blockRevision: block.revision, ...extra }
+          detail: { side, reasonText: `${ENTRY_REASON_TEXT.LIVE_NOT_ELIGIBLE} ${live.reasonText}`, liveReason: live.verdict.reason, liveBlockers: live.blockers, ...(live.verdict.detail ?? {}), sizing: s, strategyVersion: version.version, blockRevision: block.revision, ...extra }
         })
         .onConflictDoNothing();
       return { status: 'SKIPPED', reason: 'LIVE_NOT_ELIGIBLE' };

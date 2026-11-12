@@ -1,6 +1,6 @@
 import { asc, eq } from 'drizzle-orm';
 import { connectionDto, connectionFor, connectionState, controlState, getDb, getLiveControl, listConnections, liveControlDto, MEXC_CAPABILITIES, schema } from '@trendpilot/db';
-import { liveAccountGate, LIVE_REFUSAL_TEXT } from '@trendpilot/domain';
+import { liveAccountBlockers, LIVE_REFUSAL_TEXT } from '@trendpilot/domain';
 
 /** The signed-in investor's Live status (owner-scoped; never the key or secret). */
 export async function liveStatusFor(ownerId: string) {
@@ -13,12 +13,15 @@ export async function liveStatusFor(ownerId: string) {
     .from(schema.instruments)
     .where(eq(schema.instruments.liveAllowed, true));
   const state = controlState(control);
-  const gate = liveAccountGate(state, active ? connectionState(active) : null, ownerId, true);
+  // Every blocker, in gate order (the worker refuses on the first): an operator halt does not hide
+  // a connection problem such as the position mode.
+  const blockers = liveAccountBlockers(state, active ? connectionState(active) : null, ownerId, contracts.length > 0).map((b) => ({ reason: b.reason, text: LIVE_REFUSAL_TEXT[b.reason] }));
+  const first = blockers[0];
   return {
     platform: { transportEnabled: state.transportEnabled, liveEnabled: state.platformEnabled, entriesHalted: state.platformEntriesHalted, haltReason: state.platformHaltReason ?? null },
     connection: active ? connectionDto(active) : null,
     liveContracts: contracts,
-    entries: gate.ok ? { allowed: contracts.length > 0, reason: contracts.length ? null : 'LIVE_CONTRACT_NOT_ALLOWED', reasonText: contracts.length ? null : LIVE_REFUSAL_TEXT.LIVE_CONTRACT_NOT_ALLOWED } : { allowed: false, reason: gate.reason, reasonText: LIVE_REFUSAL_TEXT[gate.reason] }
+    entries: { allowed: !first, reason: first?.reason ?? null, reasonText: first?.text ?? null, blockers }
   };
 }
 
