@@ -72,10 +72,10 @@ describe('order block schema', () => {
   it('split TP must total 100% with increasing targets', () => {
     const split = (levels: unknown[]) => valid({ takeProfit: { mode: 'SPLIT', levels } });
     expect(parse(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '50' }])).ok).toBe(true);
-    expect(paths(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '40' }]))).toContain('takeProfit');
-    expect(paths(split([{ id: 'a', movePct: '4', closePct: '50' }, { id: 'b', movePct: '4', closePct: '50' }]))).toContain('takeProfit.levels.1.movePct');
-    expect(paths(split([{ id: 'a', movePct: '2', closePct: '100' }]))).toContain('takeProfit.levels');
-    expect(paths(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'a', movePct: '3', closePct: '50' }]))).toContain('takeProfit.levels');
+    expect(paths(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '40' }]))).toContain('takeProfitLong');
+    expect(paths(split([{ id: 'a', movePct: '4', closePct: '50' }, { id: 'b', movePct: '4', closePct: '50' }]))).toContain('takeProfitLong.levels.1.movePct');
+    expect(paths(split([{ id: 'a', movePct: '2', closePct: '100' }]))).toContain('takeProfitLong.levels');
+    expect(paths(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'a', movePct: '3', closePct: '50' }]))).toContain('takeProfitLong.levels');
   });
 
   it('split targets divide the Take Profit share: they always total exactly 100 %, with or without Trailing Take Profit', () => {
@@ -83,9 +83,9 @@ describe('order block schema', () => {
     const full = [{ id: 'a', movePct: '2', closePct: '62.5' }, { id: 'b', movePct: '4', closePct: '37.5' }];
     expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels: full }, trailing: trail })).ok).toBe(true);
     const short = [{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '30' }];
-    expect(issues(valid({ takeProfit: { mode: 'SPLIT', levels: short }, trailing: trail }))).toContainEqual({ path: 'takeProfit', message: expect.stringMatching(/total 80%/) });
+    expect(issues(valid({ takeProfit: { mode: 'SPLIT', levels: short }, trailing: trail }))).toContainEqual({ path: 'takeProfitLong', message: expect.stringMatching(/total 80%/) });
     const over = [{ id: 'a', movePct: '2', closePct: '60' }, { id: 'b', movePct: '4', closePct: '50' }];
-    expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels: over }, trailing: trail }))).toContain('takeProfit');
+    expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels: over }, trailing: trail }))).toContain('takeProfitLong');
   });
 
   it('Position to close (%) lives on Trailing Take Profit: 0 to 100 inclusive, decimals allowed, empty is not 0', () => {
@@ -101,11 +101,11 @@ describe('order block schema', () => {
 
   it('a fixed target manages the whole Take Profit share; OFF has no levels', () => {
     const trail = { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '40', basis: 'MARK' };
-    expect(paths(valid({ takeProfit: { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] } }))).toContain('takeProfit.levels.0.closePct');
+    expect(paths(valid({ takeProfit: { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] } }))).toContain('takeProfitLong.levels.0.closePct');
     expect(parse(valid({ trailing: trail })).ok).toBe(true);
     expect(parse(valid({ takeProfit: { mode: 'OFF', levels: [] } })).ok).toBe(true);
     expect(parse(valid({ takeProfit: { mode: 'OFF', levels: [] }, trailing: trail })).ok).toBe(true);
-    expect(paths(valid({ takeProfit: { mode: 'OFF', levels: [{ id: 'x', movePct: '3', closePct: '100' }] } }))).toContain('takeProfit.levels');
+    expect(paths(valid({ takeProfit: { mode: 'OFF', levels: [{ id: 'x', movePct: '3', closePct: '100' }] } }))).toContain('takeProfitLong.levels');
   });
 
   it('exitAllocation / allocateContracts: 0 %, 40 %, 100 % with trailing on; trailing off; Take Profit off', () => {
@@ -138,7 +138,7 @@ describe('order block schema', () => {
       expect(() => parse(c)).not.toThrow();
       expect(parse(c).ok).toBe(false);
     }
-    expect(paths(cases[0])).toEqual(expect.arrayContaining(['takeProfit.levels.0.movePct', 'trailing.closePct']));
+    expect(paths(cases[0])).toEqual(expect.arrayContaining(['takeProfitLong.levels.0.movePct', 'trailing.closePct']));
   });
 
   it('Trailing Take Profit requires Activate after profit and Trail distance — activation is never assumed', () => {
@@ -229,5 +229,47 @@ describe('mode gate (D1, OPS-02)', () => {
     expect(caught).toBeInstanceOf(DomainError);
     expect((caught as DomainError).code).toBe('LIVE_DISABLED');
     expect((caught as DomainError).status).toBe(422);
+  });
+});
+
+describe('per-side Take Profit (Long and Short independent)', () => {
+  const LONG = { mode: 'FIXED', levels: [{ id: 'L', movePct: '2', closePct: '100' }] };
+  const SHORT = { mode: 'SPLIT', levels: [{ id: 'a', movePct: '1', closePct: '60' }, { id: 'b', movePct: '2', closePct: '40' }] };
+  const perSide = (o: Record<string, unknown> = {}) => {
+    const { takeProfit: _shared, ...rest } = valid(o);
+    void _shared;
+    return { ...rest, takeProfitLong: LONG, takeProfitShort: SHORT, ...o };
+  };
+
+  it('accepts different Long and Short configurations', () => {
+    const r = parse(perSide());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toMatchObject({ takeProfitLong: { mode: 'FIXED' }, takeProfitShort: { mode: 'SPLIT' } });
+  });
+
+  it('a shared `takeProfit` from an older client becomes both sides', () => {
+    const r = parse(valid());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.takeProfitShort).toEqual(r.value.takeProfitLong);
+  });
+
+  it('reports each side under its own path', () => {
+    const bad = { mode: 'SPLIT', levels: [{ id: 'a', movePct: '1', closePct: '50' }, { id: 'b', movePct: '2', closePct: '30' }] };
+    expect(paths(perSide({ takeProfitShort: bad }))).toEqual(['takeProfitShort']);
+    expect(paths(perSide({ takeProfitLong: bad }))).toEqual(['takeProfitLong']);
+  });
+
+  it('validates only the sides the direction trades, and keeps the other side as saved', () => {
+    const bad = { mode: 'FIXED', levels: [] };
+    expect(paths(perSide({ direction: 'SHORT_ONLY', takeProfitLong: bad }))).toEqual([]);
+    expect(paths(perSide({ direction: 'LONG_ONLY', takeProfitLong: bad }))).toEqual(['takeProfitLong.levels']);
+    const r = parse(perSide({ direction: 'LONG_ONLY' }));
+    expect(r.ok && r.value.takeProfitShort).toEqual(SHORT);
+  });
+
+  it('a percentage cleared with Backspace is a field message, never an exception', () => {
+    const cleared = { mode: 'FIXED', levels: [{ id: 'L', movePct: '', closePct: '100' }] };
+    expect(() => parse(perSide({ takeProfitShort: cleared }))).not.toThrow();
+    expect(paths(perSide({ takeProfitShort: cleared }))).toContain('takeProfitShort.levels.0.movePct');
   });
 });

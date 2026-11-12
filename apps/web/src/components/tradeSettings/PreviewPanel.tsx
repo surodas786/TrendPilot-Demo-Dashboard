@@ -56,8 +56,12 @@ export function PreviewPanel({ preview }: { preview: PreviewResult }) {
               <Row label="Est. entry fee" value={`${s.estimatedEntryFeeUsdt} USDT`} />
               <Row label={`Stop (${s.stopBasis.toLowerCase()})`} value={`${s.stopPrice} (${s.stopDistancePct}%)`} />
               <Row label="Loss to stop incl. fees" value={<span data-testid={`preview-${s.side}-loss`}>{s.lossToStopUsdt} USDT</span>} />
+              <Row
+                label={`${s.side === 'LONG' ? 'Long' : 'Short'} take profit`}
+                value={<span data-testid={`preview-${s.side}-tp`}>{s.takeProfitMode === 'OFF' ? 'Off' : `${s.takeProfitMode === 'FIXED' ? 'Fixed' : 'Split'} · manages ${s.takeProfitManagesPct}%`}</span>}
+              />
               {s.takeProfits.map((t, i) => (
-                <Row key={t.id} label={`Target ${i + 1} (${t.closePct}% of TP)`} value={`${t.price} · ${t.contracts} contracts`} />
+                <Row key={t.id} label={`Target ${i + 1} (${t.closePct}% of TP, ${s.side === 'LONG' ? 'above' : 'below'} entry)`} value={<span data-testid={`preview-${s.side}-target`}>{`${t.price} · ${t.contracts} contracts`}</span>} />
               ))}
               {s.trailing && (
                 <Row

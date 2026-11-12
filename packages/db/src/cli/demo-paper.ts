@@ -27,6 +27,9 @@ import { lockPaperAccount } from '../paper/accounts';
 import { writeMarketFixture } from '../paper/market';
 import { orderBlocks, strategyVersionInstruments, strategyVersions, users } from '../schema';
 
+/** The demo uses the same Take Profit for Long and Short positions. */
+const bothSides = <T>(tp: T) => ({ takeProfitLong: tp, takeProfitShort: tp });
+
 loadRootEnv();
 if (process.env.NODE_ENV === 'production') throw new Error('The paper demo is for development only.');
 
@@ -94,7 +97,7 @@ try {
     strategyVersionId: versionId,
     direction: 'BOTH' as const,
     marginMode: 'ISOLATED' as const,
-    takeProfit: { mode: 'FIXED' as const, levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] },
+    ...bothSides({ mode: 'FIXED' as const, levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] }),
     trailing: { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' as const },
     allowAdds: false,
     maxAdds: null,
@@ -107,14 +110,14 @@ try {
       profile === 'split'
         ? {
             // Trailing Take Profit closes 20 %; the two targets split the other 80 % (62.5 % / 37.5 % of it).
-            takeProfit: { mode: 'SPLIT' as const, levels: [{ id: 'tp1', movePct: '2', closePct: '62.5' }, { id: 'tp2', movePct: '4', closePct: '37.5' }] },
+            ...bothSides({ mode: 'SPLIT' as const, levels: [{ id: 'tp1', movePct: '2', closePct: '62.5' }, { id: 'tp2', movePct: '4', closePct: '37.5' }] }),
             trailing: { enabled: true, activationPct: '3', distancePct: '1', closePct: '20', basis: 'MARK' as const }
           }
-        : { takeProfit: tp('3'), trailing: off },
+        : { ...bothSides(tp('3')), trailing: off },
     B:
       profile === 'split'
-        ? { takeProfit: { mode: 'OFF' as const, levels: [] }, trailing: { enabled: true, activationPct: '1', distancePct: '1', closePct: '100', basis: 'LAST' as const } }
-        : { takeProfit: tp(exitsProfile ? '6' : '3'), trailing: off }
+        ? { ...bothSides({ mode: 'OFF' as const, levels: [] }), trailing: { enabled: true, activationPct: '1', distancePct: '1', closePct: '100', basis: 'LAST' as const } }
+        : { ...bothSides(tp(exitsProfile ? '6' : '3')), trailing: off }
   };
   await upsertBlock(db, ids.A!, { ...common, ...plans.A, orderCostUsdt: '100', leverage: 10, stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' }, weekdays: [...ALL_WEEKDAYS] });
   await upsertBlock(db, ids.B!, {

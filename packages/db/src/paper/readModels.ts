@@ -75,6 +75,12 @@ export interface PositionDto {
   targets: TargetDto[];
   /** EXT-04 persisted trailing exit state (null = no trailing exit). */
   trailing: TrailingDto | null;
+  /**
+   * The Take Profit plan saved at entry: the configuration of the position's own side (Long and
+   * Short are set independently). `side` is null for positions opened before per-side Take Profit
+   * (they used the then-shared configuration).
+   */
+  takeProfitPlan: { side: 'LONG' | 'SHORT' | null; mode: string } | null;
   /** LIVE: what MEXC reports for the position at the last private sync (null for Paper). */
   venueSync: { positionRef: string | null; liquidationPrice: string | null; fundingUsdt: string | null; syncedAt: string | null } | null;
 }
@@ -201,6 +207,11 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
     openedAt: p.openedAt.toISOString(),
     orderId: p.openIntentId,
     signal: ev ? { eventId: ev.id, action: ev.action, barOpenAt: ev.barOpenAt.toISOString(), barCloseAt: ev.barCloseAt.toISOString() } : null,
+    takeProfitPlan: (() => {
+      const snap = p.settingsSnapshot as { takeProfitSide?: 'LONG' | 'SHORT'; block?: { takeProfit?: { mode?: string } } } | null;
+      const mode = snap?.block?.takeProfit?.mode;
+      return mode ? { side: snap?.takeProfitSide ?? null, mode } : null;
+    })(),
     venueSync:
       p.mode === 'LIVE'
         ? { positionRef: p.exchangePositionRef, liquidationPrice: n(p.exchangeLiquidationPrice), fundingUsdt: n(p.exchangeFundingUsdt), syncedAt: p.exchangeSyncedAt?.toISOString() ?? null }

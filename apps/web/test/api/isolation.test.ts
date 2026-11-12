@@ -68,7 +68,8 @@ describe('same token, different settings', () => {
       leverage: 3,
       direction: 'LONG_ONLY',
       weekdays: ['SUN', 'SAT'],
-      takeProfit: { mode: 'SPLIT' },
+      takeProfitLong: { mode: 'SPLIT' },
+      takeProfitShort: { mode: 'SPLIT' },
       trailing: { enabled: true, activationPct: '1', distancePct: '1.2', closePct: '20', basis: 'MARK' },
       trailingConversionRequired: false
     });

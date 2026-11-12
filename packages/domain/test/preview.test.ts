@@ -5,17 +5,22 @@ import { EMPTY_RISK, previewOrder, type ContractSpec, type Quote } from '../src'
 const BTC: ContractSpec = { contractMultiplier: '0.0001', qtyStep: '1', minQty: '1', maxQty: '1000000', priceTick: '0.1', takerFeeRate: '0.0004' };
 const quote: Quote = { bid: '64990.5', ask: '65000.0', mark: '64995.2', asOf: '2026-11-08T00:00:00Z', source: 'FIXTURE' };
 
-const settings = (o: Record<string, unknown> = {}) =>
-  ({
+const settings = (o: Record<string, unknown> = {}) => {
+  const tp = (o.takeProfit ?? { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] }) as unknown;
+  const { takeProfit: _shared, ...rest } = o;
+  void _shared;
+  return {
     orderCostUsdt: '100',
     leverage: 10,
     direction: 'BOTH',
     stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' },
-    takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] },
+    takeProfitLong: tp,
+    takeProfitShort: tp,
     trailing: { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' },
     risk: EMPTY_RISK,
-    ...o
-  }) as Parameters<typeof previewOrder>[0];
+    ...rest
+  } as Parameters<typeof previewOrder>[0];
+};
 
 describe('previewOrder', () => {
   it('sizes a long from the ask: 100 USDT × 10 at 65,000 = 153 contracts', () => {

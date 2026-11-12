@@ -4,7 +4,7 @@ import { getDb, getMyTrade } from '@trendpilot/db';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
-import { EXIT_LABEL, signedUsdt, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
+import { EXIT_LABEL, signedUsdt, takeProfitPlanLabel, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
 
 export const dynamic = 'force-dynamic';
@@ -137,6 +137,9 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
         )}
         <section className="rounded-xl border border-line bg-surface p-4 text-sm" data-testid="targets">
           <h3 className="mb-2 font-semibold text-ink">Take-profit targets</h3>
+          <p className="mb-2 text-xs text-muted" data-testid="trade-tp-plan">
+            {takeProfitPlanLabel(t.takeProfitPlan, t.side)}
+          </p>
           {t.targets.length === 0 ? (
             <p className="text-xs text-subtle">Take profit is off for this position.</p>
           ) : (
