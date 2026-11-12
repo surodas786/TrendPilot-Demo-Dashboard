@@ -17,8 +17,8 @@ const A = USERS.investorA.email;
 const B = USERS.investorB.email;
 const mexc = new MockMexc();
 const MOCK_EVIDENCE = { OPEN_WITH_ATTACHED_STOP: 'VERIFIED', REDUCE_ONLY_CLOSE: 'VERIFIED', STOP_RESIZE_AFTER_PARTIAL_CLOSE: 'VERIFIED' } as const;
-const venue = (capabilities: Record<string, 'VERIFIED'> | undefined = MOCK_EVIDENCE): ExecutionVenue =>
-  mexcVenue({ requester: mexc, symbolFor: async () => 'BTC_USDT', positionMode: 'HEDGE', capabilities, confirm: { attempts: 2, delayMs: 0 }, sleep: async () => {} });
+const venue = (capabilities: Record<string, 'VERIFIED'> | undefined = MOCK_EVIDENCE, positionMode: 'ONE_WAY' | 'HEDGE' = 'ONE_WAY'): ExecutionVenue =>
+  mexcVenue({ requester: mexc, symbolFor: async () => 'BTC_USDT', positionMode, capabilities, confirm: { attempts: 2, delayMs: 0 }, sleep: async () => {} });
 const hooks = (v = venue()) => ({ venue: v });
 const D = (v: Decimal.Value) => new Decimal(v);
 const intentsOf = async (email: string) => direct.db.select().from(schema.orderIntents).where(eq(schema.orderIntents.ownerId, await userId(email))).orderBy(schema.orderIntents.createdAt);
@@ -40,6 +40,7 @@ beforeEach(() => {
   mexc.stops.clear();
   mexc.positions.clear();
   mexc.reset();
+  mexc.positionMode = 2; // One-way: required for Live entries
 });
 afterAll(async () => {
   setTestClock(null);
@@ -63,7 +64,7 @@ describe('opening with the stop in the same request', () => {
     // Jobs from one alert may run in either order: match each request by its client order ID.
     const a = createBodies().find((x) => x.externalOid === ia!.clientOrderId);
     const b = createBodies().find((x) => x.externalOid === ib!.clientOrderId);
-    expect(a).toMatchObject({ symbol: 'BTC_USDT', side: 1, type: 5, openType: 1, leverage: 10, externalOid: ia!.clientOrderId, stopLossPrice: D(ia!.stopPrice).toFixed(), lossTrend: 2, positionMode: 1, vol: D(ia!.contracts).toFixed() });
+    expect(a).toMatchObject({ symbol: 'BTC_USDT', side: 1, type: 5, openType: 1, leverage: 10, externalOid: ia!.clientOrderId, stopLossPrice: D(ia!.stopPrice).toFixed(), lossTrend: 2, positionMode: 2, vol: D(ia!.contracts).toFixed() });
     expect(b).toMatchObject({ side: 1, leverage: 5, lossTrend: 1 }); // B: stop on LAST price
     const [pa] = await positionsOf(A);
     expect(pa).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
@@ -193,6 +194,58 @@ describe('timeouts where MEXC may have accepted the order', () => {
   });
 });
 
+describe('Hedge position mode: no new entries; existing positions still close without adding exposure', () => {
+  const opens = () => createBodies().filter((b) => b.side === 1 || b.side === 3);
+
+  it('a connection verified in Hedge mode cannot open: refused before any order is sent', async () => {
+    mexc.positionMode = 1;
+    await openFromAlert({ b: null, hooks: hooks(venue(MOCK_EVIDENCE, 'HEDGE')) });
+    expect(mexc.creates()).toHaveLength(0);
+    expect(mexc.calls).toHaveLength(0); // not even a lookup
+    const [i] = await intentsOf(A);
+    expect(i).toMatchObject({ state: 'REJECTED', stateReason: 'POSITION_MODE_ONE_WAY_REQUIRED' });
+    expect(await positionsOf(A)).toHaveLength(0);
+    expect(await reconciled()).toBe(true); // reservation released
+  });
+
+  it('an account switched to Hedge at MEXC after it was verified: re-read right before sending, refused', async () => {
+    mexc.positionMode = 1; // the stored connection still says One-way
+    await openFromAlert({ b: null, hooks: hooks() });
+    expect(mexc.calls.some((c) => c.method === 'GET' && c.path === '/api/v1/private/position/position_mode')).toBe(true);
+    expect(mexc.creates()).toHaveLength(0);
+    expect((await intentsOf(A))[0]).toMatchObject({ state: 'REJECTED', stateReason: 'POSITION_MODE_ONE_WAY_REQUIRED' });
+    expect(await positionsOf(A)).toHaveLength(0);
+  });
+
+  it('an existing Long on a Hedge account closes with the close-long side only, capped at what MEXC holds; no Short is opened', async () => {
+    await openFromAlert({ b: null, hooks: hooks() }); // opened while One-way
+    mexc.positionMode = 1; // then the account is switched to Hedge
+    mockPos(1)!.holdVol = '100'; // MEXC holds less than the platform expects
+    const [p] = await positionsOf(A);
+    await direct.db.transaction((tx) => requestExit(tx, { position: p!, reason: 'MANUAL_CLOSE', now: clock.now }));
+    await drain(clock.now, direct.db, hooks(venue(MOCK_EVIDENCE, 'HEDGE')));
+    const close = createBodies()[1]!;
+    expect(close).toMatchObject({ side: 4, type: 5, vol: '100', positionMode: 1 }); // 4 = close long; never 1/3 (open)
+    expect(close.reduceOnly).toBeUndefined(); // MEXC: reduceOnly applies only in One-way mode
+    expect(close.positionId).toBe(Number(mockPos(1)!.positionId));
+    expect(opens()).toHaveLength(1); // only the original entry
+    expect(mockPos(2)).toBeUndefined(); // no Short
+    expect(D(mockPos(1)!.holdVol).isZero()).toBe(true);
+  });
+
+  it('a close when MEXC holds nothing on that side sends no order at all (cannot open the opposite side)', async () => {
+    await openFromAlert({ b: null, hooks: hooks() });
+    mexc.positionMode = 1;
+    mexc.positions.delete('BTC_USDT:1'); // closed elsewhere
+    const [p] = await positionsOf(A);
+    await direct.db.transaction((tx) => requestExit(tx, { position: p!, reason: 'SIGNAL_CLOSE', now: clock.now }));
+    await drain(clock.now, direct.db, hooks(venue(MOCK_EVIDENCE, 'HEDGE')));
+    expect(createBodies()).toHaveLength(1); // the entry only; no close order was sent
+    expect(mockPos(1)).toBeUndefined();
+    expect(mockPos(2)).toBeUndefined();
+  });
+});
+
 describe('closes: TP, signal, manual — reduce only, never flipping, stop kept for the remainder', () => {
   it('a manual full close sends side 4 for the held contracts and clears the stop', async () => {
     await openFromAlert({ b: null, hooks: hooks() });
@@ -200,8 +253,7 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     await direct.db.transaction((tx) => requestExit(tx, { position: p!, reason: 'MANUAL_CLOSE', now: clock.now }));
     await drain(clock.now, direct.db, hooks());
     const close = createBodies()[1]!;
-    expect(close).toMatchObject({ side: 4, type: 5, vol: D(p!.contracts).toFixed() });
-    expect(close.reduceOnly).toBeUndefined(); // hedge mode: close side; reduceOnly applies only in one-way mode
+    expect(close).toMatchObject({ side: 4, type: 5, vol: D(p!.contracts).toFixed(), reduceOnly: true, positionMode: 2 }); // One-way: close side AND reduceOnly
     expect((await positionsOf(A))[0]).toMatchObject({ status: 'CLOSED', closeReason: 'MANUAL_CLOSE' });
     expect(activeStops()).toHaveLength(0);
     expect(mockPos(2)).toBeUndefined();

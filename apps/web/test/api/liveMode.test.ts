@@ -9,6 +9,7 @@ import { Decimal } from '@trendpilot/domain';
 import * as blocks from '@/app/v1/me/order-blocks/route';
 import * as resume from '@/app/v1/me/order-blocks/[id]/resume/route';
 import * as conn from '@/app/v1/me/exchange-connection/route';
+import * as verifyConn from '@/app/v1/me/exchange-connection/verify/route';
 import * as meLive from '@/app/v1/me/live/route';
 import * as activate from '@/app/v1/me/live/activate/route';
 import * as meHalt from '@/app/v1/me/live/halt/route';
@@ -159,6 +160,52 @@ describe('Live is Off by default; credentials stay server-side', () => {
     expect((await call(activate.POST, { method: 'POST', path: '/x', cookie: cookies.a })).status).toBe(409);
     // An API key is not an account reference.
     expect((await call(conn.PUT, { method: 'PUT', path: '/x', cookie: cookies.a, body: { accountRef: KEY_A, apiKey: KEY_A, secretKey: SECRET_A } })).status).toBe(400);
+  });
+});
+
+describe('One-way position mode is required for Live entries', () => {
+  it('a Hedge account: the Live page names One-way as the reason (with the halt), the evaluation records both, and nothing is sent', async () => {
+    await openFromAlert({
+      market: async () => {
+        await connectAndBlock('a', A);
+        await platformOn();
+        // The investor's MEXC account is switched to Hedge; Save and check reads it.
+        (await mockOf(A)).positionMode = 1;
+        expect((await call(verifyConn.POST, { method: 'POST', path: '/x', cookie: cookies.a })).status).toBe(200);
+        // Operator halt during verification.
+        expect((await call(platformHalt.POST, { method: 'POST', path: '/x', cookie: cookies.admin, body: { reason: 'verification' } })).status).toBe(200);
+        const { writeMarketFixture } = await import('@trendpilot/db');
+        await writeMarketFixture(direct.db, { instrumentId: BTC, interval: '15', endBarOpen: new Date('2026-11-08T09:15:00Z'), count: 260, endClose: '65000', trend: 'UP', quoteAt: clock.now });
+      }
+    });
+    const row = await connRow(A);
+    expect(row).toMatchObject({ status: 'VERIFIED', positionMode: 'HEDGE' });
+    const status = (await call(meLive.GET, { path: '/x', cookie: cookies.a })).body;
+    expect(status.connection.positionMode).toBe('HEDGE');
+    expect(status.entries).toMatchObject({ allowed: false, reason: 'LIVE_PLATFORM_HALTED' });
+    expect(status.entries.blockers.map((b: { reason: string }) => b.reason)).toEqual(['LIVE_PLATFORM_HALTED', 'LIVE_POSITION_MODE']);
+    expect(status.entries.blockers[1].text).toMatch(/^One-way position mode required/);
+    const d = (await decisionsOf(A)).find((x) => x.status === 'SKIPPED' && x.reason === 'LIVE_NOT_ELIGIBLE')!;
+    expect(d.detail).toMatchObject({ liveReason: 'LIVE_PLATFORM_HALTED', liveBlockers: ['LIVE_PLATFORM_HALTED', 'LIVE_POSITION_MODE'] });
+    expect((d.detail as { reasonText: string }).reasonText).toMatch(/One-way position mode required/);
+    expect((await mockOf(A)).creates()).toHaveLength(0);
+    expect(await livePos(A)).toHaveLength(0);
+
+    // With the halt lifted, Hedge alone blocks the entry; after switching to One-way and Save and check, the gate clears.
+    const ctrl = (await direct.db.select().from(schema.liveControl))[0]!;
+    expect(ctrl.entriesHalted).toBe(true);
+    // Lift the halt in the database only for this check (the admin resume path is covered elsewhere).
+    await direct.db.update(schema.liveControl).set({ entriesHalted: false, haltReason: null });
+    await nextAlert('BULLISH_FLIP', 2);
+    const d2 = (await decisionsOf(A)).filter((x) => x.status === 'SKIPPED' && x.reason === 'LIVE_NOT_ELIGIBLE').at(-1)!;
+    expect(d2.detail).toMatchObject({ liveReason: 'LIVE_POSITION_MODE', liveBlockers: ['LIVE_POSITION_MODE'], positionMode: 'HEDGE' });
+    expect((await mockOf(A)).creates()).toHaveLength(0);
+
+    (await mockOf(A)).positionMode = 2;
+    expect((await call(verifyConn.POST, { method: 'POST', path: '/x', cookie: cookies.a })).status).toBe(200);
+    const after = (await call(meLive.GET, { path: '/x', cookie: cookies.a })).body;
+    expect(after.connection.positionMode).toBe('ONE_WAY');
+    expect(after.entries.blockers.map((b: { reason: string }) => b.reason)).not.toContain('LIVE_POSITION_MODE');
   });
 });
 

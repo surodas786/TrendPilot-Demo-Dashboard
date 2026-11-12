@@ -1,11 +1,14 @@
+import Link from 'next/link';
 import { FlaskConicalIcon, KeyRoundIcon, PlugZapIcon, UserRoundIcon, type LucideIcon } from 'lucide-react';
 import { getDb, getMyPaperAccount, listMyHoldings } from '@trendpilot/db';
+import { connectionStatusLabel, positionModeLabel } from '@/components/live/connectionLabels';
 import { HoldingsTable } from '@/components/reporting/HoldingsTable';
 import { fmtTime } from '@/components/reporting/format';
 import { now } from '@/server/clock';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { SecurityPanel } from '@/components/account/SecurityPanel';
 import { StatusPill } from '@/components/ui/StatusPill';
+import { liveStatusFor } from '@/server/live';
 import { requirePageRole } from '@/server/pageSession';
 
 export const dynamic = 'force-dynamic';
@@ -41,7 +44,11 @@ export default async function MyAccountPage() {
   const { user } = await requirePageRole('INVESTOR');
   const db = getDb();
   const at = now();
-  const [paper, holdings] = await Promise.all([getMyPaperAccount(db, user.id), listMyHoldings(db, user.id, at)]);
+  // The exchange connection comes from the same source as the Live Trading page.
+  const [paper, holdings, live] = await Promise.all([getMyPaperAccount(db, user.id), listMyHoldings(db, user.id, at), liveStatusFor(user.id)]);
+  const conn = live.connection;
+  const connLabel = connectionStatusLabel(conn?.status);
+  const modeLabel = positionModeLabel(conn?.positionMode);
   const newest = holdings.map((h) => h.price?.asOf).filter((x): x is string => !!x).sort().at(-1) ?? null;
   const stale = holdings.some((h) => !h.price || h.price.freshness === 'STALE');
   return (
@@ -77,13 +84,40 @@ export default async function MyAccountPage() {
         </Card>
 
         <Card icon={PlugZapIcon} title="Exchange connection">
-          <div className="flex flex-wrap items-center gap-2">
-            <StatusPill tone="neutral">Not connected</StatusPill>
-            <StatusPill tone="warn">Live trading disabled</StatusPill>
+          <div className="flex flex-wrap items-center gap-2" data-testid="account-connection">
+            <StatusPill tone={connLabel.tone}>{connLabel.text}</StatusPill>
+            {conn && <StatusPill tone={conn.approved ? 'gain' : 'neutral'}>{conn.approved ? 'Approved' : 'Not approved yet'}</StatusPill>}
+            {conn && <StatusPill tone={conn.liveEnabled ? 'warn' : 'neutral'}>{conn.liveEnabled ? 'Live activated' : 'Live off'}</StatusPill>}
           </div>
-          <p className="mt-3 text-sm text-muted">
-            Connecting your own MEXC Futures account is not part of this release. Live order submission stays disabled in this build, and no exchange credentials are stored.
-          </p>
+          {conn ? (
+            <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+              <Field label="Exchange" value={`MEXC Futures · ${conn.accountRef}`} />
+              <Field label="API key" value={conn.keyFingerprint} />
+              <Field label="Position mode" value={<StatusPill tone={modeLabel.tone}>{modeLabel.text}</StatusPill>} testId="account-position-mode" />
+              <Field label="Contracts allowed for Live" value={live.liveContracts.length ? live.liveContracts.map((x) => x.exchangeSymbol || x.symbol).join(', ') : 'None yet'} />
+            </dl>
+          ) : (
+            <p className="mt-3 text-sm text-muted">No MEXC account is connected. Connect one on the Live Trading page.</p>
+          )}
+          <div className="mt-3 text-sm" data-testid="account-live-entries">
+            {live.entries.allowed ? (
+              <p className="text-gain">New Live entries are allowed within your limits.</p>
+            ) : (
+              <>
+                <p className="text-muted">New Live entries are not possible now:</p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-muted">
+                  {live.entries.blockers.map((b) => (
+                    <li key={b.reason} data-reason={b.reason}>
+                      {b.text}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+          <Link href="/live-trading" className="mt-3 inline-block text-xs font-semibold text-accent hover:underline">
+            Manage on the Live Trading page
+          </Link>
         </Card>
       </div>
 

@@ -8,7 +8,9 @@ import { Decimal } from './decimal';
  * the entry is evaluated and again in the worker right before the order is sent:
  *  1. the deployment's live order transport is enabled (LIVE_ORDER_TRANSPORT=enabled);
  *  2. the platform Live switch is on and platform entries are not halted (admin, audited);
- *  3. the investor owns a VERIFIED MEXC connection that an administrator approved, with limits;
+ *  3. the investor owns a VERIFIED MEXC connection in One-way position mode that an
+ *     administrator approved, with limits (Hedge mode is not supported for new entries: MEXC
+ *     documents reduce-only closes for One-way mode only);
  *  4. the investor activated Live (default Off) and their Live entries are not halted;
  *  5. the contract is on the Live allowlist;
  *  6. the order carries its stop, and stays within the per-order contracts, per-order notional,
@@ -34,6 +36,8 @@ export interface LiveControlState {
 export interface LiveConnectionState {
   ownerId: string;
   status: 'PENDING' | 'VERIFIED' | 'FAILED' | 'REVOKED' | string;
+  /** MEXC position mode read at the last check: 'ONE_WAY' is required for new entries. */
+  positionMode: 'ONE_WAY' | 'HEDGE' | string | null;
   approved: boolean;
   liveEnabled: boolean;
   entriesHalted: boolean;
@@ -60,6 +64,7 @@ export type LiveRefusal =
   | 'LIVE_CONNECTION_MISSING'
   | 'LIVE_OWNERSHIP_MISMATCH'
   | 'LIVE_CONNECTION_NOT_VERIFIED'
+  | 'LIVE_POSITION_MODE'
   | 'LIVE_ACCOUNT_NOT_APPROVED'
   | 'LIVE_NOT_ACTIVATED'
   | 'LIVE_ACCOUNT_HALTED'
@@ -77,6 +82,8 @@ export const LIVE_REFUSAL_TEXT: Record<LiveRefusal, string> = {
   LIVE_CONNECTION_MISSING: 'No MEXC exchange connection is set up for this account.',
   LIVE_OWNERSHIP_MISMATCH: 'The exchange connection does not belong to this investor.',
   LIVE_CONNECTION_NOT_VERIFIED: 'The MEXC exchange connection has not been verified.',
+  LIVE_POSITION_MODE:
+    'One-way position mode required: the MEXC account is not in One-way mode (Hedge mode is not supported for Live entries). Switch the MEXC Futures account to One-way, then press Save and check on the Live Trading page. Closing and protection are not affected.',
   LIVE_ACCOUNT_NOT_APPROVED: 'The MEXC account has not been approved for Live trading by an administrator.',
   LIVE_NOT_ACTIVATED: 'Live trading is not activated on this account.',
   LIVE_ACCOUNT_HALTED: 'New Live entries are halted on this account. Protection and closing remain available.',
@@ -90,19 +97,35 @@ export const LIVE_REFUSAL_TEXT: Record<LiveRefusal, string> = {
 
 export type LiveVerdict = { ok: true } | { ok: false; reason: LiveRefusal; detail?: Record<string, string | number> };
 
-/** Account-level gates only (1–5): whether this investor may open Live exposure at all. */
+export type LiveBlocker = { reason: LiveRefusal; detail?: Record<string, string | number> };
+
+/**
+ * Every account-level gate (1–5) that currently blocks new Live entries, in gate order. Lets the
+ * UI and decision records show, for example, both an operator halt and the position mode, rather
+ * than only the first.
+ */
+export function liveAccountBlockers(control: LiveControlState, conn: LiveConnectionState | null, ownerId: string, contractLiveAllowed: boolean): LiveBlocker[] {
+  const out: LiveBlocker[] = [];
+  if (!control.transportEnabled) out.push({ reason: 'LIVE_TRANSPORT_DISABLED' });
+  if (!control.platformEnabled) out.push({ reason: 'LIVE_PLATFORM_DISABLED' });
+  if (control.platformEntriesHalted) out.push({ reason: 'LIVE_PLATFORM_HALTED', detail: { haltReason: control.platformHaltReason ?? 'operator' } });
+  if (!conn) out.push({ reason: 'LIVE_CONNECTION_MISSING' });
+  else if (conn.ownerId !== ownerId) out.push({ reason: 'LIVE_OWNERSHIP_MISMATCH' });
+  else {
+    if (conn.status !== 'VERIFIED') out.push({ reason: 'LIVE_CONNECTION_NOT_VERIFIED' });
+    else if (conn.positionMode !== 'ONE_WAY') out.push({ reason: 'LIVE_POSITION_MODE', detail: { positionMode: conn.positionMode ?? 'unknown' } });
+    if (!conn.approved || !conn.limits) out.push({ reason: 'LIVE_ACCOUNT_NOT_APPROVED' });
+    if (!conn.liveEnabled) out.push({ reason: 'LIVE_NOT_ACTIVATED' });
+    if (conn.entriesHalted) out.push({ reason: 'LIVE_ACCOUNT_HALTED', detail: { haltReason: conn.haltReason ?? 'halted' } });
+  }
+  if (!contractLiveAllowed) out.push({ reason: 'LIVE_CONTRACT_NOT_ALLOWED' });
+  return out;
+}
+
+/** Account-level gates only (1–5): whether this investor may open Live exposure at all (first blocker). */
 export function liveAccountGate(control: LiveControlState, conn: LiveConnectionState | null, ownerId: string, contractLiveAllowed: boolean): LiveVerdict {
-  if (!control.transportEnabled) return { ok: false, reason: 'LIVE_TRANSPORT_DISABLED' };
-  if (!control.platformEnabled) return { ok: false, reason: 'LIVE_PLATFORM_DISABLED' };
-  if (control.platformEntriesHalted) return { ok: false, reason: 'LIVE_PLATFORM_HALTED', detail: { haltReason: control.platformHaltReason ?? 'operator' } };
-  if (!conn) return { ok: false, reason: 'LIVE_CONNECTION_MISSING' };
-  if (conn.ownerId !== ownerId) return { ok: false, reason: 'LIVE_OWNERSHIP_MISMATCH' };
-  if (conn.status !== 'VERIFIED') return { ok: false, reason: 'LIVE_CONNECTION_NOT_VERIFIED' };
-  if (!conn.approved || !conn.limits) return { ok: false, reason: 'LIVE_ACCOUNT_NOT_APPROVED' };
-  if (!conn.liveEnabled) return { ok: false, reason: 'LIVE_NOT_ACTIVATED' };
-  if (conn.entriesHalted) return { ok: false, reason: 'LIVE_ACCOUNT_HALTED', detail: { haltReason: conn.haltReason ?? 'halted' } };
-  if (!contractLiveAllowed) return { ok: false, reason: 'LIVE_CONTRACT_NOT_ALLOWED' };
-  return { ok: true };
+  const [first] = liveAccountBlockers(control, conn, ownerId, contractLiveAllowed);
+  return first ? { ok: false, ...first } : { ok: true };
 }
 
 /** Every Live opening order passes here, at evaluation and again right before submission. */
