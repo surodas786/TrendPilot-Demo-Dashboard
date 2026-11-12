@@ -1,6 +1,6 @@
 // Per-side Take Profit in Trade Settings (runs last: it saves A's BTC Paper block).
 // Long and Short sections are independent; only the applicable section shows for a one-sided
-// direction and the other side's saved values survive; Backspace keeps the editor open with an
+// direction both sections stay visible (the untraded one marked) and keep their values; Backspace keeps the editor open with an
 // inline message on Save; the order preview shows each side's own targets (Long above entry,
 // Short below) sharing the quantity left after Trailing Take Profit.
 import { expect, test, type Page } from '@playwright/test';
@@ -47,10 +47,13 @@ test('independent Long and Short Take Profit: edit, direction change, Backspace,
   await expect(long.getByTestId('exit-allocation')).toContainText('Take profit 60% · Trailing take profit 40%');
   await expect(short.getByTestId('exit-allocation')).toContainText('Take profit 60% · Trailing take profit 40%');
 
-  // Long only: just the Long section; back to both: the Short split is still there.
+  // Long only: both sections stay visible and editable; Short is marked as not used yet.
   await panel.getByRole('radio', { name: 'Long only' }).click();
   await expect(long).toBeVisible();
-  await expect(short).toHaveCount(0);
+  await expect(short).toBeVisible();
+  await expect(panel.getByTestId('tp-SHORT-inactive')).toBeVisible();
+  await expect(panel.getByTestId('tp-LONG-inactive')).toHaveCount(0);
+  await expect(short.getByRole('radio', { name: 'Split' })).toHaveAttribute('aria-checked', 'true');
   await panel.getByRole('radio', { name: 'Long and Short' }).click();
   await expect(panel.getByTestId('tp-SHORT').getByLabel('Short target 2 — move')).toHaveValue('2');
 

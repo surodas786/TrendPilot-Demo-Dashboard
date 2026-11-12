@@ -259,9 +259,9 @@ describe('per-side Take Profit (Long and Short independent)', () => {
     expect(paths(perSide({ takeProfitLong: bad }))).toEqual(['takeProfitLong']);
   });
 
-  it('validates only the sides the direction trades, and keeps the other side as saved', () => {
+  it('validates both sides whatever the direction, and keeps the untraded side as saved', () => {
     const bad = { mode: 'FIXED', levels: [] };
-    expect(paths(perSide({ direction: 'SHORT_ONLY', takeProfitLong: bad }))).toEqual([]);
+    expect(paths(perSide({ direction: 'SHORT_ONLY', takeProfitLong: bad }))).toEqual(['takeProfitLong.levels']);
     expect(paths(perSide({ direction: 'LONG_ONLY', takeProfitLong: bad }))).toEqual(['takeProfitLong.levels']);
     const r = parse(perSide({ direction: 'LONG_ONLY' }));
     expect(r.ok && r.value.takeProfitShort).toEqual(SHORT);

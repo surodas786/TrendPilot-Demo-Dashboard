@@ -16,6 +16,8 @@ import {
 import type { InstrumentDto, StrategyVersionDto } from '@trendpilot/db';
 
 export type TpSide = 'LONG' | 'SHORT';
+/** Both sides are always shown in the editor, whatever the direction currently allows. */
+export const TP_SIDES: readonly TpSide[] = ['LONG', 'SHORT'];
 export interface SideTakeProfit {
   mode: TakeProfitMode;
   targets: { id: string; movePct: string; closePct: string }[];

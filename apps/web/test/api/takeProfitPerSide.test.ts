@@ -152,7 +152,7 @@ describe('Settings records', () => {
 
   it('changing the permitted direction keeps both saved configurations; only enabled sides are validated', async () => {
     const [b] = await direct.db.select().from(schema.orderBlocks).where(and(eq(schema.orderBlocks.instrumentId, BTC)));
-    // Short Split, then Long only: the Short configuration is kept (and not validated while unused).
+    // Short Split, then Long only: the Short configuration is kept (and still validated while unused).
     let r = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: b!.revision, body: { takeProfitShort: SHORT_SPLIT } });
     expect(r.status).toBe(200);
     r = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: r.body.revision, body: { direction: 'LONG_ONLY' } });
@@ -191,5 +191,64 @@ describe('Settings records', () => {
     for (const t of short.takeProfits) expect(D(t.price).lt(short.entryPrice)).toBe(true);
     const sum = short.takeProfits.reduce((s: ReturnType<typeof D>, t: { contracts: string }) => s.plus(t.contracts), D(0));
     expect(sum.plus(short.trailing.contracts).toFixed()).toBe(D(short.contracts).toFixed());
+  });
+});
+
+describe('Existing Paper pair: Long Fixed 0.6 % and Short Fixed 0.4 %', () => {
+  const LONG_06 = { mode: 'FIXED', levels: [{ id: 'L06', movePct: '0.6', closePct: '100' }] };
+  const SHORT_04 = { mode: 'FIXED', levels: [{ id: 'S04', movePct: '0.4', closePct: '100' }] };
+  /** trigger / entry, to 6 places. */
+  const ratio = (trigger: string, entry: string) => D(trigger).div(entry).toDecimalPlaces(6).toNumber();
+
+  it('saves both sides independently, keeps the open position on its opening plan, and each new entry uses its own side', async () => {
+    // An existing pair (one shared 3 % target, as before per-side Take Profit) with an open Long.
+    const { a } = await openFromAlert({ version: reverseVersion });
+    const existing = (await openPositionOf(A))!;
+    expect(existing.side).toBe('LONG');
+    const existingTargets = await targetsOf(existing.id);
+    expect(existingTargets.map((t) => t.levelId)).toEqual(['tp1']);
+
+    // Save Long 0.6 % / Short 0.4 %, then reload the block: both persist on their own.
+    const saved = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: a.id }, ifMatch: a.revision, body: { takeProfitLong: LONG_06, takeProfitShort: SHORT_04 } });
+    expect(saved.status).toBe(200);
+    const reread = await call(block.GET, { path: '/x', cookie: cookies.a, params: { id: a.id } });
+    expect(reread.body).toMatchObject({ takeProfitLong: LONG_06, takeProfitShort: SHORT_04 });
+
+    // The already-open Long keeps the plan saved when it opened.
+    expect(snapshotOf((await openPositionOf(A))!).block.takeProfit.levels.map((l) => l.id)).toEqual(['tp1']);
+    expect((await targetsOf(existing.id)).map((t) => [t.levelId, n(t.triggerPrice)])).toEqual(existingTargets.map((t) => [t.levelId, n(t.triggerPrice)]));
+
+    // Short entry (reversal): one target 0.4 % below entry.
+    clock.now = plus(new Date(NEXT.getTime() + M15), 3);
+    await tick('64900', { at: clock.now });
+    await work();
+    expect(await deliver('BEARISH_FLIP', NEXT)).toBe(202);
+    await drain();
+    const short = (await openPositionOf(A))!;
+    expect(short.side).toBe('SHORT');
+    expect(snapshotOf(short)).toMatchObject({ takeProfitSide: 'SHORT', block: { takeProfit: SHORT_04 } });
+    const [st] = await targetsOf(short.id);
+    expect(st!.levelId).toBe('S04');
+    expect(ratio(st!.triggerPrice, short.avgEntryPrice)).toBeCloseTo(0.996, 5);
+
+    // Long entry (reversal back): one target 0.6 % above entry.
+    const BAR3 = new Date(NEXT.getTime() + M15);
+    clock.now = plus(new Date(BAR3.getTime() + M15), 3);
+    await tick('64950', { at: clock.now });
+    await work();
+    expect(await deliver('BULLISH_FLIP', BAR3)).toBe(202);
+    await drain();
+    const long = (await openPositionOf(A))!;
+    expect(long.side).toBe('LONG');
+    expect(long.id).not.toBe(existing.id);
+    expect(snapshotOf(long)).toMatchObject({ takeProfitSide: 'LONG', block: { takeProfit: LONG_06 } });
+    const [lt] = await targetsOf(long.id);
+    expect(lt!.levelId).toBe('L06');
+    expect(ratio(lt!.triggerPrice, long.avgEntryPrice)).toBeCloseTo(1.006, 5);
+
+    // The first Long's record still shows its opening plan.
+    const first = (await positionsOf(A)).find((p) => p.id === existing.id)!;
+    expect(snapshotOf(first).block.takeProfit.levels.map((l) => l.id)).toEqual(['tp1']);
+    expect(await reconciled()).toBe(true);
   });
 });
