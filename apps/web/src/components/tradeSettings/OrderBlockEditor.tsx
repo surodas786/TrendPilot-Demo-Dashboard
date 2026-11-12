@@ -47,6 +47,7 @@ import {
   OPPOSITE_LABELS,
   pairLabel,
   settingsPayload,
+  TP_SIDES,
   validateDraft,
   versionChoices,
   versionLabel,
@@ -425,10 +426,11 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           />
           <p className="text-xs text-muted" data-testid="tp-sides-note">
             Take profit is set separately for Long and Short positions. The side of each confirmed entry selects its plan, which is saved with the position (a reversal uses the new side&apos;s plan).
-            {draft.direction !== 'BOTH' && ` Only the ${draft.direction === 'LONG_ONLY' ? 'Long' : 'Short'} section applies to this direction; the other side's saved settings are kept.`}
+            {draft.direction !== 'BOTH' &&
+              ` This pair currently opens ${draft.direction === 'LONG_ONLY' ? 'Long' : 'Short'} positions only; the ${draft.direction === 'LONG_ONLY' ? 'Short' : 'Long'} settings are saved and apply once that side is allowed.`}
           </p>
-          {sidesOf(draft.direction).map((side) => (
-            <TakeProfitEditor key={side} side={side} draft={draft} err={err} commit={commit} onChange={updateExits} />
+          {TP_SIDES.map((side) => (
+            <TakeProfitEditor key={side} side={side} draft={draft} err={err} commit={commit} onChange={updateExits} inactive={!sidesOf(draft.direction).includes(side)} />
           ))}
           <div className="space-y-3 rounded-lg border border-line p-3" data-testid="trailing-take-profit">
             <Switch

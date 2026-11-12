@@ -18,6 +18,8 @@ interface Props {
   /** Marks a field as left (blur), so its message shows. */
   commit: (path: string) => void;
   onChange: (patch: Partial<Draft>) => void;
+  /** The pair's direction does not currently open this side; its settings are still edited and saved. */
+  inactive?: boolean;
 }
 
 const pct = <span className="pr-2 text-xs text-subtle">%</span>;
@@ -41,7 +43,7 @@ export function allocationText(d: Draft, side: TpSide = 'LONG'): string {
  * entry selects one, saved with the position. How much of the position Take Profit manages is
  * set in Trailing take profit ("Position to close (%)"); split targets divide that share.
  */
-export function TakeProfitEditor({ draft, side, err, commit, onChange }: Props) {
+export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive = false }: Props) {
   const tp = draft.tp[side];
   const key = TP_KEY[side];
   const long = side === 'LONG';
@@ -64,7 +66,12 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange }: Props) 
   const label = long ? 'Long take profit' : 'Short take profit';
 
   return (
-    <div className="space-y-3 rounded-lg border border-line p-3" data-testid={`tp-${side}`} role="group" aria-label={label}>
+    <div className="space-y-3 rounded-lg border border-line p-3" data-testid={`tp-${side}`} data-inactive={inactive || undefined} role="group" aria-label={label}>
+      {inactive && (
+        <p className="text-xs text-warn" data-testid={`tp-${side}-inactive`}>
+          Not used while this pair opens {long ? 'Short' : 'Long'} positions only. Saved for when {long ? 'Long' : 'Short'} entries are allowed.
+        </p>
+      )}
       <SegmentedControl<TakeProfitMode>
         label={label}
         value={tp.mode}

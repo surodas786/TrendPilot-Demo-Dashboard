@@ -204,12 +204,15 @@ function refineTakeProfit(tp: SettingsBase['takeProfitLong'], key: 'takeProfitLo
   if (ids.size !== tp.levels.length) add([key, 'levels'], 'Target IDs must be unique.');
 }
 
-/** Sides a direction can open. A side the direction does not trade keeps its saved Take Profit unchecked. */
+/** Sides a direction can open. */
 export const sidesOf = (d: Direction): ('LONG' | 'SHORT')[] => (d === 'LONG_ONLY' ? ['LONG'] : d === 'SHORT_ONLY' ? ['SHORT'] : ['LONG', 'SHORT']);
 
 function refineSettings(s: SettingsBase, ctx: IssueSink): void {
   const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
-  for (const side of sidesOf(s.direction)) refineTakeProfit(side === 'LONG' ? s.takeProfitLong : s.takeProfitShort, side === 'LONG' ? 'takeProfitLong' : 'takeProfitShort', add);
+  // Both sides are always editable (and saved) whatever the direction, so both are validated:
+  // a side the direction does not trade yet must still be a usable plan once it is allowed.
+  refineTakeProfit(s.takeProfitLong, 'takeProfitLong', add);
+  refineTakeProfit(s.takeProfitShort, 'takeProfitShort', add);
   const trailingOn = s.trailing.enabled;
 
   if (trailingOn) {
