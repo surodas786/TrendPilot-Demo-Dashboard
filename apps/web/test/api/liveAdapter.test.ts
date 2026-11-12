@@ -223,7 +223,9 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '1', closePct: '50' }, { id: 'tp2', movePct: '10', closePct: '50' }] };
     await openFromAlert({ a: { takeProfit: SPLIT }, b: null, hooks: hooks() });
     const before = (await positionsOf(A))[0]!;
-    await tick('65700');
+    await tick('65700'); // arms tp1 (reaching a target never closes)
+    await drain(clock.now, direct.db, hooks());
+    await tick('65600'); // the pullback through tp1 closes its share
     await drain(clock.now, direct.db, hooks());
     const p = (await positionsOf(A))[0]!;
     expect(D(p.contracts).lt(before.contracts)).toBe(true);
@@ -240,7 +242,9 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '1', closePct: '50' }, { id: 'tp2', movePct: '10', closePct: '50' }] };
     await openFromAlert({ a: { takeProfit: SPLIT }, b: null, hooks: hooks() });
     const ref = (await positionsOf(A))[0]!.stopOrderRef;
-    await tick('65700');
+    await tick('65700'); // arms tp1 (reaching a target never closes)
+    await drain(clock.now, direct.db, hooks());
+    await tick('65600'); // the pullback through tp1 closes its share
     await drain(clock.now, direct.db, hooks());
     const p = (await positionsOf(A))[0]!;
     expect(p).toMatchObject({ stopOrderRef: ref, protectionStatus: 'PROTECTED' });
@@ -252,7 +256,9 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '1', closePct: '50' }, { id: 'tp2', movePct: '10', closePct: '50' }] };
     const noResize = venue({ OPEN_WITH_ATTACHED_STOP: 'VERIFIED', REDUCE_ONLY_CLOSE: 'VERIFIED' });
     await openFromAlert({ a: { takeProfit: SPLIT }, b: null, hooks: hooks(noResize) });
-    await tick('65700');
+    await tick('65700'); // arms tp1 (reaching a target never closes)
+    await drain(clock.now, direct.db, hooks(noResize));
+    await tick('65600'); // the pullback through tp1 closes its share
     await drain(clock.now, direct.db, hooks(noResize));
     expect((await positionsOf(A))[0]).toMatchObject({ status: 'OPEN', protectionStatus: 'UNPROTECTED' });
   });

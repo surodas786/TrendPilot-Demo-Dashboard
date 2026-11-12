@@ -46,7 +46,7 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
   const chips = panelA.getByRole('checkbox');
   await expect(chips).toHaveText(DAYS);
   for (const day of DAYS) await expect(panelA.getByRole('checkbox', { name: day })).toHaveAttribute('aria-checked', 'true');
-  await expect(panelA.getByText('Timezone: Asia/Dhaka')).toBeVisible();
+  await expect(panelA.getByText('Timezone: Asia/Dhaka', { exact: true })).toBeVisible();
 
   // Keyboard: Space toggles Sunday, Tab walks the chips to Saturday.
   await panelA.getByRole('checkbox', { name: 'Sunday' }).focus();
@@ -63,7 +63,7 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
 
   const rowA = pageA.getByTestId('order-block-BTCUSDT');
   await expect(rowA).toBeVisible();
-  await expect(rowA.getByTestId('trading-days')).toHaveText('Trading days: Mon–Fri · Asia/Dhaka');
+  await expect(rowA.getByTestId('trading-days')).toHaveText('Trading days: Mon–Fri · Window: All day · Asia/Dhaka');
   await expect(rowA.getByTestId('order-cost')).toHaveText('120.00 USDT');
   await expect(rowA.getByText('Paused')).toBeVisible();
 
@@ -86,7 +86,7 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
   await panelB.getByRole('button', { name: 'Save & Activate' }).click();
 
   const rowB = pageB.getByTestId('order-block-BTCUSDT');
-  await expect(rowB.getByTestId('trading-days')).toHaveText('Trading days: Sat–Sun · Asia/Dhaka');
+  await expect(rowB.getByTestId('trading-days')).toHaveText('Trading days: Sat–Sun · Window: All day · Asia/Dhaka');
   await expect(rowB.getByTestId('order-cost')).toHaveText('35.00 USDT');
   await expect(rowB.getByText('Active — waiting for signal')).toBeVisible();
   await expect(rowB.getByText('Long only')).toBeVisible();
@@ -96,7 +96,7 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
   await pageA.reload();
   await expect(pageA.getByTestId('order-block-BTCUSDT')).toHaveCount(1);
   await expect(rowA.getByTestId('order-cost')).toHaveText('120.00 USDT');
-  await expect(rowA.getByTestId('trading-days')).toHaveText('Trading days: Mon–Fri · Asia/Dhaka');
+  await expect(rowA.getByTestId('trading-days')).toHaveText('Trading days: Mon–Fri · Window: All day · Asia/Dhaka');
   await expect(pageA.getByText('35.00 USDT')).toHaveCount(0);
 
   // ── Direct API requests with A's session cannot reach B's block ──
@@ -134,7 +134,7 @@ test('editing all seven days and pausing persists across reloads', async ({ page
   for (const day of DAYS) await panel.getByRole('checkbox', { name: day }).click();
   await expect(panel.getByText('No days selected — this block will not open new trades.')).toBeVisible();
   await panel.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(row.getByTestId('trading-days')).toHaveText('Trading days: No days — entries blocked · Asia/Dhaka');
+  await expect(row.getByTestId('trading-days')).toHaveText('Trading days: No days — entries blocked · Window: All day · Asia/Dhaka');
 
   await row.getByRole('button', { name: /^Resume/ }).click();
   await expect(row.getByText('Active — waiting for signal')).toBeVisible();
@@ -164,7 +164,7 @@ test('My Account shows only the signed-in investor; settings reload after signin
   await signIn(page, B.email);
   const row = page.getByTestId('order-block-BTCUSDT');
   await expect(row.getByTestId('order-cost')).toHaveText('35.00 USDT');
-  await expect(row.getByTestId('trading-days')).toHaveText('Trading days: Sat–Sun · Asia/Dhaka');
+  await expect(row.getByTestId('trading-days')).toHaveText('Trading days: Sat–Sun · Window: All day · Asia/Dhaka');
   await expect(row.getByText('Active — waiting for signal')).toBeVisible();
   await row.getByRole('button', { name: /^Edit/ }).click();
   const panel = page.getByRole('dialog');

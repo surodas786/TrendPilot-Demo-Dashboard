@@ -36,6 +36,12 @@ export async function getMyPaperAccount(db: Executor, ownerId: string): Promise<
 export interface PositionDto {
   id: string;
   symbol: string;
+  /** The exact contract: exchange and its perpetual symbol (e.g. MEXC · BTC_USDT). */
+  instrumentId: string;
+  exchange: string;
+  exchangeSymbol: string;
+  pair: string;
+  contractMultiplier: string;
   mode: string;
   side: string;
   status: string;
@@ -76,6 +82,10 @@ export interface TargetDto {
   filledContracts: string;
   status: string;
   completedAt: string | null;
+  /** ARM_PULLBACK: arms when reached, closes on a later pullback through the target. TOUCH: legacy, closes when reached. */
+  triggerRule: string;
+  armedAt: string | null;
+  armedPrice: string | null;
 }
 
 export interface TrailingDto {
@@ -95,6 +105,9 @@ export interface TrailingDto {
   watermark: string | null;
   level: string | null;
   updatedAt: string | null;
+  /** Allocated contracts ("Position to close (%)" of the opening quantity) and confirmed fills. Null planned = legacy. */
+  plannedContracts: string | null;
+  filledContracts: string;
 }
 
 const toTarget = (t: typeof positionTargets.$inferSelect): TargetDto => ({
@@ -108,7 +121,10 @@ const toTarget = (t: typeof positionTargets.$inferSelect): TargetDto => ({
   requestedContracts: n(t.requestedContracts)!,
   filledContracts: n(t.filledContracts)!,
   status: t.status,
-  completedAt: t.completedAt?.toISOString() ?? null
+  completedAt: t.completedAt?.toISOString() ?? null,
+  triggerRule: t.triggerRule,
+  armedAt: t.armedAt?.toISOString() ?? null,
+  armedPrice: n(t.armedPrice)
 });
 
 async function targetsByPosition(db: Executor, ownerId: string, positionIds: string[]): Promise<Map<string, TargetDto[]>> {
@@ -126,22 +142,35 @@ async function targetsByPosition(db: Executor, ownerId: string, positionIds: str
 /** Attaches targets and the quantity the trailing exit manages for an open position. */
 function withTargets(pos: PositionDto, targets: TargetDto[]): PositionDto {
   if (!pos.trailing || pos.status !== 'OPEN' || pos.trailing.status === 'DONE') return { ...pos, targets };
-  const contracts = pos.trailing.kind === 'TAKE_PROFIT' ? trailingTakeProfitContracts(pos.contracts, targets) : pos.contracts;
+  const t = pos.trailing;
+  const contracts =
+    t.kind !== 'TAKE_PROFIT'
+      ? pos.contracts
+      : t.plannedContracts !== null
+        ? Decimal.max(0, Decimal.min(new Decimal(t.plannedContracts).minus(t.filledContracts), pos.contracts)).toFixed()
+        : trailingTakeProfitContracts(pos.contracts, targets);
   return { ...pos, targets, trailing: { ...pos.trailing, contracts } };
 }
 
 const positionSelect = (db: Executor) =>
   db
-    .select({ p: positions, symbol: instruments.symbol, ev: signalEvents })
+    .select({ p: positions, symbol: instruments.symbol, inst: { exchange: instruments.exchange, exchangeSymbol: instruments.exchangeSymbol, base: instruments.base, quote: instruments.quote, multiplier: instruments.contractMultiplier }, ev: signalEvents })
     .from(positions)
     .innerJoin(instruments, eq(instruments.id, positions.instrumentId))
     .innerJoin(orderIntents, eq(orderIntents.id, positions.openIntentId))
     .leftJoin(signalEvents, eq(signalEvents.id, orderIntents.eventId));
 
-function toPosition({ p, symbol, ev }: { p: typeof positions.$inferSelect; symbol: string; ev: typeof signalEvents.$inferSelect | null }): PositionDto {
+type InstRef = { exchange: string; exchangeSymbol: string; base: string; quote: string; multiplier: string };
+
+function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect; symbol: string; inst: InstRef; ev: typeof signalEvents.$inferSelect | null }): PositionDto {
   return {
     id: p.id,
     symbol,
+    instrumentId: p.instrumentId,
+    exchange: inst.exchange,
+    exchangeSymbol: inst.exchangeSymbol || symbol,
+    pair: `${inst.base}/${inst.quote}`,
+    contractMultiplier: n(inst.multiplier)!,
     mode: p.mode,
     side: p.side,
     status: p.status,
@@ -177,7 +206,9 @@ function toPosition({ p, symbol, ev }: { p: typeof positions.$inferSelect; symbo
             activatedAt: p.trailingActivatedAt?.toISOString() ?? null,
             watermark: n(p.trailingWatermark),
             level: n(p.trailingStopPrice),
-            updatedAt: p.trailingUpdatedAt?.toISOString() ?? null
+            updatedAt: p.trailingUpdatedAt?.toISOString() ?? null,
+            plannedContracts: n(p.trailingPlannedContracts),
+            filledContracts: n(p.trailingFilledContracts)!
           }
   };
 }
@@ -300,6 +331,20 @@ export interface ExitDto {
   orderId: string | null;
   exchangeFillId: string;
   filledAt: string;
+  /** Signal that caused this exit (signal or reversal close), if any. */
+  signalEventId: string | null;
+}
+
+/** A TradingView signal linked to this position (its opening signal, or a closing one). */
+export interface LinkedSignalDto {
+  eventId: string;
+  role: 'OPEN' | 'CLOSE';
+  action: string;
+  interval: string;
+  source: string;
+  referencePrice: string;
+  barCloseAt: string;
+  receivedAt: string;
 }
 
 export interface ReversalDto {
@@ -328,6 +373,8 @@ export interface TradeDetailDto extends PositionDto {
   fundingUsdt: string;
   /** REP-03: gross realized − all fees + booked funding. */
   netRealizedWithFundingUsdt: string;
+  /** Signals that opened or closed (part of) this position. */
+  signals: LinkedSignalDto[];
 }
 
 export interface FundingDto {
@@ -373,9 +420,23 @@ export async function getMyTrade(db: Executor, ownerId: string, positionId: stri
     remainingContracts: n(x.remainingContracts)!,
     orderId: x.intentId,
     exchangeFillId: x.exchangeFillId,
-    filledAt: x.filledAt.toISOString()
+    filledAt: x.filledAt.toISOString(),
+    signalEventId: null as string | null
   }));
   const closeOrders = await hydrateOrders(db, await orderSelect(db).where(and(eq(orderIntents.positionId, pos.id), eq(orderIntents.ownerId, ownerId))).orderBy(orderIntents.createdAt));
+  for (const x of exits) x.signalEventId = closeOrders.find((o) => o.id === x.orderId)?.signalEventId ?? null;
+  // Event IDs come from this owner's own orders only, so no other investor's data is reachable.
+  const linked = [
+    ...(order.signalEventId ? [{ id: order.signalEventId, role: 'OPEN' as const }] : []),
+    ...closeOrders.filter((o) => o.signalEventId).map((o) => ({ id: o.signalEventId!, role: 'CLOSE' as const }))
+  ];
+  const eventRows = linked.length ? await db.select().from(signalEvents).where(inArray(signalEvents.id, [...new Set(linked.map((l) => l.id))])) : [];
+  const signals: LinkedSignalDto[] = linked.flatMap((l) => {
+    const e = eventRows.find((r) => r.id === l.id);
+    return e
+      ? [{ eventId: e.id, role: l.role, action: e.action, interval: e.interval, source: `${e.sourceExchange}:${e.sourceSymbol}`, referencePrice: n(e.referencePrice)!, barCloseAt: e.barCloseAt.toISOString(), receivedAt: e.receivedAt.toISOString() }]
+      : [];
+  });
   const refs = new Set([order.id, ...order.fills.map((f) => f.exchangeFillId), ...exits.map((x) => x.exchangeFillId)]);
   const ledger = (await listMyLedger(db, ownerId)).filter((l) => refs.has(l.refId) || l.refId.startsWith(`funding:${pos.id}:`));
   const targets = (await targetsByPosition(db, ownerId, [pos.id])).get(pos.id) ?? [];
@@ -393,7 +454,7 @@ export async function getMyTrade(db: Executor, ownerId: string, positionId: stri
   const funding = fundingRows.map((f) => ({ settledAt: f.settledAt.toISOString(), rate: n(f.rate)!, contracts: n(f.contracts)!, markPrice: n(f.markPrice)!, notionalUsdt: n(f.notional)!, amountUsdt: n(f.amount)!, source: f.source }));
   const fundingUsdt = fundingRows.reduce((t, f) => t.plus(f.amount), new Decimal(0)).toFixed();
   const netRealizedWithFundingUsdt = new Decimal(pos.netRealizedUsdt).plus(fundingUsdt).toFixed();
-  return { ...withTargets(pos, targets), order, exits, closeOrders, ledger, reversal: await reversalOf(db, ownerId, pos), reversedFromPositionId, marketData, funding, fundingUsdt, netRealizedWithFundingUsdt };
+  return { ...withTargets(pos, targets), order, exits, closeOrders, ledger, reversal: await reversalOf(db, ownerId, pos), reversedFromPositionId, marketData, funding, fundingUsdt, netRealizedWithFundingUsdt, signals };
 }
 
 /** GET /v1/me/commands/{id}: status of a close command the investor submitted (owner-scoped). */

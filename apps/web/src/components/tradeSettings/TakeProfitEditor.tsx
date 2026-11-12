@@ -2,30 +2,43 @@
 
 import React from 'react';
 import { PlusIcon, Trash2Icon } from 'lucide-react';
-import { Decimal, isDecimalString, type TakeProfitMode } from '@trendpilot/domain';
+import { Decimal, exitAllocation, isDecimalString, type TakeProfitMode } from '@trendpilot/domain';
 import { cn } from '@/lib/cn';
 import { Button } from '../ui/Button';
+import { DecimalField } from '../ui/DecimalField';
 import { SegmentedControl } from '../ui/SegmentedControl';
-import { TextField } from '../ui/TextField';
 import { MAX_TARGETS, newTargetId, type Draft } from './draft';
 
 interface Props {
   draft: Draft;
-  errors: Record<string, string>;
-  showErrors: boolean;
+  /** Inline message for a field path (shown once the field was left or Save was pressed). */
+  err: (path: string) => string | undefined;
+  /** Marks a field as left (blur), so its message shows. */
+  commit: (path: string) => void;
   onChange: (patch: Partial<Draft>) => void;
 }
 
 const pct = <span className="pr-2 text-xs text-subtle">%</span>;
 
-function allocated(d: Draft): string {
-  const total = d.targets.reduce((s, t) => (isDecimalString(t.closePct.trim()) ? s.plus(t.closePct.trim()) : s), new Decimal(0));
-  return total.toFixed();
+function sharesTotal(d: Draft): string {
+  return d.targets.reduce((s, t) => (isDecimalString(t.closePct.trim()) ? s.plus(t.closePct.trim()) : s), new Decimal(0)).toFixed();
 }
 
-/** Adapted from the MagicPatterns TakeProfitEditor: Fixed, Split (2–3 targets) or Off (CFG-03). */
-export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props) {
-  const err = (path: string) => (showErrors ? errors[path] : undefined);
+/** "Take Profit 60% · Trailing take profit 40%" — shared by the editor and its tests. */
+export function allocationText(d: Draft): string {
+  const a = exitAllocation({ takeProfit: { mode: d.tpMode }, trailing: { enabled: d.trailingEnabled, closePct: d.trailingClosePct } });
+  const parts = [`Take profit ${a.takeProfitPct}%`];
+  if (d.trailingEnabled) parts.push(`Trailing take profit ${a.trailingPct}%`);
+  if (a.unallocatedPct !== '0') parts.push(`${a.unallocatedPct}% unallocated (stop loss and signal closes only)`);
+  return parts.join(' · ');
+}
+
+/**
+ * Adapted from the MagicPatterns TakeProfitEditor: Fixed, Split (2–3 targets) or Off (CFG-03).
+ * How much of the position Take Profit manages is set in Trailing take profit ("Position to
+ * close (%)"); split targets divide the Take Profit share between them.
+ */
+export function TakeProfitEditor({ draft, err, commit, onChange }: Props) {
   const setTarget = (i: number, patch: Partial<Draft['targets'][number]>) => onChange({ targets: draft.targets.map((t, j) => (j === i ? { ...t, ...patch } : t)) });
 
   const setMode = (mode: TakeProfitMode) => {
@@ -39,10 +52,8 @@ export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props)
     }
   };
 
-  const total = allocated(draft);
-  const trailing = draft.trailingEnabled;
-  const remainder = isDecimalString(total) ? Decimal.max(0, new Decimal(100).minus(total)).toFixed() : '0';
-  const splitOk = trailing ? new Decimal(total).lt(100) && new Decimal(total).gt(0) : total === '100';
+  const total = sharesTotal(draft);
+  const splitOk = total === '100';
 
   return (
     <div className="space-y-3">
@@ -57,50 +68,44 @@ export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props)
         ]}
         hint={
           draft.tpMode === 'OFF'
-            ? trailing
-              ? 'No fixed target: Trailing take profit manages 100% of the position. The stop loss still applies.'
-              : 'No take-profit target. The stop loss still applies.'
-            : 'A target crossing submits a market close for its share; fill price may differ.'
+            ? 'No take-profit target. The stop loss still applies.'
+            : 'Reaching a target only arms it. A later pullback through the target closes its quantity at market (Long: back below, Short: back above); fill price may differ.'
         }
       />
 
-      {draft.tpMode === 'FIXED' &&
-        (trailing ? (
-          <div className="space-y-1">
-            <div className="grid grid-cols-2 gap-2">
-              <TextField
-                label="Target — price move"
-                inputMode="decimal"
-                value={draft.targets[0]?.movePct ?? ''}
-                onChange={(v) => setTarget(0, { movePct: v })}
-                error={err('takeProfit.levels.0.movePct') ?? err('takeProfit.levels')}
-                trailing={pct}
-              />
-              <TextField label="Target closes" inputMode="decimal" value={draft.targets[0]?.closePct ?? ''} onChange={(v) => setTarget(0, { closePct: v })} error={err('takeProfit.levels.0.closePct')} trailing={pct} />
-            </div>
-            <p className="text-xs text-subtle" data-testid="exit-allocation" aria-live="polite">
-              The fixed target closes {total}% of the position · Trailing take profit manages the remaining {remainder}%.
-            </p>
-          </div>
-        ) : (
-          <TextField
-            label="Target — price move"
-            inputMode="decimal"
-            value={draft.targets[0]?.movePct ?? ''}
-            onChange={(v) => setTarget(0, { movePct: v })}
-            error={err('takeProfit.levels.0.movePct') ?? err('takeProfit.levels')}
-            hint="Single target closing 100% of the position."
-            trailing={pct}
-          />
-        ))}
+      {draft.tpMode === 'FIXED' && (
+        <DecimalField
+          label="Target — price move"
+          value={draft.targets[0]?.movePct ?? ''}
+          onChange={(v) => setTarget(0, { movePct: v })}
+          onCommit={() => commit('takeProfit.levels.0.movePct')}
+          error={err('takeProfit.levels.0.movePct') ?? err('takeProfit.levels')}
+          hint="One target for the whole Take Profit share."
+          trailing={pct}
+        />
+      )}
 
       {draft.tpMode === 'SPLIT' && (
         <>
           <ol className="space-y-3">
             {draft.targets.map((t, i) => (
               <li key={t.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-2">
-                <TextField label={`Target ${i + 1} — move`} inputMode="decimal" value={t.movePct} onChange={(v) => setTarget(i, { movePct: v })} error={err(`takeProfit.levels.${i}.movePct`)} trailing={pct} />
-                <TextField label="Close" inputMode="decimal" value={t.closePct} onChange={(v) => setTarget(i, { closePct: v })} error={err(`takeProfit.levels.${i}.closePct`)} trailing={pct} />
+                <DecimalField
+                  label={`Target ${i + 1} — move`}
+                  value={t.movePct}
+                  onChange={(v) => setTarget(i, { movePct: v })}
+                  onCommit={() => commit(`takeProfit.levels.${i}.movePct`)}
+                  error={err(`takeProfit.levels.${i}.movePct`)}
+                  trailing={pct}
+                />
+                <DecimalField
+                  label="Share of TP"
+                  value={t.closePct}
+                  onChange={(v) => setTarget(i, { closePct: v })}
+                  onCommit={() => commit(`takeProfit.levels.${i}.closePct`)}
+                  error={err(`takeProfit.levels.${i}.closePct`)}
+                  trailing={pct}
+                />
                 <button
                   type="button"
                   onClick={() => onChange({ targets: draft.targets.filter((_, j) => j !== i) })}
@@ -117,13 +122,17 @@ export function TakeProfitEditor({ draft, errors, showErrors, onChange }: Props)
             <Button size="sm" icon={PlusIcon} disabled={draft.targets.length >= MAX_TARGETS} onClick={() => onChange({ targets: [...draft.targets, { id: newTargetId(), movePct: '', closePct: '' }] })}>
               Add target
             </Button>
-            <p className={cn('text-sm tabular-nums', splitOk ? 'text-gain' : 'text-warn')} aria-live="polite" data-testid="exit-allocation">
-              {trailing ? `Targets close ${total}% · Trailing take profit manages ${remainder}%` : `Allocated ${total}% of 100%`}
+            <p className={cn('text-sm tabular-nums', splitOk ? 'text-gain' : 'text-warn')} aria-live="polite" data-testid="split-shares">
+              Shares {total}% of 100% of the Take Profit quantity
             </p>
           </div>
           {(err('takeProfit') ?? err('takeProfit.levels')) && <p className="text-xs text-loss">{err('takeProfit') ?? err('takeProfit.levels')}</p>}
         </>
       )}
+
+      <p className="text-xs text-subtle" data-testid="exit-allocation" aria-live="polite">
+        Of the confirmed opening quantity: {allocationText(draft)}.
+      </p>
     </div>
   );
 }

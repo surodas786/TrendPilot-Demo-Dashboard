@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LiveQuoteDto } from '@trendpilot/db';
 import { request } from '@/lib/api';
 
@@ -33,13 +33,19 @@ const newer = (a: string | undefined, b: string) => !a || Date.parse(b) >= Date.
  * per stored quote. `refresh` re-reads TrendPilot's latest stored quotes. `nowMs` ticks every
  * second so ages stay current between pushes.
  */
-export function useLiveQuotes(initial: LiveQuoteDto[]) {
+export function useLiveQuotes(initial: LiveQuoteDto[], o: { fallbackRefreshMs?: number } = {}) {
   const [items, setItems] = useState<LiveQuoteRow[]>(initial);
   const [connection, setConnection] = useState<LiveConnection>('connecting');
   // null until mounted: ages are computed in the browser only (server and client clocks differ,
   // and a server-rendered age would not match on hydration).
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Browser time of the last pushed or refreshed quote (drives the streaming fallback). */
+  const lastDataMs = useRef(0);
+  const connectionRef = useRef<LiveConnection>('connecting');
+  useEffect(() => {
+    connectionRef.current = connection;
+  }, [connection]);
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -58,6 +64,7 @@ export function useLiveQuotes(initial: LiveQuoteDto[]) {
     es.addEventListener('quote', (e) => {
       const q = JSON.parse((e as MessageEvent).data) as QuoteEvent;
       const at = Date.now();
+      lastDataMs.current = at;
       setItems((cur) =>
         cur.map((row) =>
           row.instrumentId === q.instrumentId && newer(row.quote?.asOf, q.asOf)
@@ -85,9 +92,24 @@ export function useLiveQuotes(initial: LiveQuoteDto[]) {
   const refresh = useCallback(async () => {
     setBusy(true);
     const r = await request<{ items: LiveQuoteDto[] }>('GET', '/v1/market/quotes');
-    if (r.ok) setItems((cur) => r.data.items.map((n) => ({ ...cur.find((c) => c.instrumentId === n.instrumentId), ...n })));
+    if (r.ok) {
+      lastDataMs.current = Date.now();
+      setItems((cur) => r.data.items.map((n) => ({ ...cur.find((c) => c.instrumentId === n.instrumentId), ...n })));
+    }
     setBusy(false);
   }, []);
+
+  // Fallback: when the stream is not live, or has pushed nothing for a whole interval, re-read
+  // TrendPilot's stored quotes on that interval (database only; never MEXC).
+  const fallbackMs = o.fallbackRefreshMs;
+  useEffect(() => {
+    if (!fallbackMs) return;
+    lastDataMs.current = Date.now();
+    const t = setInterval(() => {
+      if (connectionRef.current !== 'live' || Date.now() - lastDataMs.current >= fallbackMs) void refresh();
+    }, fallbackMs);
+    return () => clearInterval(t);
+  }, [fallbackMs, refresh]);
 
   return { items, connection, nowMs, refresh, busy };
 }

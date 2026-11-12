@@ -1,5 +1,5 @@
 import { Decimal } from './decimal';
-import type { PriceBasis } from './orderBlock';
+import { allocateContracts, type PriceBasis } from './orderBlock';
 import type { SignalAction } from './signals';
 import type { OppositePolicy } from './strategy';
 
@@ -135,6 +135,55 @@ export function targetStatusAfter(planned: string, filled: string, inFlight: boo
   if (D(filled).gte(planned)) return 'DONE';
   if (inFlight) return 'REQUESTED';
   return D(filled).gt(0) ? 'PARTIAL' : 'PENDING';
+}
+
+/* ───────────────────────── exit allocation (Take Profit / Trailing Take Profit) ───────────────────────── */
+
+export interface ExitPlan {
+  /** Take-profit targets with their share of the Take Profit allocation (zero-size targets omitted). */
+  targets: PlannedTarget[];
+  /** Contracts assigned to Trailing Take Profit (0 when it is off). */
+  trailingContracts: string;
+  takeProfitContracts: string;
+}
+
+/**
+ * Splits the confirmed opening quantity between Trailing Take Profit ("Position to close (%)")
+ * and Take Profit (the rest, when on), then divides the Take Profit share between its targets.
+ * Each split target closes its share of the Take Profit allocation; the last one gets the exact
+ * remainder so the targets add up to it.
+ */
+export function planExits(
+  side: Side,
+  avgEntry: string,
+  baseContracts: string,
+  s: { takeProfit: { mode: 'FIXED' | 'SPLIT' | 'OFF'; levels: { id: string; movePct: string; closePct: string }[] }; trailing: { enabled: boolean; closePct?: string | null } },
+  spec: { priceTick: string; qtyStep: string }
+): ExitPlan {
+  const a = allocateContracts(baseContracts, s, spec.qtyStep);
+  const targets = D(a.takeProfitContracts).gt(0) ? planTargets(side, avgEntry, a.takeProfitContracts, s.takeProfit, spec).filter((t) => D(t.plannedContracts).gt(0)) : [];
+  return { targets, trailingContracts: a.trailingContracts, takeProfitContracts: a.takeProfitContracts };
+}
+
+/**
+ * How a take-profit target fires.
+ * - ARM_PULLBACK (current): reaching the target only arms it; a later price back through the
+ *   target (below it for a Long, above it for a Short) closes the target's quantity at market.
+ * - TOUCH: positions opened before this rule close as soon as the target is reached; they keep
+ *   the behaviour saved with them.
+ */
+export type TargetTriggerRule = 'ARM_PULLBACK' | 'TOUCH';
+
+/**
+ * One price for one target. The first price at or beyond the target arms it and never closes
+ * on the same price; the trigger needs a later price strictly back through the target.
+ */
+export function advanceTarget(side: Side, rule: TargetTriggerRule, armed: boolean, price: string, target: string): { arm: boolean; trigger: boolean } {
+  const reached = takeProfitReached(side, price, target);
+  if (rule === 'TOUCH') return { arm: false, trigger: reached };
+  if (!armed) return { arm: reached, trigger: false };
+  const back = side === 'LONG' ? D(price).lt(target) : D(price).gt(target);
+  return { arm: false, trigger: back };
 }
 
 /* ───────────────────────── EXT-04 trailing take profit ───────────────────────── */

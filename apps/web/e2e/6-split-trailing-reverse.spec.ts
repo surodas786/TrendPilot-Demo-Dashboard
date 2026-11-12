@@ -50,7 +50,7 @@ async function signIn(page: Page, email: string) {
 test('split profile: both investors open a Long from the shared alert', async ({ baseURL }) => {
   await sql(RESET);
   const out = run(['run', 'demo:paper', '--', '--at', CLOCK, '--profile', 'split']);
-  expect(out).toContain('split TP 50% @ +2% and 30% @ +4%, trailing take profit on 20%: trail 1% after +3% (mark)');
+  expect(out).toContain('trailing take profit closes 20%: trail 1% after +3% (mark); split TP on the other 80%: 62.5% @ +2% and 37.5% @ +4%');
   expect(run(['run', 'replay', '--', '--url', baseURL!])).toMatch(/→ 202 \{"status":"accepted"/);
   expect(run(['run', 'worker:once'])).toMatch(/entriesApproved=2/);
   const targets = await sql<{ level_id: string; trigger_price: string; planned_contracts: string }>(
@@ -58,28 +58,32 @@ test('split profile: both investors open a Long from the shared alert', async ({
   );
   expect(targets).toEqual([
     { level_id: 'tp1', trigger_price: '66300.5', planned_contracts: '76' },
-    { level_id: 'tp2', trigger_price: '67600.5', planned_contracts: '45' }
+    { level_id: 'tp2', trigger_price: '67600.5', planned_contracts: '47' }
   ]);
 });
 
-test('target 1 fills partly (limited liquidity), then resumes for exactly its remainder', async () => {
-  let out = priceThenWorker('66400', '2026-11-08T09:30:20Z', ['--liquidity', '50']);
+test('target 1 arms on the first touch, fills partly on the pullback (limited liquidity), then resumes for exactly its remainder', async () => {
+  let out = priceThenWorker('66400', '2026-11-08T09:30:15Z');
+  expect(out).toMatch(/takeProfitsRequested=0 .*targetsArmed=1/);
+  out = priceThenWorker('66250', '2026-11-08T09:30:20Z', ['--liquidity', '50']);
   expect(out).toMatch(/paper close [0-9a-f-]{36} EXPIRED \(PARTIAL_FILL\) filled=50 remaining=103 exit=TAKE_PROFIT target=tp1/);
-  out = priceThenWorker('66400', '2026-11-08T09:30:30Z');
+  out = priceThenWorker('66250', '2026-11-08T09:30:30Z');
   expect(out).toMatch(/FILLED filled=26 remaining=77 exit=TAKE_PROFIT target=tp1/);
   // The same price again: the completed target is not repeated.
-  out = priceThenWorker('66400', '2026-11-08T09:30:35Z');
+  out = priceThenWorker('66250', '2026-11-08T09:30:35Z');
   expect(out).toMatch(/takeProfitsRequested=0/);
   expect(await count(`SELECT count(*) AS n FROM order_intents WHERE kind = 'CLOSE' AND owner_id = ${A}`)).toBe(2);
   const [stop] = await sql<{ contracts: string }>(`SELECT o.contracts::int::text AS contracts FROM positions p JOIN sim_orders o ON o.client_order_id = p.stop_order_ref WHERE p.owner_id = ${A}`);
   expect(stop!.contracts).toBe('77');
 });
 
-test('trailing activates for A and survives separate worker processes; target 2 fills', async () => {
+test('trailing activates for A and survives separate worker processes; target 2 arms, then fills on the pullback', async () => {
   let out = priceThenWorker('67000', '2026-11-08T09:30:40Z');
   expect(out).toMatch(/trailingActivated=1/);
   out = priceThenWorker('67700', '2026-11-08T09:30:50Z'); // a new worker process
-  expect(out).toMatch(/FILLED filled=45 remaining=32 exit=TAKE_PROFIT target=tp2/);
+  expect(out).toMatch(/takeProfitsRequested=0 .*targetsArmed=1/);
+  out = priceThenWorker('67500', '2026-11-08T09:30:55Z'); // another process: the arming was persisted
+  expect(out).toMatch(/FILLED filled=47 remaining=30 exit=TAKE_PROFIT target=tp2/);
   const [a] = await sql<{ watermark: string; level: string; status: string }>(
     `SELECT trailing_watermark::float8::text AS watermark, trailing_stop_price::float8::text AS level, trailing_status AS status FROM positions WHERE owner_id = ${A}`
   );
@@ -92,15 +96,15 @@ test('A sees target progress, remaining stop coverage and the trailing level', a
   await page.goto('/my-trades');
   const row = page.getByTestId('position-BTCUSDT');
   await expect(row.getByTestId('target-progress')).toContainText('2 of 2 targets filled');
-  await expect(row.getByTestId('stop')).toContainText('Protected · covers 32');
-  await expect(row.getByTestId('trailing')).toContainText('Trailing take profit: Active · closes at 67023 (best 67700) · 32 contracts');
+  await expect(row.getByTestId('stop')).toContainText('Protected · covers 30');
+  await expect(row.getByTestId('trailing')).toContainText('Trailing take profit: Active · closes at 67023 (best 67700) · 30 contracts');
   await row.getByRole('link', { name: 'Details' }).click();
   await expect(page.locator('[data-testid="target"][data-level="tp1"]')).toHaveAttribute('data-status', 'DONE');
   await expect(page.locator('[data-testid="target"][data-level="tp1"]')).toContainText('102'); // requested 76 + 26
   await expect(page.getByTestId('trailing-level')).toHaveText('67023');
   await expect(page.getByTestId('trailing-state')).toHaveText('Active');
-  await expect(page.getByTestId('trailing-contracts')).toHaveText('32 contracts');
-  await expect(page.getByTestId('remaining')).toHaveText('32 of 153');
+  await expect(page.getByTestId('trailing-contracts')).toHaveText('30 contracts');
+  await expect(page.getByTestId('remaining')).toHaveText('30 of 153');
 });
 
 test('the price falls back to the trailing levels: A and B close by TRAILING_TAKE_PROFIT', async () => {

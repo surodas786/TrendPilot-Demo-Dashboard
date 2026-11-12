@@ -4,7 +4,7 @@ import type { Db, Executor } from '../client';
 import { claimNextJob, completeJob, failJob, FenceLostError, type JobRow } from '../jobs';
 import { orderBlocks, orderIntents, positions, signalDecisions, signalEvents, strategyVersions, users } from '../schema';
 import { SIGNAL_DISPATCH_JOB } from './intake';
-import { ENTRY_STEP, evaluateAndReserveEntry, PAPER_SUBMIT_JOB, processPaperSubmit, type SubmitHooks, type SubmitSummary } from '../paper/entry';
+import { ENTRY_STEP, evaluateAndReserveEntry, PAPER_SUBMIT_JOB, processPaperSubmit, windowOf, type SubmitHooks, type SubmitSummary } from '../paper/entry';
 import { MARKET_TICK_JOB, PAPER_CLOSE_JOB, PAPER_REVERSE_JOB, processMarketTick, processPaperClose, requestExit, type CloseSummary, type TickSummary } from '../paper/exits';
 import { processPaperReverse, type ReverseSummary } from '../paper/reversal';
 import { PAPER_FUNDING_JOB, processPaperFunding, type FundingSummary } from '../paper/funding';
@@ -131,7 +131,7 @@ export async function dispatchSignalEvent(tx: Executor, eventId: string, now: Da
         barCloseAt: event.barCloseAt,
         evaluatedAt: now,
         user: { status: c.user.status },
-        block: { status: c.block.status, mode: c.block.mode, direction: c.block.direction, weekdays: c.block.weekdays as Weekday[], timezone: c.block.timezone },
+        block: { status: c.block.status, mode: c.block.mode, direction: c.block.direction, weekdays: c.block.weekdays as Weekday[], timezone: c.block.timezone, tradingWindow: windowOf(c.block) },
         version: { timeframe: c.version.timeframe, permittedDirections: c.version.permittedDirections, signalMaxAgeSeconds: c.version.signalMaxAgeSeconds }
       });
       summary.evaluated += 1;

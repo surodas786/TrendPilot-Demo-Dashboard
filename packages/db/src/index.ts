@@ -38,6 +38,7 @@ export * from './paper/funding';
 export * from './paper/reporting';
 export * from './paper/market';
 export * from './paper/readModels';
+export * from './paper/holdingChart';
 export * from './paper/reversal';
 export * from './paper/simulator';
 export * from './signals/admin';

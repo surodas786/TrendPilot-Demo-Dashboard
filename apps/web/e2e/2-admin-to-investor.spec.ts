@@ -198,7 +198,7 @@ test('the investor configures ETH/USDT, previews the order with fixture data and
   const row = chloe.getByTestId('order-block-ETHUSDT');
   await expect(row.getByText('Active — waiting for signal')).toBeVisible();
   await expect(row).toContainText(`${PKG} · v1 · 5m · Long only`);
-  await expect(row.getByTestId('trading-days')).toHaveText('Trading days: Sun, Mon, Tue, Wed, Thu, Fri · Asia/Dhaka');
+  await expect(row.getByTestId('trading-days')).toHaveText('Trading days: Sun, Mon, Tue, Wed, Thu, Fri · Window: All day · Asia/Dhaka');
 });
 
 test('the investor cannot use admin actions or reach another investor\'s settings', async () => {

@@ -14,6 +14,7 @@ import {
   SlidersHorizontalIcon,
   UserRoundIcon,
   UsersIcon,
+  WalletIcon,
   type LucideIcon
 } from 'lucide-react';
 
@@ -32,6 +33,7 @@ export interface NavItem {
 /** PRD §2.2 investor screens (MagicPatterns consolidated navigation). */
 const investorNav: NavItem[] = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboardIcon },
+  { path: '/my-holdings', label: 'My Holdings', icon: WalletIcon },
   { path: '/my-account', label: 'My Account', icon: UserRoundIcon },
   { path: '/trade-settings', label: 'Trade Settings', icon: SlidersHorizontalIcon },
   { path: '/signals', label: 'Signals', icon: BellRingIcon },

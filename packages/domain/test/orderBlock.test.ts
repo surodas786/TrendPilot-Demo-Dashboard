@@ -4,6 +4,7 @@ import {
   assertModeAllowed,
   catalogIssues,
   DomainError,
+  allocateContracts,
   exitAllocation,
   orderBlockCreateSchema,
   orderBlockPatchSchema,
@@ -77,39 +78,87 @@ describe('order block schema', () => {
     expect(paths(split([{ id: 'a', movePct: '2', closePct: '50' }, { id: 'a', movePct: '3', closePct: '50' }]))).toContain('takeProfit.levels');
   });
 
-  it('a split below 100% is valid only when Trailing Take Profit manages the remainder (EXT-07)', () => {
-    const trail = { enabled: true, activationPct: '3', distancePct: '1', basis: 'MARK' };
-    const levels = [{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '30' }];
-    expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels }, trailing: trail })).ok).toBe(true);
-    expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels } }))).toContain('takeProfit');
+  it('split targets divide the Take Profit share: they always total exactly 100 %, with or without Trailing Take Profit', () => {
+    const trail = { enabled: true, activationPct: '3', distancePct: '1', closePct: '40', basis: 'MARK' };
+    const full = [{ id: 'a', movePct: '2', closePct: '62.5' }, { id: 'b', movePct: '4', closePct: '37.5' }];
+    expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels: full }, trailing: trail })).ok).toBe(true);
+    const short = [{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '30' }];
+    expect(issues(valid({ takeProfit: { mode: 'SPLIT', levels: short }, trailing: trail }))).toContainEqual({ path: 'takeProfit', message: expect.stringMatching(/total 80%/) });
     const over = [{ id: 'a', movePct: '2', closePct: '60' }, { id: 'b', movePct: '4', closePct: '50' }];
     expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels: over }, trailing: trail }))).toContain('takeProfit');
   });
 
-  it('two exits never manage the same quantity: targets closing 100% leave nothing for Trailing Take Profit', () => {
-    const trail = { enabled: true, activationPct: '0.3', distancePct: '0.1', basis: 'MARK' };
-    const full = [{ id: 'a', movePct: '2', closePct: '50' }, { id: 'b', movePct: '4', closePct: '50' }];
-    expect(issues(valid({ takeProfit: { mode: 'SPLIT', levels: full }, trailing: trail }))).toContainEqual({ path: 'takeProfit', message: expect.stringMatching(/nothing is left for Trailing Take Profit/) });
-    expect(issues(valid({ trailing: trail }))).toContainEqual({ path: 'takeProfit.levels.0.closePct', message: expect.stringMatching(/nothing is left for Trailing Take Profit/) });
+  it('Position to close (%) lives on Trailing Take Profit: 0 to 100 inclusive, decimals allowed, empty is not 0', () => {
+    const t = (closePct: unknown) => valid({ trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct, basis: 'MARK' } });
+    for (const v of ['0', '40', '100', '12.5', '0.00000001']) expect(parse(t(v)).ok, v).toBe(true);
+    expect(parse(t('40')).ok && (parse(t('40')) as { value: { trailing: { closePct: string } } }).value.trailing.closePct).toBe('40');
+    for (const v of ['100.1', '-1', 'abc', '1.', '']) expect(paths(t(v)), v).toContain('trailing.closePct');
+    expect(issues(t(null))).toContainEqual({ path: 'trailing.closePct', message: 'Enter Position to close (%), from 0 to 100.' });
+    expect(issues(valid({ trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.closePct', message: 'Enter Position to close (%), from 0 to 100.' });
+    // Off: no allocation may be saved for it.
+    expect(paths(valid({ trailing: { enabled: false, activationPct: null, distancePct: null, closePct: '40', basis: 'MARK' } }))).toContain('trailing');
   });
 
-  it('fixed TP closes 100% on its own, or its share when Trailing Take Profit manages the rest; OFF has no levels', () => {
-    const trail = { enabled: true, activationPct: '0.3', distancePct: '0.1', basis: 'MARK' };
+  it('a fixed target manages the whole Take Profit share; OFF has no levels', () => {
+    const trail = { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '40', basis: 'MARK' };
     expect(paths(valid({ takeProfit: { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] } }))).toContain('takeProfit.levels.0.closePct');
-    expect(parse(valid({ takeProfit: { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] }, trailing: trail })).ok).toBe(true);
-    expect(exitAllocation({ takeProfit: { mode: 'FIXED', levels: [{ id: 'x', movePct: '3', closePct: '60' }] }, trailing: trail as never })).toEqual({ targetsPct: '60', trailingPct: '40' });
+    expect(parse(valid({ trailing: trail })).ok).toBe(true);
     expect(parse(valid({ takeProfit: { mode: 'OFF', levels: [] } })).ok).toBe(true);
     expect(parse(valid({ takeProfit: { mode: 'OFF', levels: [] }, trailing: trail })).ok).toBe(true);
-    expect(exitAllocation({ takeProfit: { mode: 'OFF', levels: [] }, trailing: trail as never })).toEqual({ targetsPct: '0', trailingPct: '100' });
+    expect(paths(valid({ takeProfit: { mode: 'OFF', levels: [{ id: 'x', movePct: '3', closePct: '100' }] } }))).toContain('takeProfit.levels');
   });
 
-  it('Trailing Take Profit requires both Activate after profit and Trail distance — activation is never assumed', () => {
+  it('exitAllocation / allocateContracts: 0 %, 40 %, 100 % with trailing on; trailing off; Take Profit off', () => {
+    const on = (closePct: string) => ({ enabled: true, closePct });
+    const FIXED = { mode: 'FIXED' as const };
+    expect(exitAllocation({ takeProfit: FIXED, trailing: on('0') })).toEqual({ takeProfitPct: '100', trailingPct: '0', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED, trailing: on('40') })).toEqual({ takeProfitPct: '60', trailingPct: '40', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED, trailing: on('100') })).toEqual({ takeProfitPct: '0', trailingPct: '100', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED, trailing: { enabled: false, closePct: null } })).toEqual({ takeProfitPct: '100', trailingPct: '0', unallocatedPct: '0' });
+    // Take Profit off: what Trailing Take Profit does not take stays under the other exit rules.
+    expect(exitAllocation({ takeProfit: { mode: 'OFF' }, trailing: on('40') })).toEqual({ takeProfitPct: '0', trailingPct: '40', unallocatedPct: '60' });
+    expect(exitAllocation({ takeProfit: { mode: 'OFF' }, trailing: { enabled: false } })).toEqual({ takeProfitPct: '0', trailingPct: '0', unallocatedPct: '100' });
+    // Contracts from the confirmed opening quantity: trailing rounds down to the step, Take Profit gets the exact rest.
+    expect(allocateContracts('153', { takeProfit: FIXED, trailing: on('0') }, '1')).toEqual({ trailingContracts: '0', takeProfitContracts: '153' });
+    expect(allocateContracts('153', { takeProfit: FIXED, trailing: on('40') }, '1')).toEqual({ trailingContracts: '61', takeProfitContracts: '92' });
+    expect(allocateContracts('153', { takeProfit: FIXED, trailing: on('100') }, '1')).toEqual({ trailingContracts: '153', takeProfitContracts: '0' });
+    expect(allocateContracts('153', { takeProfit: { mode: 'OFF' }, trailing: on('40') }, '1')).toEqual({ trailingContracts: '61', takeProfitContracts: '0' });
+    expect(allocateContracts('1.5', { takeProfit: FIXED, trailing: on('40') }, '0.001')).toEqual({ trailingContracts: '0.6', takeProfitContracts: '0.9' });
+  });
+
+  it('never throws while a field is cleared or half-typed (Backspace): it reports field issues instead', () => {
+    const trail = { enabled: true, activationPct: '', distancePct: '', closePct: '', basis: 'MARK' };
+    const cases = [
+      valid({ takeProfit: { mode: 'FIXED', levels: [{ id: 'a', movePct: '', closePct: '' }] }, trailing: trail }),
+      valid({ takeProfit: { mode: 'SPLIT', levels: [{ id: 'a', movePct: '', closePct: '50' }, { id: 'b', movePct: '4', closePct: '' }] } }),
+      valid({ takeProfit: { mode: 'SPLIT', levels: [{ id: 'a', movePct: '2.', closePct: '.' }, { id: 'b', movePct: '4', closePct: '50' }] } }),
+      valid({ stop: { type: 'PERCENT', value: '', basis: 'MARK' }, orderCostUsdt: '' })
+    ];
+    for (const c of cases) {
+      expect(() => parse(c)).not.toThrow();
+      expect(parse(c).ok).toBe(false);
+    }
+    expect(paths(cases[0])).toEqual(expect.arrayContaining(['takeProfit.levels.0.movePct', 'trailing.closePct']));
+  });
+
+  it('Trailing Take Profit requires Activate after profit and Trail distance — activation is never assumed', () => {
     const off = { takeProfit: { mode: 'OFF', levels: [] } };
-    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: null, distancePct: '0.1', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.activationPct', message: 'Enter Activate after profit (%).' });
-    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: null, basis: 'MARK' } }))).toContainEqual({ path: 'trailing.distancePct', message: 'Enter Trail distance (%).' });
-    expect(paths(valid({ ...off, trailing: { enabled: true, activationPct: '0', distancePct: '0.1', basis: 'MARK' } }))).toContain('trailing.activationPct');
-    expect(parse(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', basis: 'LAST' } })).ok).toBe(true);
+    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: null, distancePct: '0.1', closePct: '100', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.activationPct', message: 'Enter Activate after profit (%).' });
+    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: null, closePct: '100', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.distancePct', message: 'Enter Trail distance (%).' });
+    expect(paths(valid({ ...off, trailing: { enabled: true, activationPct: '0', distancePct: '0.1', closePct: '100', basis: 'MARK' } }))).toContain('trailing.activationPct');
+    expect(parse(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '100', basis: 'LAST' } })).ok).toBe(true);
     expect(paths(valid({ trailing: { enabled: false, activationPct: '0.3', distancePct: null, basis: 'MARK' } }))).toContain('trailing');
+  });
+
+  it('trading window: optional HH:mm Start and End, never equal; omitted or null = All day', () => {
+    expect(parse(valid({})).ok).toBe(true);
+    expect(parse(valid({ tradingWindow: null })).ok).toBe(true);
+    expect(parse(valid({ tradingWindow: { start: '22:00', end: '02:00' } })).ok).toBe(true);
+    expect(parse(valid({ tradingWindow: { start: '00:00', end: '23:59' } })).ok).toBe(true);
+    expect(paths(valid({ tradingWindow: { start: '24:00', end: '02:00' } }))).toContain('tradingWindow.start');
+    expect(paths(valid({ tradingWindow: { start: '9:00', end: '17:00' } }))).toContain('tradingWindow.start');
+    expect(paths(valid({ tradingWindow: { start: '09:00', end: '' } }))).toContain('tradingWindow.end');
+    expect(paths(valid({ tradingWindow: { start: '09:00', end: '09:00' } }))).toContain('tradingWindow.end');
   });
 
   it('adds are off by default; maxAdds is required only when enabled', () => {

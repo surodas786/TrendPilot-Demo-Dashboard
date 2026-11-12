@@ -51,7 +51,11 @@ test('prepare: same alert, two sizes (A 100 × 10, B 50 × 5); only A’s target
   run(['run', 'demo:paper', '--', '--at', CLOCK, '--profile', 'exits']);
   expect(run(['run', 'replay', '--', '--url', baseURL!])).toMatch(/→ 202 \{"status":"accepted"/);
   expect(run(['run', 'worker:once'])).toMatch(/entriesApproved=2/);
-  run(['run', 'market:tick', '--', '--price', '67000', '--at', T1]);
+  // A's 3 % target: the first touch arms it, the pullback through it closes.
+  const T0 = new Date(new Date(T1).getTime() - 5000).toISOString();
+  run(['run', 'market:tick', '--', '--price', '67000', '--at', T0]);
+  expect(run(['run', 'worker:once'], { SIGNAL_TEST_CLOCK: T0 })).toMatch(/takeProfitsRequested=0 .*targetsArmed=1/);
+  run(['run', 'market:tick', '--', '--price', '66900', '--at', T1]);
   expect(run(['run', 'worker:once'], { SIGNAL_TEST_CLOCK: T1 })).toMatch(/position CLOSED exit=TAKE_PROFIT/);
   for (const k of ['a', 'b'] as const) positionIds[k] = (await sql<{ id: string }>(`SELECT id FROM positions WHERE owner_id = ${owner(EMAIL[k])}`))[0]!.id;
   const sizes = await sql<{ email: string; initial_contracts: string; status: string }>(

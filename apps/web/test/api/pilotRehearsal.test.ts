@@ -146,7 +146,10 @@ describe('Step 12 dry run (mocked MEXC)', () => {
   it('take profit: a reduce-only market close that cannot flip; final position, fees and P&L reconcile', async () => {
     log('', '## 3. Take profit');
     const p = (await openPos())!;
-    await priceAt(plus(clock.now, 30).toISOString(), D(p.takeProfitPrice!).plus(10).toFixed());
+    await priceAt(plus(clock.now, 30).toISOString(), D(p.takeProfitPrice!).plus(10).toFixed()); // reaching the target arms it
+    await drain(clock.now, direct.db, hooks());
+    expect(creates()[1]).toBeUndefined(); // nothing is sent on the first touch
+    await priceAt(plus(clock.now, 30).toISOString(), D(p.takeProfitPrice!).minus(10).toFixed()); // the pullback through it closes
     await drain(clock.now, direct.db, hooks());
     const close = creates()[1]!;
     expect(close).toMatchObject({ side: 4, type: 5, reduceOnly: true, vol: D(p.contracts).toFixed() });

@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { ChevronDownIcon } from 'lucide-react';
 import { PLATFORM_CEILINGS } from '@trendpilot/domain';
 import { cn } from '@/lib/cn';
-import { TextField } from '../ui/TextField';
+import { DecimalField } from '../ui/DecimalField';
 import { RISK_FIELDS, type Draft } from './draft';
 
 interface Props {
@@ -32,10 +32,9 @@ export function RiskSection({ draft, errors, showErrors, onChange }: Props) {
           <p className="text-xs text-subtle">Optional. Leave blank to use the platform ceiling. You can only make limits stricter. Limits block new entries; exits always continue.</p>
           <div className="grid gap-3 sm:grid-cols-2">
             {RISK_FIELDS.map((f) => (
-              <TextField
+              <DecimalField
                 key={f.key}
                 label={f.label}
-                inputMode={f.integer ? 'numeric' : 'decimal'}
                 value={draft.risk[f.key]}
                 placeholder={`Ceiling ${PLATFORM_CEILINGS[f.key]}`}
                 onChange={(v) => onChange({ risk: { ...draft.risk, [f.key]: v } })}

@@ -264,6 +264,12 @@ export const orderBlocks = pgTable(
       .notNull()
       .default(sql`ARRAY['SUN','MON','TUE','WED','THU','FRI','SAT']::text[]`),
     timezone: text('timezone').notNull().default('Asia/Dhaka'),
+    /**
+     * CFG-04 optional daily window for new exposure, HH:mm in `timezone`. Both null = All day.
+     * End earlier than Start crosses midnight (the session belongs to the day it started).
+     */
+    tradingWindowStart: text('trading_window_start'),
+    tradingWindowEnd: text('trading_window_end'),
     allowAdds: boolean('allow_adds').notNull().default(false),
     maxAdds: integer('max_adds'),
     risk: jsonb('risk').notNull().default({}),
@@ -283,6 +289,10 @@ export const orderBlocks = pgTable(
     check('order_blocks_order_cost_positive', sql`${t.orderCostUsdt} > 0`),
     check('order_blocks_leverage_positive', sql`${t.leverage} > 0`),
     check('order_blocks_weekdays_valid', sql`${t.weekdays} <@ ARRAY['SUN','MON','TUE','WED','THU','FRI','SAT']::text[]`),
+    check(
+      'order_blocks_trading_window_valid',
+      sql`(${t.tradingWindowStart} IS NULL AND ${t.tradingWindowEnd} IS NULL) OR (${t.tradingWindowStart} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' AND ${t.tradingWindowEnd} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$' AND ${t.tradingWindowStart} <> ${t.tradingWindowEnd})`
+    ),
     check('order_blocks_max_adds_range', sql`${t.maxAdds} IS NULL OR (${t.maxAdds} BETWEEN 1 AND 10)`),
     check('order_blocks_revision_positive', sql`${t.revision} > 0`)
   ]
@@ -752,6 +762,13 @@ export const positions = pgTable(
     trailingWatermark: price('trailing_watermark'),
     trailingStopPrice: price('trailing_stop_price'),
     trailingUpdatedAt: timestamp('trailing_updated_at', { withTimezone: true }),
+    /**
+     * Contracts of the confirmed opening quantity assigned to Trailing Take Profit ("Position to
+     * close (%)"), and how many of them confirmed fills have closed. Null planned = a position
+     * opened before explicit allocation: its trailing exit manages what no target reserves.
+     */
+    trailingPlannedContracts: qty('trailing_planned_contracts'),
+    trailingFilledContracts: qty('trailing_filled_contracts').notNull().default('0'),
     realizedPnlUsdt: money('realized_pnl_usdt').notNull().default('0'),
     feesUsdt: money('fees_usdt').notNull().default('0'),
     closeReason: text('close_reason'),
@@ -768,7 +785,8 @@ export const positions = pgTable(
     uniqueIndex('positions_one_open_per_scope').on(t.paperAccountId, t.instrumentId, t.mode).where(sql`${t.status} = 'OPEN'`),
     index('positions_owner_idx').on(t.ownerId, t.openedAt),
     check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE', 'DONE')`),
-    check('positions_trailing_kind_valid', sql`${t.trailingKind} IN ('TAKE_PROFIT', 'STOP')`)
+    check('positions_trailing_kind_valid', sql`${t.trailingKind} IN ('TAKE_PROFIT', 'STOP')`),
+    check('positions_trailing_alloc_valid', sql`${t.trailingFilledContracts} >= 0 AND (${t.trailingPlannedContracts} IS NULL OR ${t.trailingFilledContracts} <= ${t.trailingPlannedContracts})`)
   ]
 );
 
@@ -870,11 +888,20 @@ export const positionTargets = pgTable(
     filledContracts: qty('filled_contracts').notNull().default('0'),
     status: text('status').notNull().default('PENDING'),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    /**
+     * ARM_PULLBACK: reaching the target arms it (persisted here, so it survives worker restarts)
+     * and a later price back through the target closes its quantity. TOUCH: targets of positions
+     * opened before that rule, which close when reached.
+     */
+    triggerRule: text('trigger_rule').notNull().default('TOUCH'),
+    armedAt: timestamp('armed_at', { withTimezone: true }),
+    armedPrice: price('armed_price'),
     createdAt: createdAt(),
     updatedAt: updatedAt()
   },
   (t) => [
     uniqueIndex('position_targets_level_key').on(t.positionId, t.levelId),
+    check('position_targets_trigger_rule_valid', sql`${t.triggerRule} IN ('TOUCH', 'ARM_PULLBACK')`),
     check('position_targets_status_valid', sql`${t.status} IN ('PENDING', 'REQUESTED', 'PARTIAL', 'DONE', 'CANCELLED')`),
     check('position_targets_quantities', sql`${t.plannedContracts} >= 0 AND ${t.requestedContracts} >= 0 AND ${t.filledContracts} >= 0 AND ${t.filledContracts} <= ${t.plannedContracts}`)
   ]

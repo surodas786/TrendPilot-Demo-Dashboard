@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Decimal, isDecimalString, normDecimal, percentDistance, positiveDecimal } from './decimal';
 import { DomainError, ErrorCode, type Issue } from './errors';
 import { ALLOWED_MODES } from './liveTransport';
+import { tradingWindowSchema, type TradingWindow } from './tradingWindow';
 import { canonicalWeekdays, WEEKDAYS, type Weekday } from './weekdays';
 
 /** CFG-03 order block schema. Requirement IDs: CFG-03, CFG-04, UI-03. */
@@ -46,6 +47,14 @@ const closeFraction = z
   .refine((v) => !isDecimalString(v) || (new Decimal(v).gt(0) && new Decimal(v).lte(100)), 'Enter a value above 0 and up to 100.')
   .transform(normDecimal);
 
+/** Share of the confirmed opening quantity, 0 to 100 inclusive (0 is a real value, not "empty"). */
+export const allocationPct = z
+  .string({ error: 'Enter the value as a decimal string.' })
+  .trim()
+  .refine(isDecimalString, 'Enter a number from 0 to 100 with up to 8 decimal places.')
+  .refine((v) => !isDecimalString(v) || new Decimal(v).lte(100), 'Enter a value from 0 to 100.')
+  .transform(normDecimal);
+
 /** Stop is required (EXT-01). PERCENT is a distance from entry; PRICE is an absolute trigger price. */
 export const stopSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('PERCENT'), value: percentDistance, basis: z.enum(PRICE_BASES) }).strict(),
@@ -69,17 +78,21 @@ export const takeProfitSchema = z
   .strict();
 
 /**
- * EXT-04 Trailing Take Profit. When enabled, both values are required (refineSettings):
+ * EXT-04 Trailing Take Profit. When enabled, all three values are required (refineSettings):
  * - activationPct: favourable price move from the confirmed average entry before it arms;
- * - distancePct: pullback from the best price since activation that closes its quantity.
- * Both are price movement, before fees and leverage. `basis` is the trigger price stream. The
- * field is nullable only so that old saved blocks still parse; a save never accepts null.
+ * - distancePct: pullback from the best price since activation that closes its quantity;
+ * - closePct ("Position to close (%)"): its share of the confirmed opening quantity, 0-100.
+ *   Take Profit (when on) manages the rest; with Take Profit off the rest stays under the
+ *   stop loss and signal closes only.
+ * Percentages are price movement, before fees and leverage. `basis` is the trigger price stream.
+ * The fields are nullable only so that old saved blocks still parse; a save never accepts null.
  */
 export const trailingSchema = z
   .object({
     enabled: z.boolean(),
     activationPct: percentDistance.nullable(),
     distancePct: percentDistance.nullable(),
+    closePct: allocationPct.nullable().optional(),
     basis: z.enum(PRICE_BASES)
   })
   .strict();
@@ -132,6 +145,8 @@ const settingsBase = z.object({
   takeProfit: takeProfitSchema,
   trailing: trailingSchema,
   weekdays: weekdaysSchema,
+  /** Optional daily window for new exposure (null or omitted = All day). */
+  tradingWindow: tradingWindowSchema.nullable().optional(),
   allowAdds: z.boolean(),
   maxAdds: z.number().int().nullable(),
   risk: riskSchema
@@ -144,6 +159,14 @@ interface IssueSink {
   addIssue(issue: { code: 'custom'; path: (string | number)[]; message: string }): void;
 }
 
+/** A decimal string or null (an empty or partly typed field is reported by its own schema). */
+const dec = (v: string | null | undefined) => (typeof v === 'string' && isDecimalString(v.trim()) ? new Decimal(v.trim()) : null);
+
+/**
+ * Cross-field rules. Runs on raw input too (while the investor is typing), so it must never
+ * throw on an empty or partial number: such values are skipped here and reported by their own
+ * field schema.
+ */
 function refineSettings(s: SettingsBase, ctx: IssueSink): void {
   const tp = s.takeProfit;
   const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
@@ -153,37 +176,37 @@ function refineSettings(s: SettingsBase, ctx: IssueSink): void {
   if (tp.mode === 'FIXED') {
     if (tp.levels.length !== 1) add(['takeProfit', 'levels'], 'Fixed take profit has exactly one target.');
     else {
-      const close = new Decimal(tp.levels[0]!.closePct);
-      // Without Trailing Take Profit the target closes everything. With it, the target closes
-      // its share and Trailing Take Profit manages the rest, so 100 % would leave it nothing.
-      if (!trailingOn && !close.eq(100)) add(['takeProfit', 'levels', 0, 'closePct'], 'A fixed target closes 100% unless Trailing Take Profit manages the rest.');
-      if (trailingOn && close.eq(100))
-        add(['takeProfit', 'levels', 0, 'closePct'], 'The fixed target closes 100%, so nothing is left for Trailing Take Profit. Close less than 100% here, or turn Trailing Take Profit off.');
+      // The single target manages the whole Take Profit share; the split with Trailing Take
+      // Profit is set by Trailing Take Profit's "Position to close (%)".
+      const close = dec(tp.levels[0]!.closePct);
+      if (close && !close.eq(100)) add(['takeProfit', 'levels', 0, 'closePct'], 'A fixed target manages the whole Take Profit share (100%).');
     }
   }
   if (tp.mode === 'SPLIT') {
     if (tp.levels.length < 2) add(['takeProfit', 'levels'], 'Split take profit needs 2 or 3 targets.');
     tp.levels.forEach((l, i) => {
       const prev = tp.levels[i - 1];
-      if (prev && !new Decimal(l.movePct).gt(prev.movePct)) add(['takeProfit', 'levels', i, 'movePct'], 'Must be further than the previous target.');
+      const cur = dec(l.movePct);
+      const before = prev ? dec(prev.movePct) : null;
+      if (cur && before && !cur.gt(before)) add(['takeProfit', 'levels', i, 'movePct'], 'Must be further than the previous target.');
     });
-    const total = tp.levels.reduce((sum, l) => sum.plus(l.closePct), new Decimal(0));
-    // EXT-07: targets close their shares; any remainder belongs to Trailing Take Profit, which
-    // must then exist, and must be left something to manage.
-    if (total.gt(100)) add(['takeProfit'], `Close allocations total ${total.toFixed()}% — they cannot exceed 100%.`);
-    else if (total.lt(100) && !trailingOn)
-      add(['takeProfit'], `Close allocations total ${total.toFixed()}% — allocate exactly 100%, or turn on Trailing Take Profit to manage the remaining ${new Decimal(100).minus(total).toFixed()}%.`);
-    else if (total.eq(100) && trailingOn)
-      add(['takeProfit'], 'The targets close 100%, so nothing is left for Trailing Take Profit. Lower an allocation, or turn Trailing Take Profit off.');
+    // EXT-03: the targets divide the Take Profit share between them, so they total exactly 100%.
+    const parts = tp.levels.map((l) => dec(l.closePct));
+    if (parts.every((p) => p !== null)) {
+      const total = parts.reduce((sum, p) => sum.plus(p!), new Decimal(0));
+      if (!total.eq(100)) add(['takeProfit'], `Target shares total ${total.toFixed()}% — they must total exactly 100% of the Take Profit share.`);
+    }
   }
   const ids = new Set(tp.levels.map((l) => l.id));
   if (ids.size !== tp.levels.length) add(['takeProfit', 'levels'], 'Target IDs must be unique.');
 
   if (trailingOn) {
-    // Both values are explicit: activation is never assumed or derived from the distance.
+    // All values are explicit: activation is never assumed or derived from the distance, and
+    // an empty "Position to close" is not the same as 0.
     if (s.trailing.activationPct === null) add(['trailing', 'activationPct'], 'Enter Activate after profit (%).');
     if (s.trailing.distancePct === null) add(['trailing', 'distancePct'], 'Enter Trail distance (%).');
-  } else if (s.trailing.distancePct !== null || s.trailing.activationPct !== null) {
+    if (s.trailing.closePct === null || s.trailing.closePct === undefined) add(['trailing', 'closePct'], 'Enter Position to close (%), from 0 to 100.');
+  } else if (s.trailing.distancePct !== null || s.trailing.activationPct !== null || (s.trailing.closePct !== null && s.trailing.closePct !== undefined)) {
     add(['trailing'], 'Clear the Trailing Take Profit values while it is off.');
   }
 
@@ -256,7 +279,9 @@ export function assertModeAllowed(mode: Mode): void {
 }
 
 /** API representation of an order block (§10: decimals as strings, opaque IDs). */
-export interface OrderBlockDto extends OrderBlockSettings {
+export interface OrderBlockDto extends Omit<OrderBlockSettings, 'tradingWindow'> {
+  /** null = All day. */
+  tradingWindow: TradingWindow | null;
   id: string;
   instrumentId: string;
   symbol: string;
@@ -275,14 +300,37 @@ export interface OrderBlockDto extends OrderBlockSettings {
 }
 
 /**
- * Share of each new position (in % of the filled quantity) that take-profit targets and
- * Trailing Take Profit manage. The fixed Stop Loss always covers the whole open quantity.
+ * Share of each new position, in % of the confirmed opening quantity, that each exit manages.
+ * With Trailing Take Profit on, its "Position to close (%)" is its share and Take Profit (when
+ * on) manages the rest. With it off, Take Profit manages everything when on. Anything left is
+ * unallocated: it stays open under the stop loss and signal or manual closes. The fixed Stop
+ * Loss always covers the whole open quantity.
  */
-export function exitAllocation(s: Pick<OrderBlockSettings, 'takeProfit' | 'trailing'>): { targetsPct: string; trailingPct: string } {
-  const tp = s.takeProfit;
-  const targets = tp.mode === 'OFF' ? new Decimal(0) : tp.levels.reduce((sum, l) => sum.plus(isDecimalString(l.closePct) ? l.closePct : 0), new Decimal(0));
-  const capped = Decimal.min(targets, 100);
-  return { targetsPct: capped.toFixed(), trailingPct: s.trailing.enabled ? new Decimal(100).minus(capped).toFixed() : '0' };
+export function exitAllocation(s: { takeProfit: { mode: TakeProfitMode }; trailing: { enabled: boolean; closePct?: string | null } }): {
+  takeProfitPct: string;
+  trailingPct: string;
+  unallocatedPct: string;
+} {
+  const trailing = s.trailing.enabled ? Decimal.min(100, dec(s.trailing.closePct) ?? 0) : new Decimal(0);
+  const takeProfit = s.takeProfit.mode === 'OFF' ? new Decimal(0) : new Decimal(100).minus(trailing);
+  return { takeProfitPct: takeProfit.toFixed(), trailingPct: trailing.toFixed(), unallocatedPct: new Decimal(100).minus(trailing).minus(takeProfit).toFixed() };
+}
+
+/**
+ * Contracts of a confirmed opening quantity assigned to Trailing Take Profit and to Take Profit.
+ * The trailing share is rounded down to the contract step; Take Profit (when on) gets the exact
+ * rest, so together they never exceed the position.
+ */
+export function allocateContracts(
+  baseContracts: string,
+  s: { takeProfit: { mode: TakeProfitMode }; trailing: { enabled: boolean; closePct?: string | null } },
+  qtyStep: string
+): { takeProfitContracts: string; trailingContracts: string } {
+  const base = new Decimal(baseContracts);
+  const pct = exitAllocation(s).trailingPct;
+  const trailing = Decimal.min(base, base.times(pct).div(100).div(qtyStep).floor().times(qtyStep));
+  const takeProfit = s.takeProfit.mode === 'OFF' ? new Decimal(0) : base.minus(trailing);
+  return { takeProfitContracts: takeProfit.toFixed(), trailingContracts: trailing.toFixed() };
 }
 
 /** Editable settings of a stored block, used to merge a PATCH before validating the result. */
@@ -297,6 +345,7 @@ export function settingsOf(dto: OrderBlockDto): OrderBlockSettingsInput {
     takeProfit: dto.takeProfit,
     trailing: dto.trailing,
     weekdays: dto.weekdays as Weekday[],
+    tradingWindow: dto.tradingWindow,
     allowAdds: dto.allowAdds,
     maxAdds: dto.maxAdds,
     risk: dto.risk
@@ -314,6 +363,7 @@ export const AUDITED_FIELDS = [
   'takeProfit',
   'trailing',
   'weekdays',
+  'tradingWindow',
   'allowAdds',
   'maxAdds',
   'risk',

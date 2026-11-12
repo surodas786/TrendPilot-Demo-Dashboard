@@ -4,9 +4,9 @@
  *   npm run demo:paper -- [--at <UTC ISO>] [--ema off|on] [--market up|down|flat|gap|none] [--reset-paper] [--profile entries|exits|split|reverse]
  *
  * --profile exits:   both investors trade every day; A has a 3 % fixed TP, B a 6 % fixed TP.
- * --profile split:   A: split TP 50 % at +2 % and 30 % at +4 %, the 20 % remainder on Trailing
- *                    Take Profit (activates at +3 %, 1 % trail, mark). B: no TP, Trailing Take
- *                    Profit on 100 % (activates at +1 %, 1 % trail, last price).
+ * --profile split:   A: Trailing Take Profit closes 20 % (activates at +3 %, 1 % trail, mark);
+ *                    split TP on the other 80 %: 62.5 % of it at +2 % and 37.5 % at +4 %. B: no
+ *                    TP, Trailing Take Profit closes 100 % (activates at +1 %, 1 % trail, last price).
  * --profile reverse: both pinned to a CLOSE_AND_REVERSE version of the package (created and
  *                    published if missing). B may only trade Long, so B's reversal stays flat.
  *
@@ -61,8 +61,8 @@ async function versionWith(db: Db, o: { emaFilter: 'OFF' | 'EMA200'; oppositePol
 }
 
 async function upsertBlock(db: Db, ownerId: string, settings: OrderBlockSettingsInput) {
-  const s = orderBlockSettingsSchema.parse(settings);
-  const values = { ...s, status: 'ACTIVE' as const, timezone: TZ };
+  const { tradingWindow, ...s } = orderBlockSettingsSchema.parse(settings);
+  const values = { ...s, tradingWindowStart: tradingWindow?.start ?? null, tradingWindowEnd: tradingWindow?.end ?? null, status: 'ACTIVE' as const, timezone: TZ };
   const [existing] = await db
     .select({ id: orderBlocks.id })
     .from(orderBlocks)
@@ -106,13 +106,14 @@ try {
     A:
       profile === 'split'
         ? {
-            takeProfit: { mode: 'SPLIT' as const, levels: [{ id: 'tp1', movePct: '2', closePct: '50' }, { id: 'tp2', movePct: '4', closePct: '30' }] },
-            trailing: { enabled: true, activationPct: '3', distancePct: '1', basis: 'MARK' as const }
+            // Trailing Take Profit closes 20 %; the two targets split the other 80 % (62.5 % / 37.5 % of it).
+            takeProfit: { mode: 'SPLIT' as const, levels: [{ id: 'tp1', movePct: '2', closePct: '62.5' }, { id: 'tp2', movePct: '4', closePct: '37.5' }] },
+            trailing: { enabled: true, activationPct: '3', distancePct: '1', closePct: '20', basis: 'MARK' as const }
           }
         : { takeProfit: tp('3'), trailing: off },
     B:
       profile === 'split'
-        ? { takeProfit: { mode: 'OFF' as const, levels: [] }, trailing: { enabled: true, activationPct: '1', distancePct: '1', basis: 'LAST' as const } }
+        ? { takeProfit: { mode: 'OFF' as const, levels: [] }, trailing: { enabled: true, activationPct: '1', distancePct: '1', closePct: '100', basis: 'LAST' as const } }
         : { takeProfit: tp(exitsProfile ? '6' : '3'), trailing: off }
   };
   await upsertBlock(db, ids.A!, { ...common, ...plans.A, orderCostUsdt: '100', leverage: 10, stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' }, weekdays: [...ALL_WEEKDAYS] });
@@ -146,7 +147,7 @@ try {
 
   console.log(`Paper demo ready at ${at.toISOString()} (${WEEKDAY_LABELS[today]} in ${TZ}).`);
   const versionLabel = `${ema ? 'EMA 200' : 'EMA Off'}, ${policy}`;
-  const aPlan = profile === 'split' ? 'split TP 50% @ +2% and 30% @ +4%, trailing take profit on 20%: trail 1% after +3% (mark)' : 'TP 3%';
+  const aPlan = profile === 'split' ? 'trailing take profit closes 20%: trail 1% after +3% (mark); split TP on the other 80%: 62.5% @ +2% and 37.5% @ +4%' : 'TP 3%';
   console.log(`  Investor A: BTC/USDT Paper, ACTIVE, every day, 100 USDT x10, stop 1.5%, ${aPlan} (${versionLabel}).`);
   console.log(
     profile === 'split'

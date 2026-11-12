@@ -312,7 +312,7 @@ Blocks that pass the routing screen now go through the full entry evaluation, in
 - **Sizing (EXE-01):** order cost × leverage ÷ executable price ÷ contract size, using decimal arithmetic and rounding down to the contract step. Size is never increased to reach the minimum.
 - **Risk limits.** The stop must sit before the estimated liquidation price, with a buffer.
 - **Funds:** margin plus fee must fit the available paper balance (`INSUFFICIENT_MARGIN`).
-- **Weekday, twice.** The local weekday is checked at evaluation and again at submission. Crossing into a disabled day cancels the order and releases the reservation.
+- **Weekday and trading window, twice.** The local weekday and the block's optional trading window (Start–End, HH:mm in the block timezone; Start included, End not; a window ending earlier than it starts runs past midnight and belongs to the day it started) are checked at evaluation and again at submission. Outside them the entry is skipped (`DAY_DISABLED` / `OUTSIDE_TRADING_WINDOW`, shown as "Outside trading window" in Signals), or a pending order is cancelled and its reservation released. Exits are never gated.
 
 ### How an entry is executed
 
@@ -468,8 +468,8 @@ Builds on the slice 3 exit engine (same simulator, durable jobs and fixture pric
 
 **Split take profit (EXT-03).**
 - At the confirmed entry fill, each target in the saved plan becomes a `position_targets` row. The row holds the immutable level ID, the trigger price (from the average entry, rounded toward entry) and the target's planned share of the filled quantity, rounded down to the contract step.
-- A plan that allocates 100% gives the last target the exact remainder. A plan below 100% is valid only with Trailing Take Profit enabled, which manages the rest (EXT-07); a plan of exactly 100% leaves it nothing and is refused with it on. A fixed TP is a single target: 100% on its own, or a smaller share when Trailing Take Profit manages the rest.
-- When a target is reached on its basis, the engine sends a reduce-only market close for that target's remaining quantity, capped at the position.
+- **Allocation (EXT-07).** Trailing Take Profit's **Position to close (%)** (0–100, decimals allowed) is its share of the confirmed opening quantity, rounded down to the contract step. Take Profit, when on, manages the exact rest: 0% leaves everything to Take Profit, 100% everything to Trailing Take Profit, 40% splits 40/60. With trailing off, Take Profit manages the whole position. With Take Profit off, anything Trailing Take Profit does not take stays open under the stop loss and signal or manual closes. A fixed target manages the whole Take Profit share; split targets divide it (their shares total exactly 100%) and the last one gets the exact remainder.
+- **Arm, then pull back.** Reaching a target only arms it (persisted on the target row, so it survives worker restarts). A later price strictly back through the target — below it for a Long, above it for a Short — sends a reduce-only market close for that target's unfilled allocation, capped at the position. Positions opened before this rule keep the touch-to-close rule saved with them (`trigger_rule = 'TOUCH'`).
 - *Requested* and *filled* quantities are tracked separately. Only confirmed fills move a target forward (`PENDING → REQUESTED → PARTIAL → DONE`). A partly filled target resumes for exactly its remainder on a later price, and only after its earlier order is reconciled.
 - After every fill, the stop is resized to the remaining quantity and verified.
 - A database trigger stops target progress from ever decreasing and stops a `DONE` target from reopening. Replaying the same price or the same fill repeats nothing.
@@ -499,7 +499,7 @@ Builds on the slice 3 exit engine (same simulator, durable jobs and fixture pric
 
 Use one fixed clock per command. In PowerShell, set it with `$env:SIGNAL_TEST_CLOCK='…'` before each command instead of the `VAR=… cmd` prefix.
 
-**Split TP and Trailing Take Profit** (A: 50% at +2% and 30% at +4%, with the 20% remainder on Trailing Take Profit that activates at +3% and trails 1%, mark price; B: no TP, Trailing Take Profit on 100% that activates at +1% and trails 1%, last price):
+**Split TP and Trailing Take Profit** (A: Trailing Take Profit closes 20% and activates at +3%, trailing 1%, mark price; the two targets split the other 80% — 62.5% of it at +2% and 37.5% at +4%; B: no TP, Trailing Take Profit closes 100%, activates at +1% and trails 1%, last price):
 
 ```sh
 # Terminal 1
@@ -508,18 +508,22 @@ SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run dev
 # Terminal 2
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run demo:paper -- --reset-paper --profile split
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run replay
-SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run worker:once        # entriesApproved=2; A targets tp1 66300.5 (76), tp2 67600.5 (45)
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:03Z npm run worker:once        # entriesApproved=2; A targets tp1 66300.5 (76), tp2 67600.5 (47); trailing 30
 
-npm run market:tick -- --price 66400 --liquidity 50 --at 2026-11-08T09:30:20Z
-SIGNAL_TEST_CLOCK=2026-11-08T09:30:20Z npm run worker:once        # tp1 EXPIRED (PARTIAL_FILL) filled=50 remaining=103
-npm run market:tick -- --price 66400 --at 2026-11-08T09:30:30Z
+npm run market:tick -- --price 66400 --at 2026-11-08T09:30:15Z
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:15Z npm run worker:once        # targetsArmed=1, takeProfitsRequested=0 (first touch only arms tp1)
+npm run market:tick -- --price 66250 --liquidity 50 --at 2026-11-08T09:30:20Z
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:20Z npm run worker:once        # pullback: tp1 EXPIRED (PARTIAL_FILL) filled=50 remaining=103
+npm run market:tick -- --price 66250 --at 2026-11-08T09:30:30Z
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:30Z npm run worker:once        # tp1 FILLED filled=26 remaining=77 (target done)
-npm run market:tick -- --price 66400 --at 2026-11-08T09:30:35Z
+npm run market:tick -- --price 66250 --at 2026-11-08T09:30:35Z
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:35Z npm run worker:once        # takeProfitsRequested=0 (no repeat)
 npm run market:tick -- --price 67000 --at 2026-11-08T09:30:40Z
 SIGNAL_TEST_CLOCK=2026-11-08T09:30:40Z npm run worker:once        # trailingActivated=1 (A: level 66330; B armed at 66400)
 npm run market:tick -- --price 67700 --at 2026-11-08T09:30:50Z
-SIGNAL_TEST_CLOCK=2026-11-08T09:30:50Z npm run worker:once        # tp2 FILLED filled=45 remaining=32; trailing level 67023
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:50Z npm run worker:once        # tp2 armed (targetsArmed=1); trailing level 67023
+npm run market:tick -- --price 67500 --at 2026-11-08T09:30:55Z
+SIGNAL_TEST_CLOCK=2026-11-08T09:30:55Z npm run worker:once        # pullback: tp2 FILLED filled=47 remaining=30
 npm run market:tick -- --price 67000 --at 2026-11-08T09:31:00Z
 SIGNAL_TEST_CLOCK=2026-11-08T09:31:00Z npm run worker:once        # trailingTakeProfitsRequested=2 → A and B closed (TRAILING_TAKE_PROFIT)
 ```
