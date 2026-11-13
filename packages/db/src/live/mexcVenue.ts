@@ -58,7 +58,12 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
 
   const getOrder = async (symbol: string, clientOrderId: string): Promise<NormalizedOrder | null> => {
     try {
-      return normalizeOrder(await o.requester.request<Record<string, unknown>>('GET', `/api/v1/private/order/external/${symbol}/${clientOrderId}`));
+      const data = await o.requester.request<Record<string, unknown> | null | undefined>('GET', `/api/v1/private/order/external/${symbol}/${clientOrderId}`);
+      // MEXC also answers an unknown externalOid with success and no data (seen in production on
+      // 13 Nov 2026), not only with code 2040. Both mean "no such order"; a retry still waits out
+      // reconcileGraceMs before any resubmission, exactly as for 2040.
+      if (data === null || data === undefined) return null;
+      return normalizeOrder(data);
     } catch (e) {
       if (e instanceof MexcPrivateError && e.kind === 'API' && e.code === 2040) return null; // order does not exist
       throw e;

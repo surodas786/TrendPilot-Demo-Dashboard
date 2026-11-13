@@ -292,6 +292,8 @@ export interface NormalizedOrder {
   updateTime: number;
 }
 export function normalizeOrder(o: Record<string, unknown>): NormalizedOrder {
+  if (!o || typeof o !== 'object') throw new MexcPrivateError(`order: expected an order object, got ${o === null ? 'null' : typeof o}`, 'PARSE');
+
   const state = ORDER_STATE[Number(o.state)];
   if (!state) throw new MexcPrivateError(`order ${String(o.orderId)}: unknown state ${String(o.state)}`, 'PARSE');
   return {

@@ -16,6 +16,9 @@ const REASON_LABEL: Record<string, string> = { OUTSIDE_TRADING_WINDOW: OUTSIDE_W
 const reasonLabel = (code: string | null | undefined) => (code ? (REASON_LABEL[code] ?? code) : '');
 /** An entry cancelled at submission records "<CODE> at submission (…)" on the order. */
 const submissionBlock = (stateReason: string | null | undefined) => (stateReason ? (/^(OUTSIDE_TRADING_WINDOW|DAY_DISABLED) at submission/.exec(stateReason)?.[1] ?? null) : null);
+/** The block's own mode as recorded at evaluation: a Live block's order is never labelled Paper. */
+const modeLabel = (mode: 'PAPER' | 'LIVE') => (mode === 'LIVE' ? 'Live' : 'Paper');
+const sideLabel = (side: 'LONG' | 'SHORT' | null) => (side === 'LONG' ? 'Long' : 'Short');
 
 /** The signed-in investor's own signal outcomes (SIG-05: one private decision per investor). */
 export default async function SignalsPage() {
@@ -29,7 +32,7 @@ export default async function SignalsPage() {
     <PageContainer
       title="Signals"
       description="How each shared TradingView alert was evaluated against your own order blocks."
-      scope={`${user.name} · My Account · Paper — simulated orders on fixture or public MEXC prices. Live trading is disabled.`}
+      scope={`${user.name} · My Account · Paper entries are simulated; Live entries are sent to your own MEXC account. Each outcome shows the mode of the order block it was evaluated for.`}
     >
       {outcomes.length === 0 ? (
         <EmptyState icon={BellRingIcon} title="No signal outcomes yet" body="When an approved TradingView alert matches one of your order blocks, its outcome appears here." />
@@ -47,7 +50,7 @@ export default async function SignalsPage() {
             </thead>
             <tbody className="divide-y divide-line">
               {outcomes.map((o) => (
-                <tr key={o.id} data-testid="signal-outcome" data-status={o.status} data-reason={o.reason ?? ''}>
+                <tr key={o.id} data-testid="signal-outcome" data-status={o.status} data-reason={o.reason ?? ''} data-mode={o.mode}>
                   <td className="whitespace-nowrap px-4 py-2.5 text-muted">{fmt(o.signal.barCloseAt)}</td>
                   <td className="px-4 py-2.5 text-ink">
                     {ACTION_LABEL[o.signal.action] ?? o.signal.action}
@@ -56,7 +59,10 @@ export default async function SignalsPage() {
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-muted">
-                    {symbolOf(o.orderBlockId)}
+                    <span className="flex items-center gap-1.5">
+                      {symbolOf(o.orderBlockId)}
+                      <StatusPill tone={o.mode === 'LIVE' ? 'warn' : 'accent'}>{modeLabel(o.mode)}</StatusPill>
+                    </span>
                     <span className="block text-xs text-subtle">strategy v{o.strategyVersion}</span>
                   </td>
                   <td className="px-4 py-2.5" data-testid="outcome-status" data-entry={o.entry?.status ?? ''} data-entry-reason={o.entry?.reason ?? ''}>
@@ -64,7 +70,7 @@ export default async function SignalsPage() {
                       o.exit.status === 'EXIT_REQUESTED' ? (
                         <span className="flex flex-wrap gap-1">
                           <StatusPill tone="warn">
-                            {o.exit.reason === 'REVERSAL_CLOSE' ? 'Close and reverse' : 'Paper close'} · {(o.exit.orderState ?? 'pending').toLowerCase()}
+                            {o.exit.reason === 'REVERSAL_CLOSE' ? 'Close and reverse' : `${modeLabel(o.mode)} close`} · {(o.exit.orderState ?? 'pending').toLowerCase()}
                           </StatusPill>
                           {o.exit.reason === 'REVERSAL_CLOSE' && (
                             <span data-testid="reversal-status" data-reversal={o.entry?.status ?? 'PENDING'} data-reversal-reason={o.entry?.reason ?? ''}>
@@ -72,7 +78,7 @@ export default async function SignalsPage() {
                                 <StatusPill tone="neutral">Opening leg pending</StatusPill>
                               ) : o.entry.status === 'ENTRY_APPROVED' ? (
                                 <StatusPill tone="gain">
-                                  Reversed · Paper {o.side === 'LONG' ? 'Long' : 'Short'} {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
+                                  Reversed · {modeLabel(o.mode)} {sideLabel(o.side)} {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
                                 </StatusPill>
                               ) : (
                                 <StatusPill tone="neutral">Stayed flat · {reasonLabel(o.entry.reason)}</StatusPill>
@@ -91,8 +97,10 @@ export default async function SignalsPage() {
                       <StatusPill tone="neutral">Entry cancelled · {reasonLabel(submissionBlock(o.entry.orderStateReason))}</StatusPill>
                     ) : o.entry.status === 'ENTRY_APPROVED' ? (
                       <StatusPill tone="gain">
-                        Paper {o.side === 'LONG' ? 'Long' : 'Short'} · {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
+                        {modeLabel(o.mode)} {sideLabel(o.side)} · {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
                       </StatusPill>
+                    ) : o.entry.reason === 'LIVE_NOT_ELIGIBLE' ? (
+                      <StatusPill tone="warn">Live entry blocked · {sideLabel(o.side)} not sent</StatusPill>
                     ) : (
                       <StatusPill tone="neutral">Entry skipped · {reasonLabel(o.entry.reason)}</StatusPill>
                     )}
