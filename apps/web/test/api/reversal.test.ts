@@ -63,7 +63,7 @@ describe('successful close-then-open', () => {
     expect(short!.openedAt.getTime()).toBeGreaterThanOrEqual(oldLong!.closedAt!.getTime());
 
     // The new stop was attached in the same simulated request as the reversal entry.
-    const [openOrder] = await direct.db.select().from(schema.simOrders).where(eq(schema.simOrders.clientOrderId, `tp-${(await entryDecisions(A))[1]!.id}`));
+    const [openOrder] = await direct.db.select().from(schema.simOrders).where(eq(schema.simOrders.clientOrderId, (await direct.db.select().from(schema.orderIntents).where(eq(schema.orderIntents.decisionId, (await entryDecisions(A))[1]!.id)))[0]!.clientOrderId));
     const newStop = await stopOf(short!);
     expect(newStop).toMatchObject({ status: 'ACTIVE', reduceOnly: true, side: 'LONG', parentOrderId: openOrder!.id });
     expect(D(newStop.triggerPrice!).gt(short!.avgEntryPrice)).toBe(true);

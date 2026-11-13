@@ -151,6 +151,8 @@ export class MockMexc implements MexcRequester {
       throw new MexcPrivateError(`/api/v1/private/order/create: rejected (code ${code})`, 'API', code);
     }
     const ext = String(b.externalOid);
+    // Production MEXC rejects an externalOid over 32 characters with code 2030 (13 Nov 2026).
+    if (ext.length > 32) throw new MexcPrivateError('/api/v1/private/order/create: rejected (code 2030)', 'API', 2030);
     if (this.orders.has(ext)) throw new MexcPrivateError('mock: DUPLICATE externalOid submitted', 'API', 9999);
     const symbol = String(b.symbol);
     const side = Number(b.side);

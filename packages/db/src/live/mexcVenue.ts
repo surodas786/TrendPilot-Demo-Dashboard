@@ -1,6 +1,7 @@
 import { Decimal } from '@trendpilot/domain';
 import type { CloseResult, OpeningRequest, SimResult } from '../paper/simulator';
 import type { CloseRequest, ExecutionVenue, ProtectionState } from '../venue/types';
+import { MEXC_EXTERNAL_OID_MAX } from '../paper/clientOrderId';
 import { livePilotVerified, type CapabilityId, type CapabilityState } from './capabilities';
 import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, normalizeStops, TREND, trendToBasis, type MexcRequester, type NormalizedOrder, type NormalizedStop } from './mexcPrivate';
 
@@ -116,6 +117,9 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
 
   /** Sends an order; on an uncertain outcome only looks it up. Never resends. */
   const submit = async (symbol: string, clientOrderId: string, body: Record<string, unknown>): Promise<{ accepted: true } | { rejected: string }> => {
+    // MEXC answers a longer externalOid with error 2030. Refuse locally so nothing is sent; an
+    // older intent with a longer stored ID stays as it is and can still be looked up.
+    if (clientOrderId.length > MEXC_EXTERNAL_OID_MAX) return { rejected: 'CLIENT_ORDER_ID_TOO_LONG' };
     try {
       await o.requester.request('POST', '/api/v1/private/order/create', body);
       return { accepted: true };

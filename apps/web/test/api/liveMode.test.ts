@@ -225,7 +225,8 @@ describe('Live entry, attached stop, partial fill, reduce-only close — next to
     const [create] = mx.creates().map((c) => c.body as Record<string, unknown>);
     expect(create).toMatchObject({ symbol: 'BTC_USDT', side: 1, type: 5, leverage: 5, openType: 1, positionMode: 2, lossTrend: 2 });
     expect(create!.stopLossPrice).toBeTruthy();
-    expect(String(create!.externalOid)).toMatch(/^tp-/);
+    expect(String(create!.externalOid)).toMatch(/^[0-9a-f]{32}$/);
+    expect(create!.externalOid).toBe((await liveIntents(A))[0]!.clientOrderId);
 
     const [lp] = await livePos(A);
     const [pp] = await paperPos(A);
