@@ -25,6 +25,7 @@ import type { SimResult } from './simulator';
 import { liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { requestExit } from './exits';
+import { newClientOrderId } from './clientOrderId';
 
 /**
  * STR-01/02 paper entries from a confirmed flat scope (EXE-01…04, ARC-02).
@@ -234,8 +235,9 @@ export async function evaluateAndReserveEntry(
       mode: block.mode,
       kind: 'OPEN',
       side,
-      // Stable and unique per decision: every resubmission reuses it.
-      clientOrderId: `tp-${decision.id}`,
+      // Generated once and stored: every submission, lookup and resubmission reuses it.
+      // 32 characters: fits MEXC's externalOid limit (see clientOrderId.ts).
+      clientOrderId: newClientOrderId(),
       contracts: s.contracts,
       quantity: s.quantity,
       expectedPrice: s.entryPrice,

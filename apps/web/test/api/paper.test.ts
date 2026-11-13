@@ -128,7 +128,7 @@ describe('one shared alert: A opens a protected paper Long, B gets DAY_DISABLED'
     const [intent] = await direct.db.select().from(schema.orderIntents);
     intentId = intent!.id;
     expect(intent).toMatchObject({ state: 'INTENT', side: 'LONG', kind: 'OPEN', mode: 'PAPER', stopBasis: 'MARK' });
-    expect(intent!.clientOrderId).toMatch(/^tp-[0-9a-f-]{36}$/);
+    expect(intent!.clientOrderId).toMatch(/^[0-9a-f]{32}$/); // fits MEXC's 32-character externalOid
     // EXE-01: 100 USDT × 10 at the 65000.5 fixture ask, 0.0001 BTC per contract, rounded down.
     expect(new Decimal(intent!.contracts).toFixed()).toBe('153');
     expect(new Decimal(intent!.expectedPrice).toFixed()).toBe('65000.5');

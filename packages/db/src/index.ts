@@ -34,6 +34,7 @@ export * from './market/mexcWs';
 export * from './market/quoteListener';
 export * from './market/contractCatalog';
 export * from './paper/accounts';
+export * from './paper/clientOrderId';
 export * from './paper/entry';
 export * from './paper/exits';
 export * from './paper/funding';

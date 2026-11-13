@@ -326,6 +326,77 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
   });
 });
 
+describe('MEXC externalOid: at most 32 characters, stored once, reused everywhere (error 2030)', () => {
+  const OID = /^[0-9a-f]{32}$/;
+  const lookupsOf = (id: string) => mexc.calls.filter((c) => c.method === 'GET' && c.path === `/api/v1/private/order/external/BTC_USDT/${id}`);
+
+  it('entry: the stored client order ID is 32 hex characters and is the one sent and looked up', async () => {
+    await openFromAlert({ b: null, hooks: hooks() });
+    const [i] = await intentsOf(A);
+    expect(i!.clientOrderId).toMatch(OID);
+    expect(createBodies().map((b) => b.externalOid)).toEqual([i!.clientOrderId]);
+    expect(lookupsOf(i!.clientOrderId).length).toBeGreaterThan(0);
+    expect(mexc.calls.filter((c) => c.path.startsWith('/api/v1/private/order/external/')).every((c) => c.path.endsWith(`/${i!.clientOrderId}`))).toBe(true);
+    expect(i).toMatchObject({ state: 'FILLED' });
+  });
+
+  it('entry retry after a lost submission resends the SAME stored 32-character ID', async () => {
+    mexc.faults.timeoutBeforeAccept = 1;
+    await openFromAlert({ b: null, hooks: hooks() });
+    const [before] = await intentsOf(A);
+    await later(41);
+    const [after] = await intentsOf(A);
+    expect(after!.clientOrderId).toBe(before!.clientOrderId);
+    expect(createBodies().map((b) => b.externalOid)).toEqual([before!.clientOrderId, before!.clientOrderId]);
+    expect(after!.clientOrderId).toMatch(OID);
+  });
+
+  it('exit: the close intent gets its own 32-character ID, used for the submission and lookups', async () => {
+    await openFromAlert({ b: null, hooks: hooks() });
+    const [p] = await positionsOf(A);
+    await direct.db.transaction((tx) => requestExit(tx, { position: p!, reason: 'MANUAL_CLOSE', now: clock.now }));
+    await drain(clock.now, direct.db, hooks());
+    const [open, close] = await intentsOf(A);
+    expect(close).toMatchObject({ kind: 'CLOSE', state: 'FILLED' });
+    expect(close!.clientOrderId).toMatch(OID);
+    expect(close!.clientOrderId).not.toBe(open!.clientOrderId);
+    expect(createBodies().map((b) => b.externalOid)).toEqual([open!.clientOrderId, close!.clientOrderId]);
+    expect(lookupsOf(close!.clientOrderId).length).toBeGreaterThan(0);
+  });
+
+  it('exit retry after a lost submission resends the SAME stored 32-character ID', async () => {
+    await openFromAlert({ b: null, hooks: hooks() });
+    const [p] = await positionsOf(A);
+    mexc.faults.timeoutBeforeAccept = 1;
+    await direct.db.transaction((tx) => requestExit(tx, { position: p!, reason: 'MANUAL_CLOSE', now: clock.now }));
+    await drain(clock.now, direct.db, hooks());
+    for (let i = 0; i < 6 && (await positionsOf(A))[0]!.status === 'OPEN'; i++) await later(15);
+    const close = (await intentsOf(A)).at(-1)!;
+    expect(close.clientOrderId).toMatch(OID);
+    expect(createBodies().slice(1).map((b) => b.externalOid)).toEqual([close.clientOrderId, close.clientOrderId]);
+    expect((await positionsOf(A))[0]).toMatchObject({ status: 'CLOSED' });
+  });
+
+  it('a historical 39/40-character ID is kept and still looked up, but never sent to MEXC', async () => {
+    const v = venue();
+    const old = 'tp-310c38b4-d4e1-4183-84ef-9a59bb904355';
+    const oldExit = 'tpx-0f1f90f5-768d-462d-8422-436378c92bdf';
+    const open = await v.placeOpeningOrderWithStop({ paperAccountId: 'a', clientOrderId: old, instrumentId: 'i', side: 'LONG', contracts: '10', contract: { multiplier: '0.0001', qtyStep: '1', minQty: '1', takerFeeRate: '0.0004' }, quote: { bid: '65000', ask: '65001' }, stop: { price: '64000', basis: 'MARK' }, now: new Date(), leverage: 5 } as never);
+    expect(open).toMatchObject({ status: 'REJECTED', clientOrderId: old, reason: 'CLIENT_ORDER_ID_TOO_LONG' });
+    mexc.positions.set('BTC_USDT:1', { positionId: 1, symbol: 'BTC_USDT', positionType: 1, holdVol: '10', holdAvgPrice: '65000' } as never);
+    const close = await v.placeReduceOnlyClose({ paperAccountId: 'a', clientOrderId: oldExit, instrumentId: 'i', positionSide: 'LONG', contracts: '10', contract: { multiplier: '0.0001', qtyStep: '1', takerFeeRate: '0.0004' }, quote: { bid: '65000', ask: '65001', mark: '65000', last: '65000' }, now: new Date() } as never);
+    expect(close).toMatchObject({ status: 'REJECTED', clientOrderId: oldExit, reason: 'CLIENT_ORDER_ID_TOO_LONG' });
+    expect(mexc.creates()).toHaveLength(0);
+    expect(lookupsOf(old)).toHaveLength(1);
+    expect(lookupsOf(oldExit)).toHaveLength(1);
+    expect(await v.lookupOrder(old, 'i')).toBeNull();
+  });
+
+  it('the mock answers an over-long externalOid like production MEXC: code 2030', async () => {
+    await expect(mexc.request('POST', '/api/v1/private/order/create', { symbol: 'BTC_USDT', side: 1, vol: '1', externalOid: 'tp-310c38b4-d4e1-4183-84ef-9a59bb904355' })).rejects.toMatchObject({ code: 2030 });
+  });
+});
+
 describe('isolation of the two investors through the adapter', () => {
   it('one alert opens one position per investor with its own client order ID and stop', async () => {
     await openFromAlert({ hooks: hooks() });

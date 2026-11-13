@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { newClientOrderId } from './clientOrderId';
 import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import {
   advanceTarget,
@@ -108,7 +108,7 @@ export async function requestExit(
       targetLevelId: input.targetLevelId ?? null,
       idempotencyKey: input.idempotencyKey ?? null,
       requestedBy: input.requestedBy ?? null,
-      clientOrderId: `tpx-${randomUUID()}`,
+      clientOrderId: newClientOrderId(),
       contracts: contracts.toFixed(),
       quantity: D(p.quantity).times(contracts).div(p.contracts).toFixed(),
       expectedPrice: p.avgEntryPrice,
