@@ -18,7 +18,9 @@
     "market-funding": "tsx src/cli/market-funding.ts",
     "ops-bootstrap-admin": "tsx src/cli/ops-bootstrap-admin.ts",
     "ops-mail": "tsx src/cli/ops-mail.ts",
-    "mexc-readonly-check": "tsx src/cli/mexc-readonly-check.ts"
+    "mexc-readonly-check": "tsx src/cli/mexc-readonly-check.ts",
+    "live-preflight": "tsx src/cli/live-preflight.ts",
+    "alert-trace": "tsx src/cli/alert-trace.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

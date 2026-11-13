@@ -272,6 +272,8 @@ export interface SignalOutcomeDto {
   evaluatedAt: string;
   orderBlockId: string;
   strategyVersion: number;
+  /** Trading mode of the order block when this alert was evaluated (Paper simulator or Live MEXC). */
+  mode: 'PAPER' | 'LIVE';
   /** Exit decision for an open position (close requested or held). */
   exit?: { status: 'EXIT_REQUESTED' | 'HELD'; reason: string | null; reasonText: string | null; positionId: string | null; orderState: string | null };
   /** Entry evaluation and paper order, when the block passed the routing screen. */
@@ -305,7 +307,7 @@ const outcomeSelect = (db: Executor) =>
     .innerJoin(signalEvents, eq(signalEvents.id, signalDecisions.eventId));
 
 function toOutcome({ d, e }: { d: typeof signalDecisions.$inferSelect; e: typeof signalEvents.$inferSelect }): SignalOutcomeDto {
-  const detail = d.detail as { side: SignalOutcomeDto['side']; failedChecks: string[]; reasonText: string | null; strategyVersion: number };
+  const detail = d.detail as { side: SignalOutcomeDto['side']; failedChecks: string[]; reasonText: string | null; strategyVersion: number; mode?: string };
   return {
     id: d.id,
     status: d.status as SignalOutcomeDto['status'],
@@ -316,6 +318,8 @@ function toOutcome({ d, e }: { d: typeof signalDecisions.$inferSelect; e: typeof
     evaluatedAt: d.evaluatedAt.toISOString(),
     orderBlockId: d.orderBlockId,
     strategyVersion: detail.strategyVersion,
+    // Recorded with every routing decision; decisions from before Live existed are Paper.
+    mode: detail.mode === 'LIVE' ? 'LIVE' : 'PAPER',
     signal: {
       eventId: e.id,
       action: e.action,

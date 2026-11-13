@@ -9,6 +9,7 @@ import {
   ENTRY_REASON_TEXT,
   entryGate,
   evaluatePaperEntry,
+  type EntryEvaluation,
   localTime,
   type TradingWindow,
   PAPER_POLICY,
@@ -18,10 +19,10 @@ import {
 import type { Db, Executor } from '../client';
 import { enqueueJob, completeJob, type JobRow } from '../jobs';
 import { fills, instruments, orderBlocks, orderIntents, positions, positionTargets, signalDecisions, signalEvents, strategyVersions } from '../schema';
-import { availableOf, book, lockPaperAccount } from './accounts';
+import { availableOf, book, lockPaperAccount, type PaperAccountRow } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
 import type { SimResult } from './simulator';
-import { liveEntryEligibility, resolveAccountVenue } from '../live/liveMode';
+import { liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { requestExit } from './exits';
 
@@ -91,21 +92,25 @@ function snapshotOf(block: BlockRow, version: VersionRow, side: 'LONG' | 'SHORT'
   };
 }
 
-/** Phase 1. Called only for blocks that passed the routing screen; runs in the dispatch transaction. */
-export async function evaluateAndReserveEntry(
-  tx: Executor,
-  input: { event: EventRow; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; extraDetail?: Record<string, unknown> }
-): Promise<EntryOutcome> {
-  const { event, block, version, side, now } = input;
-  const extra = input.extraDetail ?? {};
-  const [existing] = await tx
-    .select({ id: signalDecisions.id, status: signalDecisions.status, reason: signalDecisions.reason })
-    .from(signalDecisions)
-    .where(and(eq(signalDecisions.eventId, event.id), eq(signalDecisions.orderBlockId, block.id), eq(signalDecisions.step, ENTRY_STEP)));
-  if (existing) return { status: existing.status as EntryOutcome['status'], reason: existing.reason as EntryReason | null };
+export interface EntryAssessment {
+  /** Strategy, market, risk and sizing result (the same for Paper and Live). */
+  result: EntryEvaluation;
+  /** Live gates for an entry the strategy approved; null for Paper or when the strategy refused. */
+  live: LiveEligibility | null;
+  /** Balance the sizing was checked against (Live: capped by MEXC's synced available-to-open). */
+  availableUsdt: string;
+}
 
-  // ARC-02: the account lock serialises reservations and scope checks for this investor.
-  const account = await lockPaperAccount(tx, block.ownerId, block.mode);
+/**
+ * The read-only part of phase 1: exposure in scope, quote, EMA, sizing and risk, then (Live) the
+ * Live gates. Writes nothing. The worker calls it under the account lock; the read-only Live
+ * preflight calls it with an unlocked read of the same account, so both use one implementation.
+ */
+export async function assessEntry(
+  tx: Executor,
+  input: { event: Pick<EventRow, 'interval' | 'barOpenAt' | 'referencePrice'>; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; account: PaperAccountRow }
+): Promise<EntryAssessment> {
+  const { event, block, version, side, now, account } = input;
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
   const [openInScope] = await tx
     .select({ n: count() })
@@ -117,6 +122,7 @@ export async function evaluateAndReserveEntry(
     .where(and(eq(orderIntents.paperAccountId, account.id), eq(orderIntents.instrumentId, block.instrumentId), eq(orderIntents.mode, block.mode), inArray(orderIntents.state, [...UNRESOLVED])));
   const [openForOwner] = await tx.select({ n: count() }).from(positions).where(and(eq(positions.ownerId, block.ownerId), eq(positions.mode, block.mode), eq(positions.status, 'OPEN')));
 
+  const availableUsdt = availableOf(account);
   const quote = await latestQuote(tx, block.instrumentId, now);
   const ema =
     version.emaFilter === 'EMA200' ? emaAtSignalBar(await loadClosedCandles(tx, block.instrumentId, event.interval, event.barOpenAt), event.barOpenAt, Number(event.interval) * 60_000) : null;
@@ -138,11 +144,36 @@ export async function evaluateAndReserveEntry(
     quote,
     ema,
     spec: { contractMultiplier: inst!.contractMultiplier, qtyStep: inst!.qtyStep, minQty: inst!.minQty, maxQty: inst!.maxQty, priceTick: inst!.priceTick, takerFeeRate: inst!.takerFeeRate },
-    account: { availableUsdt: availableOf(account) },
+    account: { availableUsdt },
     exposure: { openPositionInScope: Number(openInScope!.n) > 0, unresolvedIntentInScope: Number(unresolved!.n) > 0, openPositionsForOwner: Number(openForOwner!.n) },
     trailingConversionRequired: block.trailingConversionRequired,
     now
   });
+  // Live: the same strategy result must also pass the Live gates (switches, approved account,
+  // activation, allowlist, limits). The worker checks them again right before sending.
+  const live =
+    result.ok && block.mode === 'LIVE'
+      ? await liveEntryEligibility(tx, { ownerId: block.ownerId, instrumentId: block.instrumentId, contracts: result.sizing.contracts, price: result.sizing.entryPrice, leverage: block.leverage, openContracts: '0' })
+      : null;
+  return { result, live, availableUsdt };
+}
+
+/** Phase 1. Called only for blocks that passed the routing screen; runs in the dispatch transaction. */
+export async function evaluateAndReserveEntry(
+  tx: Executor,
+  input: { event: EventRow; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; extraDetail?: Record<string, unknown> }
+): Promise<EntryOutcome> {
+  const { event, block, version, side, now } = input;
+  const extra = input.extraDetail ?? {};
+  const [existing] = await tx
+    .select({ id: signalDecisions.id, status: signalDecisions.status, reason: signalDecisions.reason })
+    .from(signalDecisions)
+    .where(and(eq(signalDecisions.eventId, event.id), eq(signalDecisions.orderBlockId, block.id), eq(signalDecisions.step, ENTRY_STEP)));
+  if (existing) return { status: existing.status as EntryOutcome['status'], reason: existing.reason as EntryReason | null };
+
+  // ARC-02: the account lock serialises reservations and scope checks for this investor.
+  const account = await lockPaperAccount(tx, block.ownerId, block.mode);
+  const { result, live } = await assessEntry(tx, { event, block, version, side, now, account });
 
   const base = { eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId };
   if (!result.ok) {
@@ -154,10 +185,8 @@ export async function evaluateAndReserveEntry(
   }
 
   const s = result.sizing;
-  // Live: the same strategy result must also pass the Live gates (switches, approved account,
-  // activation, allowlist, limits). The worker checks them again right before sending.
   if (block.mode === 'LIVE') {
-    const live = await liveEntryEligibility(tx, { ownerId: block.ownerId, instrumentId: block.instrumentId, contracts: s.contracts, price: s.entryPrice, leverage: block.leverage, openContracts: '0' });
+    if (!live) throw new Error(`Live block ${block.id} was approved without a Live eligibility check.`);
     if (!live.verdict.ok) {
       await tx
         .insert(signalDecisions)

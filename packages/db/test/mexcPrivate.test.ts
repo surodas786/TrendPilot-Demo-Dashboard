@@ -158,6 +158,8 @@ describe('normalization (documented fields)', () => {
     });
     expect(normalizeOrder({ orderId: 5, externalOid: 'tp-x', symbol: 'BTC_USDT', side: 4, vol: 10, dealVol: 6, dealAvgPrice: 65000, state: 4, takerFee: 0.1, makerFee: 0 })).toMatchObject({ state: 'CANCELLED', dealVol: '6', side: 4 });
     expect(() => normalizeOrder({ orderId: 5, state: 9 })).toThrow(/unknown state/);
+    // A missing order body is a clear parse error, never a TypeError.
+    expect(() => normalizeOrder(undefined as never)).toThrow(/expected an order object, got undefined/);
     const deals = normalizeDeals([
       { id: 1, orderId: 5, vol: 4, price: 65000, fee: 0.1, timestamp: 2 },
       { id: 1, orderId: 5, vol: 4, price: 65000, fee: 0.1, timestamp: 2 },

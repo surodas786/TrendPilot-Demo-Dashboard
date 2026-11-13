@@ -66,6 +66,11 @@ export interface MockFaults {
 export class MockMexc implements MexcRequester {
   price: Record<string, string> = { BTC_USDT: '65000' };
   positionMode: 1 | 2 = 1;
+  /**
+   * How an unknown externalOid is answered. 'EMPTY_DATA' is what production MEXC returned on
+   * 13 Nov 2026 (success, code 0, no data); 'ERROR_2040' is the documented "order not exist".
+   */
+  missingOrder: 'ERROR_2040' | 'EMPTY_DATA' = 'ERROR_2040';
   orders = new Map<string, MockOrder>();
   deals = new Map<number, { id: number; orderId: number; symbol: string; side: number; vol: string; price: string; fee: string; timestamp: number }[]>();
   stops = new Map<number, MockStop>();
@@ -129,6 +134,7 @@ export class MockMexc implements MexcRequester {
     const o = this.orders.get(ext);
     if (!o || left > 0) {
       if (left > 0) this.invisible.set(ext, left - 1);
+      if (this.missingOrder === 'EMPTY_DATA') return undefined;
       throw new MexcPrivateError(`${path}: order not exist (code 2040)`, 'API', 2040);
     }
     return { ...o, leverage: 10, openType: 1, makerFee: '0', profit: '0', feeCurrency: 'USDT', category: 1, orderType: 5, errorCode: 0, updateTime: o.createTime };

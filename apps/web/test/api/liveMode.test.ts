@@ -4,7 +4,7 @@
 // refused in production). Nothing leaves the process.
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getMyPaperAccount, installLiveSyncSeam, installLiveTestSeam, reconcileMyAccount, schema, syncLiveAccount, type ConnectionRow, type LiveTestSeam } from '@trendpilot/db';
+import { getMyPaperAccount, installLiveSyncSeam, limitsOf, installLiveTestSeam, reconcileMyAccount, schema, syncLiveAccount, type ConnectionRow, type LiveTestSeam } from '@trendpilot/db';
 import { Decimal } from '@trendpilot/domain';
 import * as blocks from '@/app/v1/me/order-blocks/route';
 import * as resume from '@/app/v1/me/order-blocks/[id]/resume/route';
@@ -15,6 +15,7 @@ import * as activate from '@/app/v1/me/live/activate/route';
 import * as meHalt from '@/app/v1/me/live/halt/route';
 import * as holdings from '@/app/v1/me/holdings/route';
 import * as dashboard from '@/app/v1/me/dashboard/route';
+import * as mySignals from '@/app/v1/me/signals/route';
 import * as closePos from '@/app/v1/me/positions/[id]/close/route';
 import * as adminLive from '@/app/v1/admin/live/route';
 import * as platform from '@/app/v1/admin/live/platform/route';
@@ -554,5 +555,85 @@ describe('Deployment transport off', () => {
     });
     const live = (await decisionsOf(A)).find((d) => d.reason === 'LIVE_NOT_ELIGIBLE');
     expect((live!.detail as any).liveReason).toBe('LIVE_ORDER_NOTIONAL');
+  });
+});
+
+describe('Routing of a bearish alert for an investor whose only block for the pair is Live', () => {
+  const shortAlert = (setup: () => Promise<void>) =>
+    openFromAlert({
+      side: 'SHORT',
+      a: null, // no Paper block for A: nothing to fall back to, and nothing may be created
+      b: null,
+      market: async () => {
+        await setup();
+        const { writeMarketFixture } = await import('@trendpilot/db');
+        await writeMarketFixture(direct.db, { instrumentId: BTC, interval: '15', endBarOpen: new Date('2026-11-08T09:15:00Z'), count: 260, endClose: '65000', trend: 'DOWN', quoteAt: clock.now });
+      }
+    });
+  const intentsOf = async (email: string) => direct.db.select().from(schema.orderIntents).where(eq(schema.orderIntents.ownerId, await userId(email)));
+  const submitJobsFor = async (intentIds: string[]) =>
+    (await direct.db.select().from(schema.jobs).where(eq(schema.jobs.kind, 'paper.submit'))).filter((j) => intentIds.includes((j.payload as { intentId: string }).intentId));
+  const signalsOf = async () => {
+    const r = await call(mySignals.GET, { method: 'GET', path: '/v1/me/signals', cookie: cookies.a });
+    expect(r.status).toBe(200);
+    return r.body.items as { mode: string; side: string; entry?: { status: string; reason: string | null; reasonText: string | null; orderId: string | null; orderState: string | null } }[];
+  };
+
+  it('an eligible Live block queues one Live job (intent mode LIVE) that reaches MEXC; Signals reports Live Short, not Paper', async () => {
+    await shortAlert(async () => {
+      await connectAndBlock('a', A);
+      await platformOn();
+    });
+    const intents = await intentsOf(A);
+    expect(intents).toHaveLength(1);
+    expect(intents[0]).toMatchObject({ mode: 'LIVE', side: 'SHORT', kind: 'OPEN' });
+    expect(intents.filter((i) => i.mode === 'PAPER')).toHaveLength(0);
+    // The job kind is shared with Paper; the intent's mode routes it to the MEXC venue.
+    const jobs = await submitJobsFor(intents.map((i) => i.id));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.status).toBe('DONE');
+    const [create] = (await mockOf(A)).creates().map((c) => c.body as Record<string, unknown>);
+    expect(create).toMatchObject({ symbol: 'BTC_USDT', side: 3, externalOid: intents[0]!.clientOrderId });
+    expect(create!.stopLossPrice).toBeTruthy();
+    expect(await paperPos(A)).toHaveLength(0);
+    expect(await livePos(A)).toHaveLength(1);
+
+    const [o] = await signalsOf();
+    expect(o).toMatchObject({ mode: 'LIVE', side: 'SHORT', entry: { status: 'ENTRY_APPROVED', orderId: intents[0]!.id } });
+  });
+
+  it('production MEXC answers an unknown client order ID with success and no data: the order is still sent once and filled (13 Nov XAU incident)', async () => {
+    await shortAlert(async () => {
+      await connectAndBlock('a', A);
+      await platformOn();
+      (await mockOf(A)).missingOrder = 'EMPTY_DATA';
+    });
+    const [intent] = await intentsOf(A);
+    expect(intent).toMatchObject({ mode: 'LIVE', state: 'FILLED' });
+    const jobs = await submitJobsFor([intent!.id]);
+    expect(jobs.map((j) => [j.status, j.lastError])).toEqual([['DONE', null]]); // was DEAD: TypeError reading 'state'
+    expect((await mockOf(A)).creates()).toHaveLength(1);
+    expect(await livePos(A)).toHaveLength(1);
+    expect((await livePos(A))[0]!.protectionStatus).toBe('PROTECTED');
+  });
+
+  it('a blocked Live entry records its exact reason, queues nothing and never falls back to Paper', async () => {
+    await shortAlert(async () => {
+      await connectAndBlock('a', A);
+      await platformOn();
+      await direct.db.update(schema.exchangeConnections).set({ positionMode: 'HEDGE' }).where(eq(schema.exchangeConnections.ownerId, await userId(A)));
+    });
+    const [entry] = (await decisionsOf(A)).filter((d) => d.step === 'ENTRY_V1');
+    expect(entry).toMatchObject({ status: 'SKIPPED', reason: 'LIVE_NOT_ELIGIBLE' });
+    expect((entry!.detail as any).liveBlockers).toContain('LIVE_POSITION_MODE');
+    expect(await intentsOf(A)).toHaveLength(0); // neither Live nor Paper
+    expect((await mockOf(A)).creates()).toHaveLength(0);
+    expect(await positionsOf(A)).toHaveLength(0);
+    // Configured limits and the attached stop were not relaxed to get an order through.
+    expect(limitsOf(await connRow(A))).toMatchObject({ maxOrderNotionalUsdt: expect.anything(), maxLeverage: LIMITS.maxLeverage });
+
+    const [o] = await signalsOf();
+    expect(o).toMatchObject({ mode: 'LIVE', side: 'SHORT', entry: { status: 'SKIPPED', reason: 'LIVE_NOT_ELIGIBLE', orderId: null } });
+    expect(o!.entry!.reasonText).toMatch(/One-way/);
   });
 });
