@@ -141,8 +141,10 @@ export interface VenueQuote {
 
 /** Sanitized evidence of what was sent to the venue and what it answered (never credentials). */
 export interface VenueDiagnostics {
-  request?: { method: string; path: string; body: Record<string, unknown> } | null;
-  response?: { code: number | string | null; message: string | null } | null;
+  /** `context`: exchange state the request was built from (account mode, matched position). */
+  request?: { method: string; path: string; body: Record<string, unknown>; context?: Record<string, unknown> } | null;
+  /** `positionAfter`: what the exchange position holds on a fresh read after the order was final. */
+  response?: { code: number | string | null; message: string | null; positionAfter?: string | null } | null;
 }
 
 export type CloseResult =
