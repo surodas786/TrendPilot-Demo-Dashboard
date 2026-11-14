@@ -38,7 +38,7 @@ export function classifyCloseRejection(reason: string | null | undefined): Close
     if (GONE_MEXC.has(code)) return 'POSITION_GONE';
     return 'TRANSIENT';
   }
-  if (r === 'CLIENT_ORDER_ID_TOO_LONG' || r.startsWith('CAPABILITY_UNVERIFIED') || r.startsWith('CLOSE_POSITION_MISMATCH')) return 'DETERMINISTIC';
+  if (r === 'CLIENT_ORDER_ID_TOO_LONG' || r.startsWith('CAPABILITY_UNVERIFIED') || r.startsWith('CLOSE_POSITION_MISMATCH') || r === 'CLOSE_QTY_RESERVED') return 'DETERMINISTIC';
   if (r === 'REDUCE_ONLY_NO_POSITION' || r === 'POSITION_ALREADY_FLAT') return 'POSITION_GONE';
   return 'TRANSIENT';
 }
@@ -55,6 +55,8 @@ export const AUTO_CLOSE_RETRY = {
 export function exitHaltText(reason: string): string {
   if (/^MEXC_2001\b/.test(reason))
     return 'MEXC rejected the closing order with error 2001 (order direction). Automatic exits for this position are paused so the same order is not resent. The exchange stop loss is still in place. Close the position on MEXC or contact support; an operator clears the pause once the cause is fixed.';
+  if (reason.startsWith('CLOSE_QTY_RESERVED'))
+    return 'MEXC reports the whole position as frozen by other orders, so no closing order was sent. Automatic exits for this position are paused; the exchange stop loss is still in place. Cancel the other open orders for this contract on MEXC or contact support.';
   if (reason.startsWith('EXIT_RETRY_LIMIT')) return `The closing order was rejected ${AUTO_CLOSE_RETRY.maxAttempts} times. Automatic exits for this position are paused; the exchange stop loss is still in place. Close the position on MEXC or contact support.`;
   return `The exchange rejected the closing order (${reason}). Automatic exits for this position are paused so it is not resent; the exchange stop loss is still in place. Close the position on MEXC or contact support.`;
 }

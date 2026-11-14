@@ -52,6 +52,13 @@ describe('buildMexcCloseOrder: exact serialized request', () => {
     expect(buildMexcCloseOrder(base({ exchangePosition: { positionId: '9', side: 'SHORT', contracts: '0', marginMode: 'ISOLATED' } }))).toMatchObject({ ok: false, reason: 'REDUCE_ONLY_NO_POSITION' });
   });
 
+  it('closable = holdVol − frozenVol: a full close uses exactly that; all frozen → nothing is sent', () => {
+    expect(buildMexcCloseOrder(base({ exchangePosition: { positionId: '9', side: 'SHORT', contracts: '25', frozen: '5', marginMode: 'ISOLATED' }, contracts: '25' }))).toMatchObject({ ok: true, vol: '20' });
+    expect(buildMexcCloseOrder(base({ exchangePosition: { positionId: '9', side: 'SHORT', contracts: '25', frozen: '5', marginMode: 'ISOLATED' }, contracts: '12' }))).toMatchObject({ ok: true, vol: '12' });
+    expect(buildMexcCloseOrder(base({ exchangePosition: { positionId: '9', side: 'SHORT', contracts: '25', frozen: '25', marginMode: 'ISOLATED' } }))).toMatchObject({ ok: false, reason: 'CLOSE_QTY_RESERVED' });
+    expect(classifyCloseRejection('CLOSE_QTY_RESERVED')).toBe('DETERMINISTIC');
+  });
+
   it('refuses when the exchange position is on the other side or has no usable ID (nothing is sent)', () => {
     expect(buildMexcCloseOrder(base({ exchangePosition: { positionId: '9', side: 'LONG', contracts: '12', marginMode: 'ISOLATED' } }))).toMatchObject({ ok: false, reason: 'CLOSE_POSITION_MISMATCH:SIDE' });
     expect(buildMexcCloseOrder(base({ exchangePosition: { positionId: 'undefined', side: 'SHORT', contracts: '12', marginMode: 'ISOLATED' } }))).toMatchObject({ ok: false, reason: 'CLOSE_POSITION_MISMATCH:POSITION_ID' });

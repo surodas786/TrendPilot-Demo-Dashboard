@@ -50,7 +50,7 @@ afterAll(async () => {
   await teardown();
 });
 
-async function openLive(side: 'LONG' | 'SHORT', block: Record<string, unknown> = {}, o: { reverse?: boolean } = {}) {
+async function openLive(side: 'LONG' | 'SHORT', block: Record<string, unknown> = {}, o: { reverse?: boolean; closeOnly?: boolean } = {}) {
   await openFromAlert({
     side,
     a: null,
@@ -58,7 +58,8 @@ async function openLive(side: 'LONG' | 'SHORT', block: Record<string, unknown> =
     market: async () => {
       const put = await call(conn.PUT, { method: 'PUT', path: '/x', cookie: cookies.a, body: { accountRef: 'UID …4821', apiKey: 'mx0vglTESTKEYAAAAAAA1234', secretKey: 'TESTSECRETaaaaaaaaaaaaaaaaaaaaaa' } });
       expect(put.body.connection.status).toBe('VERIFIED');
-      const version = o.reverse ? { strategyVersionId: await publishVersion({ oppositePolicy: 'CLOSE_AND_REVERSE' }) } : {};
+      const policy = o.reverse ? 'CLOSE_AND_REVERSE' : o.closeOnly ? 'CLOSE_ONLY' : null;
+      const version = policy ? { strategyVersionId: await publishVersion({ oppositePolicy: policy }) } : {};
       const created = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: blockBody({ mode: 'LIVE', weekdays: ALL_DAYS, ...TWELVE, ...version, ...block }) });
       expect(created.status).toBe(201);
       expect((await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: created.body.id }, ifMatch: created.body.revision })).status).toBe(200);
@@ -113,8 +114,9 @@ describe('serialized close request through the real flow', () => {
     const body = closeCreates()[0]!.body as Record<string, unknown>;
     expect(body).toEqual({ symbol: 'BTC_USDT', price: D(SHORT_TRIGGER).plus('0.5').toFixed(), vol: '12', side: 2, type: 5, openType: 1, externalOid: close!.clientOrderId, positionId: mexcPos.positionId, reduceOnly: true, positionMode: 2 });
     expect(close).toMatchObject({ exitReason: 'TRAILING_TAKE_PROFIT', state: 'FILLED' });
-    expect(close!.venueRequest).toEqual({ method: 'POST', path: '/api/v1/private/order/create', body });
+    expect(close!.venueRequest).toMatchObject({ method: 'POST', path: '/api/v1/private/order/create', body });
     expect(JSON.stringify(close!.venueRequest)).not.toMatch(/TESTKEY|TESTSECRET|signature/i);
+    expect(close!.venueResponse).toMatchObject({ code: 0, positionAfter: '0' }); // fresh read: MEXC holds none of it
     expect(await posById(p.id)).toMatchObject({ status: 'CLOSED' });
     expect(mx.positions.get('BTC_USDT:1')).toBeUndefined(); // no Long was opened by the close
   });
@@ -302,7 +304,7 @@ describe('exact serialized close request: manual close and reversal, Long and Sh
       const price = D(side === 'LONG' ? quote.bid : quote.ask).toFixed();
       expect(closeCreates().map((c) => c.body)).toEqual([expectedClose(side, D(p.contracts).toFixed(), price, close!.clientOrderId, mexcPos.positionId)]);
       expect(close).toMatchObject({ exitReason: 'MANUAL_CLOSE', state: 'FILLED' });
-      expect(close!.venueRequest).toEqual({ method: 'POST', path: '/api/v1/private/order/create', body: closeCreates()[0]!.body });
+      expect(close!.venueRequest).toMatchObject({ method: 'POST', path: '/api/v1/private/order/create', body: closeCreates()[0]!.body });
     });
 
     it(`reversal of a ${side}: the exact close first, the opposite entry only after MEXC is flat`, async () => {
@@ -347,5 +349,84 @@ describe('exact serialized close request: manual close and reversal, Long and Sh
     expect(mx.positions.get('BTC_USDT:2')).toBeUndefined();
     expect(await posById(p.id)).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
     expect((await posById(p.id)).exitHaltReason).toMatch(/^MEXC_2001 on REVERSAL_CLOSE/);
+  });
+});
+
+describe('exact serialized close request: fixed take profit and close-on-signal, Long and Short', () => {
+  for (const side of ['LONG', 'SHORT'] as const) {
+    it(`fixed take profit of a ${side}: armed at the target, closed on the pullback with the exact body`, async () => {
+      const p = await openLive(side, { takeProfit: { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '0.5', closePct: '100' }] } });
+      const mexcPos = mx.positions.get(`BTC_USDT:${side === 'LONG' ? 1 : 2}`)!;
+      const [arm, pull] = side === 'LONG' ? ['65500', '65300'] : ['64500', '64700'];
+      await px(arm); // reaching the target arms it; nothing is sent
+      expect(closeCreates()).toHaveLength(0);
+      await px(pull);
+      const [close] = await closeIntents(p.id);
+      expect(close).toMatchObject({ exitReason: 'TAKE_PROFIT', state: 'FILLED' });
+      const price = side === 'LONG' ? D(pull).minus('0.5').toFixed() : D(pull).plus('0.5').toFixed();
+      expect(closeCreates().map((c) => c.body)).toEqual([expectedClose(side, D(p.contracts).toFixed(), price, close!.clientOrderId, mexcPos.positionId)]);
+      expect((close!.venueRequest as { context: unknown }).context).toEqual({
+        positionModeRaw: 2,
+        accountMode: 'ONE_WAY',
+        position: { positionId: String(mexcPos.positionId), positionType: side === 'LONG' ? 1 : 2, openType: 1, holdVol: D(p.contracts).toFixed(), frozenVol: '0' },
+        requestedContracts: D(p.contracts).toFixed()
+      });
+    });
+
+    it(`close-on-signal of a ${side} (CLOSE_ONLY): the exact body, and no opposite entry`, async () => {
+      const p = await openLive(side, {}, { closeOnly: true });
+      const mexcPos = mx.positions.get(`BTC_USDT:${side === 'LONG' ? 1 : 2}`)!;
+      const next = new Date(BAR.getTime() + M15);
+      clock.now = plus(new Date(next.getTime() + M15), 3);
+      setTestClock(() => clock.now);
+      const mid = side === 'LONG' ? '64900' : '65100';
+      const { recordMarketTick } = await import('@trendpilot/db');
+      await recordMarketTick(direct.db, { instrumentId: BTC, asOf: clock.now, bid: D(mid).minus('0.5').toFixed(), ask: D(mid).plus('0.5').toFixed(), mark: mid, last: mid });
+      mx.price.BTC_USDT = mid;
+      await drain(clock.now, direct.db);
+      expect(await deliver(side === 'LONG' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', next, mid)).toBe(202);
+      await drain(clock.now, direct.db);
+      const [close] = await closeIntents(p.id);
+      expect(close).toMatchObject({ exitReason: 'OPPOSITE_SIGNAL_CLOSE', state: 'FILLED' });
+      const price = side === 'LONG' ? D(mid).minus('0.5').toFixed() : D(mid).plus('0.5').toFixed();
+      expect(mx.creates().map((c) => c.body)).toEqual([expectedClose(side, D(p.contracts).toFixed(), price, close!.clientOrderId, mexcPos.positionId)]);
+    });
+  }
+
+  it('already flat at MEXC (Long closed on the website): a manual close sends nothing; the sync closes it', async () => {
+    const p = await openLive('LONG');
+    mx.manualClose('BTC_USDT', 1, D(p.contracts).toFixed(), '65000', { fee: '0.01', profit: '0' });
+    const r = await call(closeRoute.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: p.id }, headers: { 'idempotency-key': 'flat-long' } });
+    expect(r.status).toBe(202);
+    await drain(clock.now, direct.db);
+    expect(closeCreates()).toHaveLength(0);
+    expect((await closeIntents(p.id))[0]).toMatchObject({ state: 'REJECTED', stateReason: 'REDUCE_ONLY_NO_POSITION' });
+    expect((await posById(p.id)).exitHaltedAt).toBeNull(); // not deterministic: exchange state decides
+    await syncLiveAccount(direct.db, await userId(A), plus(clock.now, 5));
+    expect(await posById(p.id)).toMatchObject({ status: 'CLOSED', closeReason: 'EXTERNAL_CLOSE' });
+  });
+
+  it('volume frozen by other MEXC orders: the full close is capped at holdVol − frozenVol; the stop covers the remainder', async () => {
+    const p = await openLive('SHORT');
+    mx.positions.get('BTC_USDT:2')!.frozenVol = '4';
+    const r = await call(closeRoute.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: p.id }, headers: { 'idempotency-key': 'frozen-volume' } });
+    expect(r.status).toBe(202);
+    await drain(clock.now, direct.db);
+    expect(closeCreates().map((c) => (c.body as Record<string, unknown>).vol)).toEqual(['8']);
+    const after = await posById(p.id);
+    expect(D(after.contracts).toFixed()).toBe('4');
+    expect(after).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
+    expect(D(after.stopContracts!).toFixed()).toBe('4');
+  });
+
+  it('every contract frozen: nothing is sent and automatic exits pause with an actionable reason', async () => {
+    const p = await openLive('SHORT', TRAILING);
+    mx.positions.get('BTC_USDT:2')!.frozenVol = '12';
+    await px(SHORT_ACTIVATE);
+    await px(SHORT_TRIGGER);
+    for (let k = 0; k < 5; k++) await px(SHORT_TRIGGER, 5);
+    expect(closeCreates()).toHaveLength(0);
+    expect(await closeIntents(p.id)).toEqual([expect.objectContaining({ state: 'REJECTED', stateReason: 'CLOSE_QTY_RESERVED' })]);
+    expect((await posById(p.id)).exitHaltReason).toMatch(/^CLOSE_QTY_RESERVED/);
   });
 });

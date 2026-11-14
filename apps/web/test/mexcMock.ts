@@ -39,6 +39,8 @@ interface MockPosition {
   holdAvgPrice: string;
   leverage: number;
   openType: number;
+  /** Volume reserved by other orders (MEXC frozenVol). */
+  frozenVol?: string;
 }
 
 export interface MockFaults {
@@ -182,7 +184,7 @@ export class MockMexc implements MexcRequester {
     const id = this.seq++;
     const vol = D(String(b.vol));
     if (!opening) {
-      const closable = pos ? D(pos.holdVol) : D(0);
+      const closable = pos ? D(pos.holdVol).minus(pos.frozenVol ?? 0) : D(0);
       if (vol.gt(closable)) throw new MexcPrivateError('/api/v1/private/order/create: insufficient closable position (code 2008)', 'API', 2008);
     }
     if (opening && !b.stopLossPrice) throw new MexcPrivateError('mock: opening order without stopLossPrice', 'API', 5001);
