@@ -196,6 +196,15 @@ export function mexcReadOnly(conn: ConnectionRow, env: Record<string, string | u
     stops: async (symbol: string) => normalizeStops(await read.request('GET', '/api/v1/private/stoporder/open_orders', { symbol })),
     deals: (symbol: string, startMs: number) => dealHistory(read, symbol, startMs),
     order: (orderId: string) => orderById(read, orderId),
+    /** Raw order by MEXC order ID (all fields MEXC returns), null when not listed. */
+    rawOrder: async (orderId: string) => {
+      try {
+        return (await read.request<Record<string, unknown> | null>('GET', `/api/v1/private/order/get/${orderId}`)) ?? null;
+      } catch (e) {
+        if (e instanceof MexcPrivateError && e.kind === 'API' && e.code === 2040) return null;
+        throw e;
+      }
+    },
     orderByClientId: async (symbol: string, clientOrderId: string) => {
       try {
         const data = await read.request<Record<string, unknown> | null | undefined>('GET', `/api/v1/private/order/external/${symbol}/${clientOrderId}`);

@@ -48,6 +48,9 @@ const D = (v: Decimal.Value) => new Decimal(v);
 const num = (v: Decimal.Value) => new Decimal(v).toFixed();
 const basisToTrend = (b: string | undefined | null) => (b === 'MARK' ? TREND.MARK : b === 'INDEX' ? TREND.INDEX : TREND.LAST);
 
+/** The only order-create endpoint the adapter calls (opening and closing orders). */
+export const MEXC_ORDER_CREATE_PATH = '/api/v1/private/order/create';
+
 /* ───────────────────────── Close order builder (pure) ───────────────────────── */
 
 export interface MexcCloseInput {
@@ -176,7 +179,7 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
 
   const positions = async (symbol: string) => normalizePositions(await o.requester.request('GET', '/api/v1/private/position/open_positions', { symbol })).filter((p) => p.open && D(p.contracts).gt(0));
 
-  const CREATE = '/api/v1/private/order/create';
+  const CREATE = MEXC_ORDER_CREATE_PATH;
   type Sent = ({ accepted: true } | { rejected: string }) & { diagnostics: VenueDiagnostics };
   /** Sends an order; on an uncertain outcome only looks it up. Never resends. */
   const submit = async (symbol: string, clientOrderId: string, body: Record<string, unknown>): Promise<Sent> => {
