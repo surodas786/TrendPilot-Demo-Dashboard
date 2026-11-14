@@ -155,6 +155,13 @@
       "when": 1794486754960,
       "tag": "0021_m11_take_profit_per_side",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1794635415925,
+      "tag": "0022_m12_live_manual_close_sync",
+      "breakpoints": true
     }
   ]
 }

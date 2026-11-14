@@ -314,6 +314,8 @@ export interface ConnectionDto {
   haltReason: string | null;
   lastSyncAt: string | null;
   lastSyncError: string | null;
+  /** Last sync that completed every MEXC query. */
+  lastSyncOkAt: string | null;
   drift: unknown[];
   revision: number;
 }
@@ -337,6 +339,7 @@ export const connectionDto = (c: ConnectionRow): ConnectionDto => ({
   haltReason: c.haltReason,
   lastSyncAt: c.lastSyncAt?.toISOString() ?? null,
   lastSyncError: c.lastSyncError,
+  lastSyncOkAt: c.lastSyncOkAt?.toISOString() ?? null,
   drift: (c.drift ?? []) as unknown[],
   revision: c.revision
 });

@@ -135,7 +135,21 @@ export async function requestExit(
 export async function recordExitFill(
   db: Db,
   tx: Executor,
-  input: { position: PositionRow; fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date }; reason: ExitReason; intentId: string | null; targetLevelId?: string | null; now: Date; venue?: ExecutionVenue }
+  input: {
+    position: PositionRow;
+    /** `realizedPnl`: the exchange's own figure for these fills (Live sync); computed from the price when absent. */
+    fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date; realizedPnl?: string | null };
+    reason: ExitReason;
+    intentId: string | null;
+    targetLevelId?: string | null;
+    now: Date;
+    venue?: ExecutionVenue;
+    /**
+     * Live manual-close reconciliation: once the venue confirms zero, the position closes even if a
+     * stop is still listed (the caller reports that stop separately). Default: the stop must be gone.
+     */
+    closeOnVenueFlat?: boolean;
+  }
 ): Promise<{ recorded: boolean; remaining: string; closed: boolean }> {
   const p = input.position;
   const venue = input.venue ?? paperVenue(db);
@@ -143,7 +157,7 @@ export async function recordExitFill(
   const before = D(p.contracts);
   const qty = Decimal.min(input.fill.contracts, before); // never more than the managed quantity
   const remaining = before.minus(qty);
-  const pnl = realizedPnl(p.side as 'LONG' | 'SHORT', p.avgEntryPrice, input.fill.price, qty.toFixed(), inst!.contractMultiplier);
+  const pnl = input.fill.realizedPnl != null && qty.eq(input.fill.contracts) ? D(input.fill.realizedPnl).toFixed() : realizedPnl(p.side as 'LONG' | 'SHORT', p.avgEntryPrice, input.fill.price, qty.toFixed(), inst!.contractMultiplier);
   const release = marginRelease(p.marginUsdt, before.toFixed(), qty.toFixed());
 
   const [exit] = await tx
@@ -207,7 +221,7 @@ export async function recordExitFill(
       // inspection below decides; a cancel error must not undo the recorded exit.
       if (stopId) await venue.cancelOrder(stopId, p.instrumentId).catch(() => undefined);
       const s = stopId ? await venue.inspectProtection(stopId, p.instrumentId) : null;
-      closed = !s || s.status !== 'ACTIVE';
+      closed = !s || s.status !== 'ACTIVE' || input.closeOnVenueFlat === true;
       protection = { status: 'PENDING', stopContracts: '0' };
     }
   } else if (stopId) {

@@ -2,7 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { Decimal, DECISION_REASON_TEXT, evaluateBlockForSignal, REVERSAL_REASON_TEXT, type ReversalWithheldReason, type SignalAction, type SignalInterval, type Weekday } from '@trendpilot/domain';
 import type { Db } from '../client';
 import { completeJob, type JobRow } from '../jobs';
-import { orderBlocks, orderIntents, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
+import { orderBlocks, orderIntents, positionExits, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
 import { ENTRY_STEP, evaluateAndReserveEntry, windowOf } from './entry';
 import { resolveAccountVenue } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
@@ -78,6 +78,13 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks:
 
     // 1. Confirmed flat, terminal orders, obsolete protection gone (AT-09: partial or unknown cannot reverse).
     if (pos!.status !== 'CLOSED' || !new Decimal(pos!.contracts).isZero()) return withhold('REVERSAL_CLOSE_INCOMPLETE', { remainingContracts: new Decimal(pos!.contracts).toFixed() });
+    // Flat because the investor closed it on the exchange (booked by the Live sync), not because
+    // this signal's close filled: the old signal is never acted on again.
+    const [manual] = await tx
+      .select({ id: positionExits.id })
+      .from(positionExits)
+      .where(and(eq(positionExits.positionId, pos!.id), eq(positionExits.reason, 'EXTERNAL_CLOSE')));
+    if (manual || pos!.closeReason === 'EXTERNAL_CLOSE') return withhold('REVERSAL_CLOSED_ON_EXCHANGE', { closeReason: pos!.closeReason });
     let venue: ExecutionVenue;
     let held: { contracts: string };
     try {

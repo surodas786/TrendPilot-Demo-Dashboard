@@ -36,7 +36,8 @@
     "staging:smoke": "tsx scripts/staging-smoke.ts",
     "ops:mexc-readonly-check": "npm run mexc-readonly-check -w @trendpilot/db --",
     "ops:live-preflight": "npm run live-preflight -w @trendpilot/db --",
-    "ops:alert-trace": "npm run alert-trace -w @trendpilot/db --"
+    "ops:alert-trace": "npm run alert-trace -w @trendpilot/db --",
+    "ops:live-position-check": "npm run live-position-check -w @trendpilot/db --"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

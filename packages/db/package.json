@@ -20,7 +20,8 @@
     "ops-mail": "tsx src/cli/ops-mail.ts",
     "mexc-readonly-check": "tsx src/cli/mexc-readonly-check.ts",
     "live-preflight": "tsx src/cli/live-preflight.ts",
-    "alert-trace": "tsx src/cli/alert-trace.ts"
+    "alert-trace": "tsx src/cli/alert-trace.ts",
+    "live-position-check": "tsx src/cli/live-position-check.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

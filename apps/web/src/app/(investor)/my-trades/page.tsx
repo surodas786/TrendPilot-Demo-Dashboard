@@ -1,15 +1,29 @@
 import Link from 'next/link';
-import { FlaskConicalIcon, ListChecksIcon, ShieldCheckIcon, ShieldAlertIcon } from 'lucide-react';
-import { getDb, getMyPaperAccount, listMyOrders, listMyPositions } from '@trendpilot/db';
+import { FlaskConicalIcon, HourglassIcon, ListChecksIcon, ShieldCheckIcon, ShieldAlertIcon, ZapIcon } from 'lucide-react';
+import { connectionFor, getDb, getMyPaperAccount, listMyOrders, listMyPositions } from '@trendpilot/db';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
+import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
 import { EXIT_LABEL, signedUsdt as signed, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, targetSummary, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
 import { ModeTabs, viewModeOf } from '@/components/ui/ModeTabs';
 
 export const dynamic = 'force-dynamic';
+
+/** The position's own stored mode, never the page's: a Live position is never labelled Paper. */
+function ModeBadge({ mode }: { mode: string }) {
+  return mode === 'LIVE' ? (
+    <StatusPill tone="warn" icon={ZapIcon}>
+      Live
+    </StatusPill>
+  ) : (
+    <StatusPill tone="accent" icon={FlaskConicalIcon}>
+      Paper
+    </StatusPill>
+  );
+}
 
 const usdt = (v: string) => `${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT`;
 
@@ -19,7 +33,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
   const mode = viewModeOf((await searchParams).mode);
   const live = mode === 'LIVE';
   const db = getDb();
-  const [account, allPositions, allOrders] = await Promise.all([getMyPaperAccount(db, user.id, mode), listMyPositions(db, user.id), listMyOrders(db, user.id)]);
+  const [account, allPositions, allOrders, connection] = await Promise.all([getMyPaperAccount(db, user.id, mode), listMyPositions(db, user.id), listMyOrders(db, user.id), live ? connectionFor(db, user.id) : null]);
   const positions = allPositions.filter((p) => p.mode === mode);
   const orders = allOrders.filter((o) => o.mode === mode);
   const open = positions.filter((p) => p.status !== 'CLOSED');
@@ -37,6 +51,10 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
       }
       actions={<ModeTabs mode={mode} path="/my-trades" />}
     >
+      {live && connection && connection.status !== 'REVOKED' && (
+        <SyncWithMexcButton lastSyncOkAt={connection.lastSyncOkAt?.toISOString() ?? null} lastSyncAt={connection.lastSyncAt?.toISOString() ?? null} lastSyncError={connection.lastSyncError} timezone={user.timezone} />
+      )}
+
       {account && (
         <dl className="grid gap-3 rounded-xl border border-line bg-surface p-4 text-sm sm:grid-cols-4" data-testid="paper-balance">
           <div>
@@ -83,13 +101,17 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
             </thead>
             <tbody className="divide-y divide-line">
               {open.map((p) => (
-                <tr key={p.id} data-testid={`position-${p.symbol}`} data-protection={p.stop.protection} data-contracts={p.contracts}>
+                <tr key={p.id} data-testid={`position-${p.symbol}`} data-protection={p.stop.protection} data-contracts={p.contracts} data-mode={p.mode} data-exchange-close={p.venueSync?.closeState ?? ''}>
                   <td className="whitespace-nowrap px-4 py-2.5 text-muted">{fmt(p.openedAt)}</td>
                   <td className="px-4 py-2.5 text-ink">
-                    {p.symbol}{' '}
-                    <StatusPill tone="accent" icon={FlaskConicalIcon}>
-                      Paper
-                    </StatusPill>
+                    {p.symbol} <ModeBadge mode={p.mode} />
+                    {p.venueSync?.closeState === 'FILLS_PENDING' && (
+                      <span className="mt-1 block" data-testid="fills-pending">
+                        <StatusPill tone="warn" icon={HourglassIcon}>
+                          {p.venueSync.contracts === '0' ? 'MEXC confirms closed · fill details pending' : `MEXC holds ${p.venueSync.contracts} · fill details pending`}
+                        </StatusPill>
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5">
                     <StatusPill tone={p.side === 'LONG' ? 'gain' : 'loss'}>{p.side === 'LONG' ? 'Long' : 'Short'}</StatusPill>
@@ -118,6 +140,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                       ) : (
                         <StatusPill tone="loss" icon={ShieldAlertIcon}>
                           {p.stop.protection}
+                          {p.stop.protection === 'UNPROTECTED' && ` · stop covers ${p.stop.contracts ?? 0} of ${p.contracts}`}
                         </StatusPill>
                       )}
                     </span>
@@ -154,7 +177,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                     <Link href={`/my-trades/${p.id}`} className="block text-sm font-semibold text-accent hover:underline">
                       Details
                     </Link>
-                    <ClosePositionButton positionId={p.id} symbol={p.symbol} side={p.side} contracts={p.contracts} />
+                    {p.venueSync?.closeState !== 'FILLS_PENDING' && <ClosePositionButton positionId={p.id} symbol={p.symbol} side={p.side} contracts={p.contracts} />}
                   </td>
                 </tr>
               ))}
@@ -165,7 +188,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
 
       {closed.length > 0 && (
         <section className="space-y-2">
-          <h3 className="text-sm font-semibold text-ink">Closed paper positions</h3>
+          <h3 className="text-sm font-semibold text-ink">Closed {live ? 'Live' : 'paper'} positions</h3>
           <div className="overflow-x-auto rounded-xl border border-line bg-surface">
             <table className="w-full min-w-[900px] text-left text-sm">
               <thead className="border-b border-line text-xs text-subtle">
@@ -187,10 +210,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                   <tr key={p.id} data-testid={`closed-${p.symbol}`} data-reason={p.closeReason ?? ''}>
                     <td className="whitespace-nowrap px-4 py-2.5 text-muted">{p.closedAt ? fmt(p.closedAt) : '—'}</td>
                     <td className="px-4 py-2.5 text-ink">
-                      {p.symbol}{' '}
-                      <StatusPill tone="accent" icon={FlaskConicalIcon}>
-                        Paper
-                      </StatusPill>
+                      {p.symbol} <ModeBadge mode={p.mode} />
                     </td>
                     <td className="px-4 py-2.5">
                       <StatusPill tone={p.side === 'LONG' ? 'gain' : 'loss'}>{p.side === 'LONG' ? 'Long' : 'Short'}</StatusPill>
@@ -219,12 +239,14 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-subtle">Realized P&amp;L and released margin come from confirmed simulated fills. Fees include the opening and closing fees.</p>
+          <p className="text-xs text-subtle">
+            Realized P&amp;L and released margin come from confirmed {live ? 'MEXC' : 'simulated'} fills{live ? ', including closes made directly on MEXC' : ''}. Fees include the opening and closing fees.
+          </p>
         </section>
       )}
 
       <section className="space-y-2">
-        <h3 className="text-sm font-semibold text-ink">Paper orders</h3>
+        <h3 className="text-sm font-semibold text-ink">{live ? 'Live' : 'Paper'} orders</h3>
         <ul className="divide-y divide-line rounded-xl border border-line bg-surface text-sm">
           {orders.map((o) => (
             <li key={o.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2" data-testid="paper-order" data-state={o.state}>
@@ -238,7 +260,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
               <span className="font-mono text-xs text-subtle">{o.clientOrderId}</span>
             </li>
           ))}
-          {orders.length === 0 && <li className="px-4 py-3 text-subtle">No paper orders yet.</li>}
+          {orders.length === 0 && <li className="px-4 py-3 text-subtle">No {live ? 'Live' : 'paper'} orders yet.</li>}
         </ul>
       </section>
     </PageContainer>

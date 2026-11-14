@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { BellRingIcon } from 'lucide-react';
 import { getDb, listMyOutcomes, orderBlocksFor } from '@trendpilot/db';
-import { OUTSIDE_WINDOW_TEXT } from '@trendpilot/domain';
+import { isReversalWithheld, OUTSIDE_WINDOW_TEXT } from '@trendpilot/domain';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { StatusPill } from '@/components/ui/StatusPill';
@@ -80,6 +80,9 @@ export default async function SignalsPage() {
                                 <StatusPill tone="gain">
                                   Reversed · {modeLabel(o.mode)} {sideLabel(o.side)} {o.entry.orderState === 'FILLED' ? 'filled' : (o.entry.orderState ?? 'pending').toLowerCase()}
                                 </StatusPill>
+                              ) : isReversalWithheld(o.entry.reason) ? (
+                                // The original close was not confirmed: the position may still be open.
+                                <StatusPill tone="warn">Reverse entry withheld · {reasonLabel(o.entry.reason)}</StatusPill>
                               ) : (
                                 <StatusPill tone="neutral">Stayed flat · {reasonLabel(o.entry.reason)}</StatusPill>
                               )}
