@@ -21,7 +21,8 @@
     "mexc-readonly-check": "tsx src/cli/mexc-readonly-check.ts",
     "live-preflight": "tsx src/cli/live-preflight.ts",
     "alert-trace": "tsx src/cli/alert-trace.ts",
-    "live-position-check": "tsx src/cli/live-position-check.ts"
+    "live-position-check": "tsx src/cli/live-position-check.ts",
+    "live-sync": "tsx src/cli/live-sync.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.0.2",

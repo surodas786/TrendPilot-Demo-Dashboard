@@ -162,6 +162,13 @@
       "when": 1794635415925,
       "tag": "0022_m12_live_manual_close_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1794638609092,
+      "tag": "0023_m13_live_sync_lease",
+      "breakpoints": true
     }
   ]
 }

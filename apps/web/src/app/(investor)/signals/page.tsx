@@ -19,6 +19,17 @@ const submissionBlock = (stateReason: string | null | undefined) => (stateReason
 /** The block's own mode as recorded at evaluation: a Live block's order is never labelled Paper. */
 const modeLabel = (mode: 'PAPER' | 'LIVE') => (mode === 'LIVE' ? 'Live' : 'Paper');
 const sideLabel = (side: 'LONG' | 'SHORT' | null) => (side === 'LONG' ? 'Long' : 'Short');
+/** How the original close of a withheld reversal ended, from its order state. */
+const closeOutcome = (state: string | null | undefined, reason: string | null | undefined) =>
+  reason === 'REVERSAL_CLOSED_ON_EXCHANGE'
+    ? 'overtaken by a close on MEXC'
+    : state === 'REJECTED' || state === 'CANCELLED'
+      ? 'rejected'
+      : state === 'EXPIRED' || state === 'PARTIALLY_FILLED'
+        ? 'partially filled'
+        : state === 'FILLED'
+          ? 'filled'
+          : 'unconfirmed';
 
 /** The signed-in investor's own signal outcomes (SIG-05: one private decision per investor). */
 export default async function SignalsPage() {
@@ -82,7 +93,9 @@ export default async function SignalsPage() {
                                 </StatusPill>
                               ) : isReversalWithheld(o.entry.reason) ? (
                                 // The original close was not confirmed: the position may still be open.
-                                <StatusPill tone="warn">Reverse entry withheld · {reasonLabel(o.entry.reason)}</StatusPill>
+                                <StatusPill tone="warn">
+                                  Reverse entry withheld · original close {closeOutcome(o.exit.orderState, o.entry.reason)}
+                                </StatusPill>
                               ) : (
                                 <StatusPill tone="neutral">Stayed flat · {reasonLabel(o.entry.reason)}</StatusPill>
                               )}

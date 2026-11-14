@@ -18,6 +18,7 @@ interface MockOrder {
   state: number;
   takerFee: string;
   createTime: number;
+  positionId?: number;
 }
 interface MockStop {
   id: number;
@@ -170,7 +171,8 @@ export class MockMexc implements MexcRequester {
     const opening = side === 1 || side === 3;
     const posType: 1 | 2 = side === 1 || side === 4 ? 1 : 2;
     const key = `${symbol}:${posType}`;
-    const pos = this.positions.get(key);
+    const prev = this.positions.get(key);
+    const pos = prev && D(prev.holdVol).gt(0) ? prev : undefined;
     const px = this.price[symbol]!;
     const id = this.seq++;
     const vol = D(String(b.vol));
@@ -182,7 +184,7 @@ export class MockMexc implements MexcRequester {
     const filled = vol.times(this.faults.fillRatio).floor();
     this.faults.fillRatio = 1;
     const fee = filled.times('0.0001').times(px).times('0.0004').toDecimalPlaces(8);
-    const order: MockOrder = { orderId: id, externalOid: ext, symbol, side, vol: vol.toFixed(), dealVol: filled.toFixed(), dealAvgPrice: filled.gt(0) ? px : '0', state: filled.eq(vol) ? 3 : 4, takerFee: fee.toFixed(), createTime: this.now() };
+    const order: MockOrder = { orderId: id, externalOid: ext, symbol, side, vol: vol.toFixed(), dealVol: filled.toFixed(), dealAvgPrice: filled.gt(0) ? px : '0', state: filled.eq(vol) ? 3 : 4, takerFee: fee.toFixed(), createTime: this.now(), positionId: pos?.positionId };
     this.orders.set(ext, order);
     if (filled.gt(0)) this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol, side, vol: filled.toFixed(), price: px, fee: fee.toFixed(), timestamp: this.now() }]);
     if (this.faults.invisibleLookups) {
@@ -194,6 +196,7 @@ export class MockMexc implements MexcRequester {
         const p: MockPosition = pos ?? { positionId: this.seq++, symbol, positionType: posType, holdVol: '0', holdAvgPrice: px, leverage: Number(b.leverage ?? 1), openType: Number(b.openType) };
         p.holdVol = D(p.holdVol).plus(filled).toFixed();
         this.positions.set(key, p);
+        order.positionId = p.positionId;
         if (this.faults.attachStop !== 'missing') {
           const sid = this.seq++;
           this.stops.set(sid, { id: sid, orderId: id, positionId: p.positionId, symbol, positionType: posType, stopLossPrice: String(b.stopLossPrice), lossTrend: Number(b.lossTrend ?? 1), vol: filled.toFixed(), state: this.faults.attachStop === 'failed' ? 5 : 1 });
@@ -228,7 +231,7 @@ export class MockMexc implements MexcRequester {
     const id = this.seq++;
     const side = st.positionType === 1 ? 4 : 2;
     const fee = vol.times('0.0001').times(price).times('0.0004').toDecimalPlaces(8);
-    this.orders.set(`stop-${id}`, { orderId: id, externalOid: `stop-${id}`, symbol: st.symbol, side, vol: vol.toFixed(), dealVol: vol.toFixed(), dealAvgPrice: price, state: 3, takerFee: fee.toFixed(), createTime: this.now() });
+    this.orders.set(`stop-${id}`, { orderId: id, externalOid: `stop-${id}`, symbol: st.symbol, side, vol: vol.toFixed(), dealVol: vol.toFixed(), dealAvgPrice: price, state: 3, takerFee: fee.toFixed(), createTime: this.now(), positionId: pos.positionId });
     this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol: st.symbol, side, vol: vol.toFixed(), price, fee: fee.toFixed(), timestamp: this.now() }]);
     pos.holdVol = D(pos.holdVol).minus(vol).toFixed();
     st.state = 3;
@@ -244,7 +247,7 @@ export class MockMexc implements MexcRequester {
     const id = this.seq++;
     const side = positionType === 1 ? 4 : 2;
     const fee = o.fee ?? '0';
-    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: fee, createTime: this.now() });
+    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: fee, createTime: this.now(), positionId: pos.positionId });
     this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol, side, vol, price, fee, timestamp: this.now(), ...(o.profit !== undefined ? { profit: o.profit } : {}) }]);
     if (o.delayed) this.delayedDeals.add(id);
     pos.holdVol = D(pos.holdVol).minus(vol).toFixed();
@@ -259,7 +262,8 @@ export class MockMexc implements MexcRequester {
   /** Exposure opened directly on MEXC (unknown to TrendPilot). */
   externalOpen(symbol: string, positionType: 1 | 2, vol: string, price: string) {
     const key = `${symbol}:${positionType}`;
-    const p = this.positions.get(key) ?? { positionId: this.seq++, symbol, positionType, holdVol: '0', holdAvgPrice: price, leverage: 5, openType: 1 };
+    const prev = this.positions.get(key);
+    const p = prev && D(prev.holdVol).gt(0) ? prev : { positionId: this.seq++, symbol, positionType, holdVol: '0', holdAvgPrice: price, leverage: 5, openType: 1 };
     p.holdVol = D(p.holdVol).plus(vol).toFixed();
     this.positions.set(key, p);
   }

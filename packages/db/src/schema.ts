@@ -1149,6 +1149,8 @@ export const exchangeConnections = pgTable(
     lastSyncError: text('last_sync_error'),
     /** Last sync that completed every MEXC query (lastSyncAt also moves on a failed attempt). */
     lastSyncOkAt: timestamp('last_sync_ok_at', { withTimezone: true }),
+    /** Held by the running private sync (one run per account); expires if a run dies. */
+    syncLeaseUntil: timestamp('sync_lease_until', { withTimezone: true }),
     /** Differences between MEXC and TrendPilot found by the private sync (OPS-03). */
     drift: jsonb('drift').notNull().default([]),
     revision: integer('revision').notNull().default(1),

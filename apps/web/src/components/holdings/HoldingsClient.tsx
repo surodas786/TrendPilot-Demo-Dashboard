@@ -42,8 +42,13 @@ export function livePriceFor(instrumentId: string, rows: LiveQuoteRow[], fallbac
 export const unrealizedAt = (h: Pick<PositionDto, 'side' | 'avgEntryPrice' | 'contracts' | 'contractMultiplier'>, mark: string | null) =>
   mark ? unrealizedPnl(h.side as 'LONG' | 'SHORT', h.avgEntryPrice, mark, h.contracts, h.contractMultiplier) : null;
 
-export function ProtectionPill({ h }: { h: Pick<PositionDto, 'status' | 'contracts' | 'stop'> }) {
+/** MEXC confirms the position is gone, its closing fills are not listed yet (nothing booked). */
+export const closedOnMexc = (h: Pick<PositionDto, 'venueSync'>) => h.venueSync?.closeState === 'FILLS_PENDING' && h.venueSync.contracts !== null && new Decimal(h.venueSync.contracts).isZero();
+
+export function ProtectionPill({ h }: { h: Pick<PositionDto, 'status' | 'contracts' | 'stop' | 'venueSync'> }) {
   if (h.status !== 'OPEN') return <StatusPill tone="neutral">Closed</StatusPill>;
+  if (closedOnMexc(h)) return <StatusPill tone="warn">Closed on MEXC · fill details pending</StatusPill>;
+  if (h.venueSync?.closeState === 'FILLS_PENDING') return <StatusPill tone="warn">MEXC holds {h.venueSync.contracts} · fill details pending</StatusPill>;
   const covered = h.stop.protection === 'PROTECTED' && h.stop.contracts !== null && new Decimal(h.stop.contracts).eq(h.contracts);
   if (covered) return <StatusPill tone="gain">Protected</StatusPill>;
   if (h.stop.protection === 'PENDING') return <StatusPill tone="warn">Verifying stop</StatusPill>;
@@ -102,11 +107,14 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
     () =>
       open.map((h) => {
         const price = livePriceFor(h.instrumentId, items, h.price, nowMs);
-        return { h, price, unrealized: unrealizedAt(h, price.mark) };
+        // Closed on MEXC (fills pending): no exposure left, so no unrealized P&L.
+        const gone = closedOnMexc(h);
+        return { h, price, gone, unrealized: gone ? null : unrealizedAt(h, price.mark) };
       }),
     [open, items, nowMs]
   );
-  const total = rows.every((r) => r.unrealized !== null) ? rows.reduce((s, r) => s.plus(r.unrealized!), new Decimal(0)).toFixed() : null;
+  const counted = rows.filter((r) => !r.gone);
+  const total = counted.every((r) => r.unrealized !== null) ? counted.reduce((s, r) => s.plus(r.unrealized!), new Decimal(0)).toFixed() : null;
   const go = (id: string) => router.push(`/my-holdings/${id}`);
 
   return (
@@ -115,7 +123,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
         <dl className="flex flex-wrap gap-x-10 gap-y-3">
           <div>
             <dt className="text-xs text-subtle">Open positions</dt>
-            <dd className="mt-0.5 text-2xl font-semibold tabular-nums text-ink">{open.length}</dd>
+            <dd className="mt-0.5 text-2xl font-semibold tabular-nums text-ink">{counted.length}</dd>
           </div>
           <div>
             <dt className="text-xs text-subtle">Unrealized P&amp;L (mark)</dt>
@@ -182,7 +190,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                 </tr>
               </thead>
               <tbody className="divide-y divide-line tabular-nums">
-                {rows.map(({ h, price, unrealized }) => (
+                {rows.map(({ h, price, gone, unrealized }) => (
                   <tr key={h.id} data-testid="holding-row" data-id={h.id} className="cursor-pointer transition-colors duration-150 hover:bg-inset/60" onClick={() => go(h.id)}>
                     <td className="px-4 py-2.5">
                       <Link href={`/my-holdings/${h.id}`} onClick={(e) => e.stopPropagation()} className="font-medium text-ink hover:text-accent">
@@ -201,13 +209,14 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                     <td className="px-3 py-2.5 text-right text-ink">
                       {h.contracts}
                       <span className="block text-[11px] text-subtle">of {h.initialContracts} contracts</span>
+                      {h.venueSync?.closeState === 'FILLS_PENDING' && <span className="block text-[11px] text-warn">MEXC: {h.venueSync.contracts}</span>}
                     </td>
                     <td className="px-3 py-2.5 text-right text-ink">{priceOrUnavailable(h.avgEntryPrice)}</td>
                     <td className="px-3 py-2.5">
                       <PriceCell price={price} timezone={timezone} />
                     </td>
                     <td className={cn('px-3 py-2.5 text-right', pnlTone(unrealized))} data-testid="holding-unrealized">
-                      {unrealized === null ? 'Unavailable' : signedUsdt(unrealized)}
+                      {gone ? <span className="text-subtle">Closed on MEXC</span> : unrealized === null ? 'Unavailable' : signedUsdt(unrealized)}
                     </td>
                     <td className="px-3 py-2.5 text-right text-ink">
                       {priceOrUnavailable(h.stop.price)}

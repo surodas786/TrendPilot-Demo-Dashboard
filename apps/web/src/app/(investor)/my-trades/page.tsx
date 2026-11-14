@@ -52,7 +52,13 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
       actions={<ModeTabs mode={mode} path="/my-trades" />}
     >
       {live && connection && connection.status !== 'REVOKED' && (
-        <SyncWithMexcButton lastSyncOkAt={connection.lastSyncOkAt?.toISOString() ?? null} lastSyncAt={connection.lastSyncAt?.toISOString() ?? null} lastSyncError={connection.lastSyncError} timezone={user.timezone} />
+        <SyncWithMexcButton
+          lastSyncOkAt={connection.lastSyncOkAt?.toISOString() ?? null}
+          lastSyncAt={connection.lastSyncAt?.toISOString() ?? null}
+          lastSyncError={connection.lastSyncError}
+          drift={(connection.drift ?? []) as { kind: string; symbol: string; detail: string }[]}
+          timezone={user.timezone}
+        />
       )}
 
       {account && (
@@ -108,7 +114,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                     {p.venueSync?.closeState === 'FILLS_PENDING' && (
                       <span className="mt-1 block" data-testid="fills-pending">
                         <StatusPill tone="warn" icon={HourglassIcon}>
-                          {p.venueSync.contracts === '0' ? 'MEXC confirms closed · fill details pending' : `MEXC holds ${p.venueSync.contracts} · fill details pending`}
+                          {p.venueSync.contracts === '0' ? 'Closed on MEXC · fill details pending' : `MEXC holds ${p.venueSync.contracts} · fill details pending`}
                         </StatusPill>
                       </span>
                     )}
