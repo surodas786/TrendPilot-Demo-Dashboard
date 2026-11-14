@@ -8,9 +8,9 @@ import { Decimal } from './decimal';
  * the entry is evaluated and again in the worker right before the order is sent:
  *  1. the deployment's live order transport is enabled (LIVE_ORDER_TRANSPORT=enabled);
  *  2. the platform Live switch is on and platform entries are not halted (admin, audited);
- *  3. the investor owns a VERIFIED MEXC connection in One-way position mode that an
- *     administrator approved, with limits (Hedge mode is not supported for new entries: MEXC
- *     documents reduce-only closes for One-way mode only);
+ *  3. the investor owns a VERIFIED MEXC connection whose position mode (One-way or Hedge) was
+ *     read from MEXC, approved by an administrator, with limits. The order builder follows that
+ *     mode and refuses to send if MEXC reports another one;
  *  4. the investor activated Live (default Off) and their Live entries are not halted;
  *  5. the contract is on the Live allowlist;
  *  6. the order carries its stop, and stays within the per-order contracts, per-order notional,

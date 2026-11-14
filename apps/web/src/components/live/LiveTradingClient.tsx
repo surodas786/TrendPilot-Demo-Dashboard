@@ -205,7 +205,7 @@ export function LiveTradingClient({ initial }: { initial: LiveStatus }) {
         ) : (
           <div className="mt-3 space-y-3">
             <p className="text-xs text-muted">
-              Create a MEXC Futures API key with <strong>View Account Details</strong>, <strong>View Order Details</strong> and <strong>Order Placing</strong> only — never withdrawal — and restrict it to the TrendPilot server&apos;s IP. Use one-way position mode. The key is encrypted on the server and never shown again.
+              Create a MEXC Futures API key with <strong>View Account Details</strong>, <strong>View Order Details</strong> and <strong>Order Placing</strong> only — never withdrawal — and restrict it to the TrendPilot server&apos;s IP. One-way and Hedge position mode are both supported; TrendPilot reads the mode from MEXC. The key is encrypted on the server and never shown again.
             </p>
             <TextField label="Account reference" value={form.accountRef} onChange={(v) => setForm({ ...form, accountRef: v })} hint="Not a key: for example the last digits of your MEXC UID." autoComplete="off" />
             <TextField label="API key" value={form.apiKey} onChange={(v) => setForm({ ...form, apiKey: v })} autoComplete="off" spellCheck={false} />
