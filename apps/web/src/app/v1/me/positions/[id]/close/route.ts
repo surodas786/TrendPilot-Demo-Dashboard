@@ -42,6 +42,8 @@ export const POST = route<{ id: string }>(async (req, { correlationId, params })
     const r = await requestExit(tx, { position: pos, reason: 'MANUAL_CLOSE', now: now(), idempotencyKey: key, requestedBy: user.id });
     if (r.status === 'IN_PROGRESS') throw new DomainError(409, ErrorCode.EXIT_IN_PROGRESS, 'Another exit for this position is already in progress.');
     if (r.status === 'NOT_OPEN') throw new DomainError(409, ErrorCode.POSITION_NOT_OPEN, 'This position is already closed.');
+    // A manual close is never halted or backed off; this only narrows the type.
+    if (r.status !== 'REQUESTED') throw new DomainError(409, ErrorCode.EXIT_IN_PROGRESS, 'This exit cannot be requested right now.');
     await recordAudit(tx, {
       actorUserId: user.id,
       action: 'POSITION_MANUAL_CLOSE_REQUEST',

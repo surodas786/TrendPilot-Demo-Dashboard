@@ -1,5 +1,5 @@
 import { newClientOrderId } from './clientOrderId';
-import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   advanceTarget,
   advanceTrailing,
@@ -27,6 +27,7 @@ import { latestQuote } from './market';
 import { paperVenue } from '../venue/paper';
 import { resolveAccountVenue } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
+import { AUTO_CLOSE_RETRY, classifyCloseRejection } from '../venue/closeRejection';
 import { listStopFills, triggerStops, type CloseResult, type VenueQuote } from './simulator';
 
 /**
@@ -49,6 +50,11 @@ import { listStopFills, triggerStops, type CloseResult, type VenueQuote } from '
  *   confirmed opening quantity), tracked by confirmed fills.
  * - Take-profit targets of current positions arm when reached (persisted) and close their
  *   allocation on a later pullback through the target; arming alone never closes anything.
+ * - Live: a trigger that stays true re-evaluates on every price, so a rejected close must not
+ *   become a new order per tick (13 Nov 2026: trailing TP resent with MEXC 2001). A deterministic
+ *   rejection halts automatic exits for the position (`exitHaltedAt`); other rejections of the
+ *   same trigger are spaced by AUTO_CLOSE_RETRY.backoffMs and halt after maxAttempts. A manual
+ *   close is always accepted.
  */
 
 export const PAPER_CLOSE_JOB = 'paper.close';
@@ -62,7 +68,45 @@ type TargetRow = typeof positionTargets.$inferSelect;
 const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
 const D = (v: Decimal.Value) => new Decimal(v);
 
-export type ExitRequestResult = { status: 'REQUESTED'; intentId: string } | { status: 'IN_PROGRESS'; intentId: string | null } | { status: 'NOT_OPEN' };
+export type ExitRequestResult =
+  | { status: 'REQUESTED'; intentId: string }
+  | { status: 'IN_PROGRESS'; intentId: string | null }
+  | { status: 'NOT_OPEN' }
+  /** Live: automatic exits are halted for this position (a deterministic rejection or the retry budget). */
+  | { status: 'HALTED'; reason: string }
+  /** Live: the same trigger was rejected moments ago; the next attempt waits for the backoff. */
+  | { status: 'BACKOFF'; retryAt: Date };
+
+/** Halts automatic exits for a position (first reason wins; caller's transaction). */
+export async function haltPositionExits(tx: Executor, positionId: string, reason: string, intentId: string | null, now: Date): Promise<void> {
+  await tx
+    .update(positions)
+    .set({ exitHaltedAt: now, exitHaltReason: reason.slice(0, 300), exitHaltIntentId: intentId, updatedAt: sql`now()` })
+    .where(and(eq(positions.id, positionId), isNull(positions.exitHaltedAt)));
+}
+
+/**
+ * Rejected automatic attempts of one trigger (reason + target) since the position's last booked
+ * exit and since an operator last cleared a halt (either starts a fresh budget), newest first.
+ */
+async function rejectedAttempts(tx: Executor, p: PositionRow, reason: ExitReason, targetLevelId: string | null) {
+  const [lastExit] = await tx.select({ at: positionExits.createdAt }).from(positionExits).where(eq(positionExits.positionId, p.id)).orderBy(desc(positionExits.createdAt)).limit(1);
+  return tx
+    .select({ id: orderIntents.id, resolvedAt: orderIntents.resolvedAt, stateReason: orderIntents.stateReason })
+    .from(orderIntents)
+    .where(
+      and(
+        eq(orderIntents.positionId, p.id),
+        eq(orderIntents.kind, 'CLOSE'),
+        eq(orderIntents.state, 'REJECTED'),
+        eq(orderIntents.exitReason, reason),
+        targetLevelId ? eq(orderIntents.targetLevelId, targetLevelId) : isNull(orderIntents.targetLevelId),
+        ...(lastExit ? [gt(orderIntents.createdAt, lastExit.at)] : []),
+        ...(p.exitRetryFrom ? [gt(orderIntents.createdAt, p.exitRetryFrom)] : [])
+      )
+    )
+    .orderBy(desc(orderIntents.createdAt));
+}
 
 /**
  * Persists a CLOSE intent and its job (caller's transaction). One unresolved operation per
@@ -86,6 +130,18 @@ export async function requestExit(
   if (p.status !== 'OPEN' || D(p.contracts).lte(0)) return { status: 'NOT_OPEN' };
   const contracts = Decimal.min(input.contracts ?? p.contracts, p.contracts);
   if (contracts.lte(0)) return { status: 'NOT_OPEN' };
+  // Live automatic exits: never resubmit a trigger the exchange refused (manual closes always pass).
+  if (p.mode === 'LIVE' && input.reason !== 'MANUAL_CLOSE') {
+    if (p.exitHaltedAt) return { status: 'HALTED', reason: p.exitHaltReason ?? 'EXIT_HALTED' };
+    const rejected = await rejectedAttempts(tx, p, input.reason, input.targetLevelId ?? null);
+    if (rejected.length >= AUTO_CLOSE_RETRY.maxAttempts) {
+      const reason = `EXIT_RETRY_LIMIT ${input.reason}: last ${rejected[0]!.stateReason ?? 'REJECTED'}`;
+      await haltPositionExits(tx, p.id, reason, rejected[0]!.id, input.now);
+      return { status: 'HALTED', reason };
+    }
+    const last = rejected[0]?.resolvedAt;
+    if (last && input.now.getTime() - last.getTime() < AUTO_CLOSE_RETRY.backoffMs) return { status: 'BACKOFF', retryAt: new Date(last.getTime() + AUTO_CLOSE_RETRY.backoffMs) };
+  }
   const [busy] = await tx
     .select({ id: orderIntents.id })
     .from(orderIntents)
@@ -305,6 +361,19 @@ export interface CloseSummary {
   /** Next exit requested right after a full fill (e.g. the next split target). */
   next?: string;
   reversalQueued?: boolean;
+  /** Live: this rejection halted automatic exits for the position. */
+  exitsHalted?: boolean;
+}
+
+/**
+ * Live: a deterministic rejection (e.g. MEXC 2001) halts automatic exits for the position at
+ * once; the same request would be refused again. Returns whether the position is now halted.
+ */
+async function noteCloseRejection(tx: Executor, intent: IntentRow, reason: string, now: Date): Promise<boolean> {
+  if (intent.mode !== 'LIVE' || !intent.positionId) return false;
+  if (classifyCloseRejection(reason) !== 'DETERMINISTIC') return false;
+  await haltPositionExits(tx, intent.positionId, `${reason} on ${intent.exitReason ?? 'CLOSE'} ${intent.clientOrderId}`, intent.id, now);
+  return true;
 }
 
 export async function quoteFor(db: Db | Executor, instrumentId: string, now: Date): Promise<VenueQuote | null> {
@@ -343,6 +412,7 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
     const [pos] = await tx.select().from(positions).where(eq(positions.id, intent.positionId!)).for('update');
     const finish = async (state: 'CANCELLED' | 'REJECTED', reason: string) => {
       await tx.update(orderIntents).set({ state, stateReason: reason, resolvedAt: now, updatedAt: sql`now()` }).where(eq(orderIntents.id, intent.id));
+      if (state === 'REJECTED' && pos) await noteCloseRejection(tx, intent, reason, now);
       await releaseTarget(tx, intent);
       const reversalQueued = await scheduleReversal(tx, intent, now);
       await completeJob(tx, job);
@@ -392,7 +462,9 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
       contract: { multiplier: inst!.contractMultiplier, qtyStep: inst!.qtyStep, takerFeeRate: inst!.takerFeeRate },
       quote: q,
       now,
-      marginMode: pos.marginMode as 'ISOLATED' | 'CROSS'
+      marginMode: pos.marginMode as 'ISOLATED' | 'CROSS',
+      // Live: close exactly the MEXC position this one was matched to (never a newer one).
+      positionRef: pos.mode === 'LIVE' ? pos.exchangePositionRef : null
     });
     if (result.status !== 'REJECTED') await hooks.afterSimulatorFill?.();
   }
@@ -400,6 +472,13 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
   return db.transaction(async (tx) => {
     const [cur] = await tx.select().from(orderIntents).where(eq(orderIntents.id, intent.id)).for('update');
     const [p] = await tx.select().from(positions).where(eq(positions.id, pos.id)).for('update');
+    // Evidence of what was sent and answered (sanitized: body, code, message; never credentials).
+    if (result!.diagnostics) {
+      await tx
+        .update(orderIntents)
+        .set({ venueRequest: result!.diagnostics.request ?? null, venueResponse: result!.diagnostics.response ?? null, updatedAt: sql`now()` })
+        .where(eq(orderIntents.id, intent.id));
+    }
     if (cur!.state !== 'SUBMITTING') {
       await completeJob(tx, job);
       return { ...base, positionId: pos.id, state: cur!.state, reconciled };
@@ -407,10 +486,11 @@ export async function processPaperClose(db: Db, job: JobRow, now: Date, hooks: C
     if (result!.status === 'REJECTED') {
       // e.g. the venue stop already flattened the position: reduce-only refuses to open the other side.
       await tx.update(orderIntents).set({ state: 'REJECTED', stateReason: result!.reason, resolvedAt: now, updatedAt: sql`now()` }).where(eq(orderIntents.id, intent.id));
+      const halted = await noteCloseRejection(tx, cur!, result!.reason, now);
       await releaseTarget(tx, cur!);
       const reversalQueued = await scheduleReversal(tx, cur!, now);
       await completeJob(tx, job);
-      return { ...base, positionId: pos.id, state: 'REJECTED', reason: result!.reason, reconciled, reversalQueued };
+      return { ...base, positionId: pos.id, state: 'REJECTED', reason: result!.reason, reconciled, reversalQueued, ...(halted ? { exitsHalted: true } : {}) };
     }
     const f = result!.fill;
     await tx
@@ -478,6 +558,8 @@ export interface PositionExitStep {
   trailingTriggered: boolean;
   /** Take-profit targets armed by this price (ARM_PULLBACK: reached, not closed yet). */
   targetsArmed: number;
+  /** Live: a trigger fired but automatic exits are halted or backing off (nothing was sent). */
+  held?: 'HALTED' | 'BACKOFF';
 }
 
 /**
@@ -563,6 +645,7 @@ export async function evaluatePositionExits(tx: Executor, p: PositionRow, quote:
         const reason: ExitReason = takeProfit ? 'TRAILING_TAKE_PROFIT' : 'TRAILING_STOP';
         const r = await requestExit(tx, { position: p, reason, now, contracts: manages });
         if (r.status === 'REQUESTED') out.requested = reason;
+        else if (r.status === 'HALTED' || r.status === 'BACKOFF') out.held = r.status;
         else out.inProgress = r.status === 'IN_PROGRESS';
         return out;
       }
@@ -590,7 +673,8 @@ export async function evaluatePositionExits(tx: Executor, p: PositionRow, quote:
         .set({ status: 'REQUESTED', requestedContracts: D(t.requestedContracts).plus(want).toFixed(), updatedAt: sql`now()` })
         .where(eq(positionTargets.id, t.id));
       out.requested = 'TAKE_PROFIT';
-    } else out.inProgress = r.status === 'IN_PROGRESS';
+    } else if (r.status === 'HALTED' || r.status === 'BACKOFF') out.held = r.status;
+    else out.inProgress = r.status === 'IN_PROGRESS';
     break;
   }
   return out;
@@ -613,6 +697,8 @@ export interface TickSummary {
   exitsWaiting: number;
   /** Take-profit targets armed (reached; they close on a later pullback through the target). */
   targetsArmed: number;
+  /** Live: triggers that fired while automatic exits were halted or backing off (nothing sent). */
+  exitsHeld?: number;
 }
 
 /** Postgres NOTIFY channel carrying every stored quote (payload: QuoteNotification JSON). */
@@ -702,6 +788,7 @@ export async function processMarketTick(db: Db, job: JobRow, now: Date): Promise
     if (r.trailingActivated) summary.trailingActivated += 1;
     if (r.trailingTightened) summary.trailingTightened += 1;
     if (r.inProgress) summary.exitsWaiting += 1;
+    if (r.held) summary.exitsHeld = (summary.exitsHeld ?? 0) + 1;
     summary.targetsArmed += r.targetsArmed;
   }
 

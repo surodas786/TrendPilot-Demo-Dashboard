@@ -139,9 +139,15 @@ export interface VenueQuote {
   liquidityContracts?: string | null;
 }
 
+/** Sanitized evidence of what was sent to the venue and what it answered (never credentials). */
+export interface VenueDiagnostics {
+  request?: { method: string; path: string; body: Record<string, unknown> } | null;
+  response?: { code: number | string | null; message: string | null } | null;
+}
+
 export type CloseResult =
-  | { status: 'FILLED' | 'PARTIAL'; orderId: string; clientOrderId: string; requested: string; fill: SimFill }
-  | { status: 'REJECTED'; orderId: string; clientOrderId: string; reason: string };
+  | { status: 'FILLED' | 'PARTIAL'; orderId: string; clientOrderId: string; requested: string; fill: SimFill; diagnostics?: VenueDiagnostics }
+  | { status: 'REJECTED'; orderId: string; clientOrderId: string; reason: string; diagnostics?: VenueDiagnostics };
 
 async function closeResultFor(db: Db, clientOrderId: string): Promise<CloseResult | null> {
   const [order] = await db.select().from(simOrders).where(and(eq(simOrders.clientOrderId, clientOrderId), eq(simOrders.kind, 'MARKET_CLOSE')));
