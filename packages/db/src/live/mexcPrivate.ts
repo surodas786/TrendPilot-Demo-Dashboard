@@ -290,6 +290,8 @@ export interface NormalizedOrder {
   makerFee: string;
   errorCode: number;
   updateTime: number;
+  /** MEXC position the order belongs to (null when not reported). */
+  positionId: string | null;
 }
 export function normalizeOrder(o: Record<string, unknown>): NormalizedOrder {
   if (!o || typeof o !== 'object') throw new MexcPrivateError(`order: expected an order object, got ${o === null ? 'null' : typeof o}`, 'PARSE');
@@ -308,7 +310,8 @@ export function normalizeOrder(o: Record<string, unknown>): NormalizedOrder {
     takerFee: dec(o.takerFee),
     makerFee: dec(o.makerFee),
     errorCode: Number(o.errorCode ?? 0),
-    updateTime: Number(o.updateTime ?? o.createTime ?? 0)
+    updateTime: Number(o.updateTime ?? o.createTime ?? 0),
+    positionId: o.positionId === null || o.positionId === undefined || Number(o.positionId) === 0 ? null : String(o.positionId)
   };
 }
 

@@ -28,6 +28,7 @@ export interface LiveStatus {
     haltReason: string | null;
     lastSyncAt: string | null;
     lastSyncError: string | null;
+    lastSyncOkAt: string | null;
     drift: unknown[];
   } | null;
   liveContracts: { id: string; symbol: string; exchangeSymbol: string }[];
@@ -160,15 +161,34 @@ export function LiveTradingClient({ initial }: { initial: LiveStatus }) {
             <Row label="Position mode">{c.positionMode === 'ONE_WAY' ? 'One-way' : c.positionMode === 'HEDGE' ? 'Hedge' : '—'}</Row>
             <Row label="Balance (USDT, at check)">{verification.usdt ? `${verification.usdt.equity} equity · ${verification.usdt.available} available` : '—'}</Row>
             <Row label="Last check">{verification.checkedAt ? new Date(verification.checkedAt).toLocaleString() : '—'}</Row>
-            <Row label="Last private sync">{c.lastSyncAt ? new Date(c.lastSyncAt).toLocaleString() : '—'}</Row>
+            <Row label="Private position sync — last successful">
+              <span data-testid="last-sync-ok">{c.lastSyncOkAt ? new Date(c.lastSyncOkAt).toLocaleString() : 'never'}</span>
+            </Row>
+            <Row label="Private position sync — latest attempt">{c.lastSyncAt ? new Date(c.lastSyncAt).toLocaleString() : '—'}</Row>
             {c.limits && (
               <Row label="Your Live limits">
                 {c.limits.maxOrderContracts} contracts · {c.limits.maxOrderNotionalUsdt} USDT per order · ≤ {c.limits.maxLeverage}x · {c.limits.maxExposureUsdt} USDT exposure
               </Row>
             )}
             {verification.error && <p className="mt-2 text-xs text-loss">Check failed: {verification.error}</p>}
-            {c.lastSyncError && <p className="mt-2 text-xs text-warn">Last sync error: {c.lastSyncError}</p>}
-            {c.drift.length > 0 && <p className="mt-2 text-xs text-loss">MEXC and TrendPilot disagree on this account; an administrator is reviewing it.</p>}
+            {c.lastSyncError && (!c.lastSyncOkAt || (c.lastSyncAt && new Date(c.lastSyncAt) > new Date(c.lastSyncOkAt))) && (
+              <p className="mt-2 text-xs text-warn" data-testid="sync-error">
+                Latest private sync failed: {c.lastSyncError}
+              </p>
+            )}
+            {c.drift.length > 0 && (
+              <div className="mt-2 text-xs text-loss" data-testid="sync-drift">
+                <p>MEXC and TrendPilot still disagree on this account (as of the last successful sync):</p>
+                <ul className="mt-1 list-disc pl-4">
+                  {(c.drift as { kind: string; symbol: string; detail: string }[]).map((d, i) => (
+                    <li key={i}>
+                      {d.kind} · {d.symbol}: {d.detail}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {c.entriesHalted && <p className="mt-2 text-xs text-warn">New Live entries are halted ({c.haltReason ?? 'no reason given'}). Closes and protection keep running; an administrator resumes entries.</p>}
             <p className="mt-3 text-xs text-subtle">{verification.orderPermission ?? 'Order permission is confirmed by the first supervised Live order.'}</p>
             <div className="mt-4 flex flex-wrap gap-2">
               <Button icon={RefreshCwIcon} loading={busy === 'verify'} onClick={() => act('verify', 'POST', '/v1/me/exchange-connection/verify', undefined, 'Connection checked.')}>

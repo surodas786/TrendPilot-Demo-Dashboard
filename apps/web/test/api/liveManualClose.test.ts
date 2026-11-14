@@ -346,7 +346,7 @@ describe('Reversal overtaken by a manual close (the 14 Nov 00:50 XAU case)', () 
     // Past it, the manual close is booked (the investor's order, not TrendPilot's).
     clock.now = plus(clock.now, 180);
     setTestClock(() => clock.now);
-    r = await syncLiveAccount(direct.db, owner, clock.now, { protectiveClose: false });
+    r = await syncLiveAccount(direct.db, owner, clock.now);
     expect(r.closes).toEqual([expect.objectContaining({ result: 'FULL' })]);
     expect((await posById(p.id))).toMatchObject({ status: 'CLOSED', closeReason: 'EXTERNAL_CLOSE' });
     const [ex] = await exitsOf(p.id);
@@ -372,5 +372,161 @@ describe('Reversal overtaken by a manual close (the 14 Nov 00:50 XAU case)', () 
     // Re-running the sync never replays anything.
     expect((await syncLiveAccount(direct.db, owner, plus(clock.now, 300))).exitsRecorded).toBe(0);
     expect(mx.creates()).toHaveLength(createsBefore);
+  });
+});
+
+describe('Exchange position identity, concurrency and drift', () => {
+  it('a new MEXC position on the same symbol and side is not taken for the old one', async () => {
+    const p = await openLive();
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    expect((await syncLiveAccount(direct.db, owner, plus(clock.now, 5))).ok).toBe(true);
+    const oldRef = (await posById(p.id)).exchangePositionRef;
+    expect(oldRef).toBeTruthy();
+
+    // Investor closes the old long on MEXC, then opens a new long of the SAME size there.
+    clock.now = later(10);
+    mx.manualClose('BTC_USDT', 1, human(p.contracts), '65210');
+    mx.externalOpen('BTC_USDT', 1, human(p.contracts), '65220');
+    const fresh = [...mx.positions.values()].find((x) => x.symbol === 'BTC_USDT' && x.positionType === 1)!;
+    expect(String(fresh.positionId)).not.toBe(oldRef);
+
+    const r = await syncLiveAccount(direct.db, owner, plus(clock.now, 5));
+    expect(r.ok).toBe(true);
+    expect(await posById(p.id)).toMatchObject({ status: 'CLOSED', closeReason: 'EXTERNAL_CLOSE', exchangePositionRef: oldRef });
+    expect(r.drift).toEqual([expect.objectContaining({ kind: 'UNKNOWN_EXPOSURE', detail: expect.stringContaining(`is not TrendPilot's position ${oldRef}`) })]);
+    expect(orderChanges(mx)).toHaveLength(1);
+  });
+
+  it('two syncs at the same time: one runs, the other is refused as busy; nothing is booked twice', async () => {
+    const p = await openLive();
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    clock.now = later(10);
+    mx.manualClose('BTC_USDT', 1, human(p.contracts), '65200', { fee: '0.01' });
+    const [r1, r2, r3] = await Promise.all([
+      syncLiveAccount(direct.db, owner, plus(clock.now, 5)),
+      syncLiveAccount(direct.db, owner, plus(clock.now, 5)),
+      call(meSync.POST, { method: 'POST', path: '/x', cookie: cookies.a }).then((x) => x.body.sync)
+    ]);
+    const all = [r1, r2, r3];
+    expect(all.filter((x) => x.ok)).toHaveLength(1);
+    expect(all.filter((x) => x.busy)).toHaveLength(2);
+    expect(all.reduce((t, x) => t + x.exitsRecorded, 0)).toBe(1);
+    expect(await exitsOf(p.id)).toHaveLength(1);
+    const exitFill = (await exitsOf(p.id))[0]!.exchangeFillId;
+    expect((await fillLedger(p.paperAccountId)).filter((l) => l.refId === exitFill)).toHaveLength(3);
+    expect((await connRow(A)).lastSyncError).toBeNull(); // busy is not a failure
+    // The lease is released: the next run proceeds.
+    expect((await syncLiveAccount(direct.db, owner, plus(clock.now, 10))).ok).toBe(true);
+  });
+
+  it('drift clears once MEXC and TrendPilot agree again; the entry halt stays for the operator', async () => {
+    await openLive();
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    mx.externalOpen('BTC_USDT', 2, '3', '65000');
+    let r = await syncLiveAccount(direct.db, owner, plus(clock.now, 5));
+    expect(r.drift.map((d) => d.kind)).toEqual(['SIDE_MISMATCH']);
+    expect(await connRow(A)).toMatchObject({ entriesHalted: true });
+    expect(((await connRow(A)).drift as unknown[]).length).toBe(1);
+
+    // A failed run keeps the last drift.
+    mx.faults.failingReads = ['/api/v1/private/position/open_positions'];
+    expect((await syncLiveAccount(direct.db, owner, plus(clock.now, 10))).ok).toBe(false);
+    expect(((await connRow(A)).drift as unknown[]).length).toBe(1);
+    mx.faults.failingReads = [];
+
+    mx.manualClose('BTC_USDT', 2, '3', '65000');
+    r = await syncLiveAccount(direct.db, owner, plus(clock.now, 15));
+    expect(r.drift).toEqual([]);
+    const c = await connRow(A);
+    expect(c.drift).toEqual([]);
+    expect(c.entriesHalted).toBe(true);
+    expect(c.haltReason).toMatch(/^DRIFT SIDE_MISMATCH/);
+  });
+
+  it('a stop removed on MEXC with no size change: shown UNPROTECTED with its reason; the sync places no close', async () => {
+    const p = await openLive();
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    for (const s of mx.stops.values()) if (s.state === 1) s.state = 2;
+    mx.calls = [];
+    const r = await syncLiveAccount(direct.db, owner, plus(clock.now, 5));
+    expect(r).toMatchObject({ ok: true, protectionFailures: 1 });
+    expect(r.drift).toEqual([expect.objectContaining({ kind: 'STOP_MISSING', detail: 'stop not listed at MEXC' })]);
+    expect(await posById(p.id)).toMatchObject({ status: 'OPEN', protectionStatus: 'UNPROTECTED' });
+    await drain(plus(clock.now, 5));
+    expect(orderChanges(mx)).toEqual([]);
+    expect(await direct.db.select().from(schema.orderIntents).where(and(eq(schema.orderIntents.ownerId, owner), eq(schema.orderIntents.kind, 'CLOSE')))).toHaveLength(0);
+  });
+});
+
+describe('Live reversal: flat first, fresh MEXC margin, 32-character order IDs', () => {
+  const reverseBlock = async () => ({ strategyVersionId: await publishVersion({ oppositePolicy: 'CLOSE_AND_REVERSE' }) });
+  async function flip(mx: MockMexc) {
+    const next = new Date(BAR.getTime() + M15);
+    clock.now = plus(new Date(next.getTime() + M15), 3);
+    setTestClock(() => clock.now);
+    await recordMarketTick(direct.db, { instrumentId: BTC, asOf: clock.now, bid: '64899.5', ask: '64900.5', mark: '64900', last: '64900' });
+    mx.price.BTC_USDT = '64900';
+    expect(await deliver('BEARISH_FLIP', next, '64900.5')).toBe(202);
+    await drain(clock.now);
+    await drain(plus(clock.now, 5));
+  }
+  const reversalDecision = async (owner: string) =>
+    (await direct.db.select().from(schema.signalDecisions).where(and(eq(schema.signalDecisions.ownerId, owner), eq(schema.signalDecisions.step, 'ENTRY_V1')))).find((d) => (d.detail as { reversal?: boolean }).reversal);
+  const sides = (mx: MockMexc) => mx.creates().map((c) => (c.body as { side: number }).side);
+
+  it('closes the long, confirms flat, reads MEXC margin again and opens the short with its stop; every external order ID is 32 hex and stable', async () => {
+    const p = await openLive({ block: reverseBlock });
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    await flip(mx);
+    expect(await posById(p.id)).toMatchObject({ status: 'CLOSED', closeReason: 'REVERSAL_CLOSE' });
+    const d = await reversalDecision(owner);
+    expect(d).toMatchObject({ status: 'ENTRY_APPROVED' });
+    expect((d!.detail as { liveBalance: { availableUsdt: string } }).liveBalance.availableUsdt).toBe('1000');
+    const short = (await livePos(A)).find((x) => x.status === 'OPEN')!;
+    expect(short).toMatchObject({ side: 'SHORT', protectionStatus: 'PROTECTED' });
+    const intents = await direct.db.select().from(schema.orderIntents).where(eq(schema.orderIntents.ownerId, owner));
+    const sent = mx.creates().map((c) => String((c.body as { externalOid: string }).externalOid));
+    expect(sides(mx)).toEqual([1, 4, 3]); // open long, reversal close, open short
+    for (const id of sent) expect(id).toMatch(/^[0-9a-f]{32}$/);
+    expect(new Set(sent)).toEqual(new Set(intents.map((i) => i.clientOrderId)));
+    // The assets read happened after the close was sent and before the short was sent.
+    const seq = mx.calls.map((c) => `${c.method} ${c.path} ${(c.body as { side?: number } | undefined)?.side ?? ''}`);
+    const closeAt = seq.indexOf('POST /api/v1/private/order/create 4');
+    const shortAt = seq.indexOf('POST /api/v1/private/order/create 3');
+    expect(closeAt).toBeGreaterThan(-1);
+    expect(seq.slice(closeAt, shortAt).some((x) => x.startsWith('GET /api/v1/private/account/assets'))).toBe(true);
+  });
+
+  it('insufficient MEXC margin: required and available are recorded, the configured size is kept and nothing is sent', async () => {
+    const p = await openLive({ block: reverseBlock });
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    mx.assets = { equity: '1000', availableOpen: '1.5', unrealized: '0' };
+    await flip(mx);
+    expect((await posById(p.id)).status).toBe('CLOSED');
+    const d = await reversalDecision(owner);
+    expect(d).toMatchObject({ status: 'SKIPPED', reason: 'INSUFFICIENT_MARGIN' });
+    const det = d!.detail as { requiredUsdt: string; availableUsdt: string; liveBalance: { availableUsdt: string } };
+    expect(det.availableUsdt).toBe('1.5');
+    expect(det.liveBalance.availableUsdt).toBe('1.5');
+    expect(D(det.requiredUsdt).gt(det.availableUsdt)).toBe(true);
+    expect(D(det.requiredUsdt).gt("15")).toBe(true); // the configured 20 USDT order (rounded to the contract step) + fee, not shrunk to fit
+    expect(sides(mx)).toEqual([1, 4]);
+  });
+
+  it('the MEXC balance cannot be read: the opposite entry is withheld (REVERSAL_BALANCE_UNAVAILABLE)', async () => {
+    const p = await openLive({ block: reverseBlock });
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    mx.faults.failingReads = ['/api/v1/private/account/assets'];
+    await flip(mx);
+    expect((await posById(p.id)).status).toBe('CLOSED');
+    expect(await reversalDecision(owner)).toMatchObject({ status: 'SKIPPED', reason: 'REVERSAL_BALANCE_UNAVAILABLE' });
+    expect(sides(mx)).toEqual([1, 4]);
   });
 });

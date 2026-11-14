@@ -5,6 +5,7 @@ import { completeJob, type JobRow } from '../jobs';
 import { orderBlocks, orderIntents, positionExits, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
 import { ENTRY_STEP, evaluateAndReserveEntry, windowOf } from './entry';
 import { resolveAccountVenue } from '../live/liveMode';
+import { refreshLiveBalance } from '../live/liveSync';
 import type { ExecutionVenue } from '../venue/types';
 
 /**
@@ -17,6 +18,11 @@ import type { ExecutionVenue } from '../venue/types';
  * through the normal `paper.submit` path, which attaches the new stop in the same simulated
  * request. A blocked or withheld reversal records its reason and stays flat. The ENTRY_V1
  * decision is unique per (event, block), so re-running or replaying never opens twice.
+ * Live: the MEXC balance is read again right before the margin check, so the configured size
+ * plus fees is checked against MEXC's current available-to-open (never resized to fit; an
+ * INSUFFICIENT_MARGIN decision records required and available). If that read fails, the
+ * opposite entry is withheld (REVERSAL_BALANCE_UNAVAILABLE). A position closed on the exchange
+ * by the investor is never followed by the opposite entry (REVERSAL_CLOSED_ON_EXCHANGE).
  */
 
 const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
@@ -31,6 +37,18 @@ export interface ReverseSummary {
 
 export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks: { venue?: ExecutionVenue } = {}): Promise<ReverseSummary> {
   const { closeIntentId } = job.payload as { closeIntentId: string };
+  // Live: current MEXC available-to-open, read before the transaction (a network call).
+  const [peek] = await db.select({ mode: orderIntents.mode, ownerId: orderIntents.ownerId, state: orderIntents.state }).from(orderIntents).where(eq(orderIntents.id, closeIntentId));
+  let liveBalance: { equityUsdt: string; availableUsdt: string; refreshedAt: string } | null = null;
+  let balanceError: string | null = null;
+  if (peek?.mode === 'LIVE' && !(UNRESOLVED as readonly string[]).includes(peek.state)) {
+    try {
+      const b = await refreshLiveBalance(db, peek.ownerId, now);
+      liveBalance = { equityUsdt: b.equity, availableUsdt: b.available, refreshedAt: now.toISOString() };
+    } catch (e) {
+      balanceError = (e as Error).message.slice(0, 200);
+    }
+  }
   return db.transaction(async (tx) => {
     const [close] = await tx.select().from(orderIntents).where(eq(orderIntents.id, closeIntentId));
     if (!close || close.kind !== 'CLOSE' || close.exitReason !== 'REVERSAL_CLOSE' || !close.eventId) throw new Error(`Reversal close ${closeIntentId} not found.`);
@@ -125,7 +143,8 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks:
     }
 
     // 3. …then EMA, market data, margin and sizing; an approval reserves and queues the submit.
-    const entry = await evaluateAndReserveEntry(tx, { event: event!, block: c!.block, version: c!.version, side: screen.side, now, extraDetail: reversal });
+    if (pos!.mode === 'LIVE' && !liveBalance) return withhold('REVERSAL_BALANCE_UNAVAILABLE', { balanceError });
+    const entry = await evaluateAndReserveEntry(tx, { event: event!, block: c!.block, version: c!.version, side: screen.side, now, extraDetail: { ...reversal, ...(liveBalance ? { liveBalance } : {}) } });
     await completeJob(tx, job);
     return result(entry.status, entry.reason, entry.intentId);
   });

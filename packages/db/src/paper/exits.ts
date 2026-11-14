@@ -145,10 +145,11 @@ export async function recordExitFill(
     now: Date;
     venue?: ExecutionVenue;
     /**
-     * Live manual-close reconciliation: once the venue confirms zero, the position closes even if a
-     * stop is still listed (the caller reports that stop separately). Default: the stop must be gone.
+     * Live manual-close reconciliation: the caller has already confirmed that the venue holds none
+     * of THIS position (matched by exchange position ID, so a newer position on the same symbol does
+     * not count). The position closes even if a stop is still listed (the caller reports that stop).
      */
-    closeOnVenueFlat?: boolean;
+    venueConfirmedFlat?: boolean;
   }
 ): Promise<{ recorded: boolean; remaining: string; closed: boolean }> {
   const p = input.position;
@@ -215,13 +216,13 @@ export async function recordExitFill(
   let newStopRef: string | null = null;
   if (remaining.isZero()) {
     // Confirm zero at the venue before clearing the stop and closing the position.
-    const held = await venue.position(p.paperAccountId, p.instrumentId, tx);
+    const held = input.venueConfirmedFlat ? { contracts: '0' } : await venue.position(p.paperAccountId, p.instrumentId, tx);
     if (D(held.contracts).isZero()) {
       // Best effort: a stop the venue already executed (or removed) may refuse a cancel. The
       // inspection below decides; a cancel error must not undo the recorded exit.
       if (stopId) await venue.cancelOrder(stopId, p.instrumentId).catch(() => undefined);
       const s = stopId ? await venue.inspectProtection(stopId, p.instrumentId) : null;
-      closed = !s || s.status !== 'ACTIVE' || input.closeOnVenueFlat === true;
+      closed = !s || s.status !== 'ACTIVE' || input.venueConfirmedFlat === true;
       protection = { status: 'PENDING', stopContracts: '0' };
     }
   } else if (stopId) {

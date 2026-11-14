@@ -14,9 +14,8 @@ import { sql } from 'drizzle-orm';
 import { Decimal } from '@trendpilot/domain';
 import { createDb } from '../client';
 import { loadRootEnv, requireEnv } from '../env';
-import { MexcHttpTransport, MEXC_PRIVATE_DEFAULT_BASE_URL, normalizeAssets, normalizeOrder, normalizePositions, normalizeStops, type MexcRequester } from '../live/mexcPrivate';
-import { dealHistory, INFLIGHT_CLOSE_GRACE_MS, orderById, stopCoverage } from '../live/liveSync';
-import { open as unseal } from '../security/secretBox';
+import { connectionFor } from '../live/liveMode';
+import { INFLIGHT_CLOSE_GRACE_MS, mexcReadOnly, stopCoverage } from '../live/liveSync';
 
 loadRootEnv();
 const arg = (n: string) => {
@@ -51,7 +50,7 @@ try {
       const [user] = await q(sql`SELECT id, email, status, timezone FROM users WHERE lower(email) = lower(${email})`);
       if (!user) throw new Error(`No user ${email}`);
       [conn] = await q(sql`
-        SELECT id, status, account_ref, key_fingerprint, position_mode, live_enabled, entries_halted, halt_reason, last_sync_at, left(last_sync_error, 200) AS last_sync_error,
+        SELECT id, owner_id, status, account_ref, key_fingerprint, position_mode, live_enabled, entries_halted, halt_reason, last_sync_at, left(last_sync_error, 200) AS last_sync_error,
                drift, api_key_sealed, secret_sealed
         FROM exchange_connections WHERE owner_id = ${user.id}`);
       const [acct] = await q(sql`SELECT id, mode, wallet_balance, position_margin, order_reserve, exchange_equity, exchange_available, exchange_synced_at FROM paper_accounts WHERE owner_id = ${user.id} AND mode = 'LIVE'`);
@@ -101,13 +100,11 @@ try {
 }
 
 if (!conn || !pos) process.exit(1);
-let read: MexcRequester;
-try {
-  read = new MexcHttpTransport({ mode: 'READ_ONLY', credentials: { apiKey: unseal(String(conn.api_key_sealed)), secretKey: unseal(String(conn.secret_sealed)) }, baseUrl: process.env.MEXC_PRIVATE_BASE_URL || MEXC_PRIVATE_DEFAULT_BASE_URL });
-} catch (e) {
-  console.error(`Cannot open the read-only MEXC transport: ${(e as Error).message}`);
-  process.exit(1);
-}
+const h2 = createDb(requireEnv('DATABASE_URL'), 1);
+const connRow = await connectionFor(h2.db, String((conn as Row).owner_id));
+await h2.close();
+if (!connRow) process.exit(1);
+const mexc = mexcReadOnly(connRow); // read-only transport: GET queries on the allowlist only
 
 const findings: string[] = [];
 const say = (s: string) => findings.push(s);
@@ -115,26 +112,26 @@ const side = String(pos.side);
 const platformQty = D(String(pos.contracts));
 const openedMs = new Date(String(pos.opened_at)).getTime();
 
-const usdt = normalizeAssets(await read.request('GET', '/api/v1/private/account/assets')).find((a) => a.currency === 'USDT');
+const usdt = (await mexc.assets()).find((a) => a.currency === 'USDT');
 print('MEXC USDT balance (this API key)', usdt ? { ...usdt } : []);
-const venueAll = normalizePositions(await read.request('GET', '/api/v1/private/position/open_positions', {}));
+const venueAll = await mexc.openPositions();
 const venue = venueAll.filter((p) => p.symbol === symbol);
 print(`MEXC open positions on ${symbol}`, venue.map((p) => ({ ...p })));
 const vp = venue.find((p) => p.open && p.side === side && D(p.contracts).gt(0));
 const venueQty = vp ? D(vp.contracts) : D(0);
-const stops = normalizeStops(await read.request('GET', '/api/v1/private/stoporder/open_orders', { symbol }));
+const stops = await mexc.stops(symbol);
 print(`MEXC stop orders listed on ${symbol}`, stops.map((s) => ({ ...s })));
 const stopId = String(pos.stop_order_ref ?? '').replace(/^mexc-sl:/, '');
 const stop = stops.find((s) => s.stopId === stopId);
 
-const deals = await dealHistory(read, symbol, openedMs - 60_000);
+const deals = await mexc.deals(symbol, openedMs - 60_000);
 const closeSide = side === 'LONG' ? 4 : 2;
 const closing = deals.filter((d) => d.side === closeSide && d.timestamp >= openedMs - 60_000);
 const byOrder = new Map<string, typeof closing>();
 for (const d of closing) byOrder.set(d.orderId, [...(byOrder.get(d.orderId) ?? []), d]);
 const orderRows: Row[] = [];
 for (const [orderId, ds] of byOrder) {
-  const ord = await orderById(read, orderId);
+  const ord = await mexc.order(orderId);
   const vol = ds.reduce((t, d) => t.plus(d.vol), D(0));
   const own = intents.find((i) => ord?.externalOid && i.client_order_id === ord.externalOid);
   orderRows.push({
@@ -154,8 +151,7 @@ print(`MEXC closing deals (side ${closeSide}) since the position opened, per ord
 const closeLookups: Row[] = [];
 for (const i of intents.filter((x) => x.kind === 'CLOSE')) {
   try {
-    const data = await read.request<Record<string, unknown> | null>('GET', `/api/v1/private/order/external/${symbol}/${String(i.client_order_id)}`);
-    const o = data ? normalizeOrder(data) : null;
+    const o = await mexc.orderByClientId(symbol, String(i.client_order_id));
     closeLookups.push({ intent: i.id, clientOrderId: i.client_order_id, atMexc: o ? `${o.state} ${o.dealVol}/${o.vol} (order ${o.orderId})` : 'no such order' });
   } catch (e) {
     closeLookups.push({ intent: i.id, clientOrderId: i.client_order_id, atMexc: `lookup failed: ${(e as Error).message}` });
