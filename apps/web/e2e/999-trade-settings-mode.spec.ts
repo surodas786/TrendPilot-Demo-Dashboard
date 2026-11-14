@@ -270,7 +270,7 @@ test('without a verified connection the Edit form names why Live is unavailable'
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
 });
 
-test('My Account shows the same MEXC connection state as Live Trading, including the One-way requirement', async ({ page }) => {
+test('My Account shows the same MEXC connection state as Live Trading; Hedge is a supported mode', async ({ page }) => {
   await setConnection('VERIFIED');
   await sql(`UPDATE exchange_connections SET position_mode = 'HEDGE' WHERE owner_id = (SELECT id FROM users WHERE email = $1)`, [EMAIL]);
   await signIn(page);
@@ -278,19 +278,25 @@ test('My Account shows the same MEXC connection state as Live Trading, including
   await page.goto('/live-trading');
   const live = page.getByTestId('live-status');
   await expect(live).toContainText('Verified');
-  await expect(live.getByTestId('live-position-mode')).toHaveText('Hedge — One-way required');
-  await expect(live.getByTestId('live-blockers').locator('[data-reason="LIVE_POSITION_MODE"]')).toContainText('One-way position mode required');
+  await expect(live.getByTestId('live-position-mode')).toHaveText('Hedge');
+  await expect(live.getByTestId('live-blockers').locator('[data-reason="LIVE_POSITION_MODE"]')).toHaveCount(0);
 
   await page.goto('/my-account');
   const account = page.getByTestId('account-connection');
   await expect(account).toContainText('Verified');
   await expect(account).not.toContainText('Not connected');
-  await expect(page.getByTestId('account-position-mode')).toHaveText('Hedge — One-way required');
-  await expect(page.getByTestId('account-live-entries').locator('[data-reason="LIVE_POSITION_MODE"]')).toContainText('One-way position mode required');
+  await expect(page.getByTestId('account-position-mode')).toHaveText('Hedge');
+  await expect(page.getByTestId('account-live-entries').locator('[data-reason="LIVE_POSITION_MODE"]')).toHaveCount(0);
   await expect(page.getByText('not part of this release')).toHaveCount(0);
 
   await sql(`UPDATE exchange_connections SET position_mode = 'ONE_WAY' WHERE owner_id = (SELECT id FROM users WHERE email = $1)`, [EMAIL]);
   await page.reload();
   await expect(page.getByTestId('account-position-mode')).toHaveText('One-way');
   await expect(page.getByTestId('account-live-entries').locator('[data-reason="LIVE_POSITION_MODE"]')).toHaveCount(0);
+
+  // Only an unchecked mode blocks entries.
+  await sql(`UPDATE exchange_connections SET position_mode = NULL WHERE owner_id = (SELECT id FROM users WHERE email = $1)`, [EMAIL]);
+  await page.reload();
+  await expect(page.getByTestId('account-position-mode')).toHaveText('Not checked yet');
+  await expect(page.getByTestId('account-live-entries').locator('[data-reason="LIVE_POSITION_MODE"]')).toContainText('position mode is not verified');
 });

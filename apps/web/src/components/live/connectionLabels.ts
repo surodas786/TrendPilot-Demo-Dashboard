@@ -14,9 +14,12 @@ export function connectionStatusLabel(status: string | null | undefined): { text
   }
 }
 
-/** One-way is required for new Live entries; Hedge is shown as the blocker it is. */
+/**
+ * The position mode MEXC reported for this connection. One-way and Hedge are both supported (the
+ * order builder follows the verified mode); only an unchecked mode blocks new entries.
+ */
 export function positionModeLabel(mode: string | null | undefined): { text: string; tone: PillTone } {
   if (mode === 'ONE_WAY') return { text: 'One-way', tone: 'gain' };
-  if (mode === 'HEDGE') return { text: 'Hedge — One-way required', tone: 'warn' };
+  if (mode === 'HEDGE') return { text: 'Hedge', tone: 'gain' };
   return { text: 'Not checked yet', tone: 'neutral' };
 }

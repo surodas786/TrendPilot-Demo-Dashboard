@@ -119,7 +119,7 @@ export const MEXC_CAPABILITIES: Capability[] = [
   },
   {
     id: 'REDUCE_ONLY_CLOSE',
-    summary: 'POST /api/v1/private/order/create: side 4 close long / 2 close short, type 5, positionId; reduceOnly=true in one-way mode',
+    summary: 'POST /api/v1/private/order/create: side 4 close long / 2 close short, type 5, positionId of the leg; One-way: positionMode 2 + reduceOnly; Hedge: positionMode 1, no reduceOnly',
     docs: `${DOC}place-order`,
     documented: 'PARTIAL',
     mock: 'VERIFIED',
