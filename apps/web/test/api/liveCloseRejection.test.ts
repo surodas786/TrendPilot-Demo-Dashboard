@@ -366,6 +366,7 @@ describe('exact serialized close request: fixed take profit and close-on-signal,
       const price = side === 'LONG' ? D(pull).minus('0.5').toFixed() : D(pull).plus('0.5').toFixed();
       expect(closeCreates().map((c) => c.body)).toEqual([expectedClose(side, D(p.contracts).toFixed(), price, close!.clientOrderId, mexcPos.positionId)]);
       expect((close!.venueRequest as { context: unknown }).context).toEqual({
+        revision: expect.stringMatching(/^([0-9a-f]{40}|unknown)$/),
         positionModeRaw: 2,
         accountMode: 'ONE_WAY',
         position: { positionId: String(mexcPos.positionId), positionType: side === 'LONG' ? 1 : 2, openType: 1, holdVol: D(p.contracts).toFixed(), frozenVol: '0' },

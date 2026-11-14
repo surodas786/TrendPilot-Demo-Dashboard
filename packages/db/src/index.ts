@@ -28,6 +28,7 @@ export * from './venue/paper';
 export * from './venue/select';
 export * from './venue/types';
 export * from './venue/closeRejection';
+export * from './revision';
 export * from './market/feed';
 export * from './market/health';
 export * from './market/mexcPublic';
