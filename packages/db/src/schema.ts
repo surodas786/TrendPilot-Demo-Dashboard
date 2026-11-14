@@ -627,6 +627,13 @@ export const orderIntents = pgTable(
     sizing: jsonb('sizing').notNull(),
     /** Immutable copy of the block and pinned strategy version at decision time. */
     settingsSnapshot: jsonb('settings_snapshot').notNull(),
+    /**
+     * Sanitized venue exchange for the last submission of this intent: endpoint and serialized
+     * body (no key, secret or signature), and the exchange's code and message. Evidence for
+     * rejected orders; never used to resend.
+     */
+    venueRequest: jsonb('venue_request'),
+    venueResponse: jsonb('venue_response'),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     createdAt: createdAt(),
@@ -809,6 +816,18 @@ export const positions = pgTable(
     exchangePendingContracts: qty('exchange_pending_contracts'),
     /** Why the closing fills are still pending (shown to the investor), e.g. nothing listed yet or order not final. */
     exchangePendingReason: text('exchange_pending_reason'),
+    /**
+     * Automatic exits halted for this position (take profit, trailing, signal close, reversal,
+     * emergency close): set when the venue rejects a close deterministically (e.g. MEXC 2001) or
+     * the automatic retry budget is spent, so the same trigger is not resubmitted on every price.
+     * The exchange stop stays in place; a manual close is still accepted. Cleared by an operator
+     * (`npm run ops:exit-halt -- --clear`) after the cause is resolved.
+     */
+    exitHaltedAt: timestamp('exit_halted_at', { withTimezone: true }),
+    exitHaltReason: text('exit_halt_reason'),
+    exitHaltIntentId: uuid('exit_halt_intent_id'),
+    /** Automatic retry budget counts rejections after this moment only (set when a halt is cleared). */
+    exitRetryFrom: timestamp('exit_retry_from', { withTimezone: true }),
     settingsSnapshot: jsonb('settings_snapshot').notNull(),
     openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
     createdAt: createdAt(),

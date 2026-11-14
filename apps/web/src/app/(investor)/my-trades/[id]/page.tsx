@@ -49,6 +49,11 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
             : `MEXC now holds ${t.venueSync!.contracts} of these ${t.contracts} contracts · fill details pending; the next sync books them.`}
         </p>
       )}
+      {t.status !== 'CLOSED' && t.exitHalt && (
+        <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink" data-testid="exit-halt" role="alert">
+          {t.exitHalt.text} <span className="text-subtle">({t.exitHalt.reason}, {fmt(t.exitHalt.at)})</span>
+        </p>
+      )}
       {t.status !== 'CLOSED' && !fillsPending && (
         <div>
           <ClosePositionButton positionId={t.id} symbol={t.symbol} side={t.side} contracts={t.contracts} />

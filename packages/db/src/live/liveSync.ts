@@ -126,7 +126,7 @@ export function installLiveSyncSeam(f: ((conn: ConnectionRow) => MexcRequester) 
   readSeam = f;
 }
 
-function readRequester(conn: ConnectionRow, env: Record<string, string | undefined>): MexcRequester {
+export function readRequester(conn: ConnectionRow, env: Record<string, string | undefined>): MexcRequester {
   if (readSeam) return readSeam(conn);
   return new MexcHttpTransport({ mode: 'READ_ONLY', credentials: { apiKey: unseal(conn.apiKeySealed), secretKey: unseal(conn.secretSealed) }, baseUrl: env.MEXC_PRIVATE_BASE_URL || MEXC_PRIVATE_DEFAULT_BASE_URL, env });
 }
@@ -189,6 +189,10 @@ export function mexcReadOnly(conn: ConnectionRow, env: Record<string, string | u
   return {
     assets: async () => normalizeAssets(await read.request('GET', '/api/v1/private/account/assets')),
     openPositions: async () => normalizePositions(await read.request('GET', '/api/v1/private/position/open_positions', {})),
+    /** Raw open positions (all MEXC fields, for incident traces). */
+    rawOpenPositions: async () => ((await read.request<Record<string, unknown>[] | null>('GET', '/api/v1/private/position/open_positions', {})) ?? []),
+    /** Account position mode as MEXC reports it now: 1 hedge, 2 one-way. */
+    positionMode: async () => Number(await read.request<number>('GET', '/api/v1/private/position/position_mode')),
     stops: async (symbol: string) => normalizeStops(await read.request('GET', '/api/v1/private/stoporder/open_orders', { symbol })),
     deals: (symbol: string, startMs: number) => dealHistory(read, symbol, startMs),
     order: (orderId: string) => orderById(read, orderId),

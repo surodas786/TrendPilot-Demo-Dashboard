@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
 import { createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
@@ -24,6 +25,16 @@ export interface RunningWorker {
 }
 
 export const workerIdentity = () => `worker-${hostname()}-${process.pid}`;
+
+/** Code revision this process runs (GIT_SHA if the deploy sets it, else the checkout's HEAD), read once at start. */
+export function workerRevision(env: Record<string, string | undefined> = process.env): string {
+  if (env.GIT_SHA) return env.GIT_SHA.slice(0, 40);
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim().slice(0, 40);
+  } catch {
+    return 'unknown';
+  }
+}
 
 const describe = (r: ProcessResult) =>
   r.summary
@@ -69,14 +80,15 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
   const workerId = workerIdentity();
   const clock = signalClockFromEnv(env);
   const hooks = crashHooks(env, log);
-  log(`started as ${workerId}; database reachable; live order transport ${transport}`);
+  log(`started as ${workerId} at revision ${workerRevision(env)}; database reachable; live order transport ${transport}`);
 
   let stopping = false;
   let busy: Promise<void> = Promise.resolve();
   // OPS: liveness and queue counters, visible in the admin Operations view.
   const startedAt = new Date();
   const stats = { processed: 0, failed: 0, lastJobAt: null as string | null, lastError: null as string | null, lastPrunedAt: null as string | null };
-  const beat = () => heartbeat(handle.db, { service: 'worker', instance: workerId, startedAt, detail: { ...stats, pid: process.pid } });
+  const revision = workerRevision(env);
+  const beat = () => heartbeat(handle.db, { service: 'worker', instance: workerId, startedAt, detail: { ...stats, pid: process.pid, revision } });
   await beat();
 
   const poll = async () => {

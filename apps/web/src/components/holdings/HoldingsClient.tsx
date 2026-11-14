@@ -210,6 +210,11 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                       {h.contracts}
                       <span className="block text-[11px] text-subtle">of {h.initialContracts} contracts</span>
                       {h.venueSync?.closeState === 'FILLS_PENDING' && <span className="block text-[11px] text-warn">MEXC: {h.venueSync.contracts}</span>}
+                      {h.exitHalt && (
+                        <span className="block text-[11px] text-loss" data-testid="exit-halt" title={h.exitHalt.text}>
+                          Automatic exits paused · {h.exitHalt.reason.split(' ')[0]}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right text-ink">{priceOrUnavailable(h.avgEntryPrice)}</td>
                     <td className="px-3 py-2.5">

@@ -64,6 +64,8 @@ export interface MockFaults {
   lookupFailsAfterAccept: boolean;
   /** Read paths (prefix match) that fail with a network error, e.g. the deal history. */
   failingReads: string[];
+  /** Every closing order (side 2 / 4) is rejected with this API code until cleared (production 14 Nov 2026: 2001). */
+  rejectClosesWith: number | null;
 }
 
 export class MockMexc implements MexcRequester {
@@ -93,7 +95,7 @@ export class MockMexc implements MexcRequester {
   private invisible = new Map<string, number>();
 
   defaults(): MockFaults {
-    return { attachStop: 'yes', fillRatio: 1, timeoutAfterAccept: 0, timeoutBeforeAccept: 0, rejectCode: null, invisibleLookups: 0, duplicateDeals: false, stopAutoShrink: false, lookupNetworkError: false, lookupFailsAfterAccept: false, failingReads: [] };
+    return { attachStop: 'yes', fillRatio: 1, timeoutAfterAccept: 0, timeoutBeforeAccept: 0, rejectCode: null, invisibleLookups: 0, duplicateDeals: false, stopAutoShrink: false, lookupNetworkError: false, lookupFailsAfterAccept: false, failingReads: [], rejectClosesWith: null };
   }
   reset() {
     this.faults = this.defaults();
@@ -161,6 +163,9 @@ export class MockMexc implements MexcRequester {
       const code = this.faults.rejectCode;
       this.faults.rejectCode = null;
       throw new MexcPrivateError(`/api/v1/private/order/create: rejected (code ${code})`, 'API', code);
+    }
+    if (this.faults.rejectClosesWith && (Number(b.side) === 2 || Number(b.side) === 4)) {
+      throw new MexcPrivateError(`/api/v1/private/order/create: order direction error (code ${this.faults.rejectClosesWith})`, 'API', this.faults.rejectClosesWith);
     }
     const ext = String(b.externalOid);
     // Production MEXC rejects an externalOid over 32 characters with code 2030 (13 Nov 2026).

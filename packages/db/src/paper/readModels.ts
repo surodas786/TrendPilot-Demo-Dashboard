@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { exitHaltText } from '../venue/closeRejection';
 import { Decimal, marketSourceLabel, trailingTakeProfitContracts, type MarketSource, type TrailingKind } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { availableOf } from './accounts';
@@ -98,6 +99,8 @@ export interface PositionDto {
     /** Why the fills are still pending (null when not pending or not checked yet). */
     pendingReason: string | null;
   } | null;
+  /** Live: automatic exits are paused for this position after the exchange rejected a close. */
+  exitHalt: { at: string; reason: string; text: string } | null;
 }
 
 export interface TargetDto {
@@ -241,6 +244,7 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
             pendingReason: p.exchangePendingReason
           }
         : null,
+    exitHalt: p.exitHaltedAt ? { at: p.exitHaltedAt.toISOString(), reason: p.exitHaltReason ?? 'EXIT_HALTED', text: exitHaltText(p.exitHaltReason ?? 'EXIT_HALTED') } : null,
     targets: [],
     trailing:
       p.trailingStatus === 'OFF'

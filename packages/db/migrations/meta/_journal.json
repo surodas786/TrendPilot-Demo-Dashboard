@@ -183,6 +183,13 @@
       "when": 1794642674279,
       "tag": "0025_m15_exchange_pending_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1794673595017,
+      "tag": "0026_m16_close_exit_halt",
+      "breakpoints": true
     }
   ]
 }

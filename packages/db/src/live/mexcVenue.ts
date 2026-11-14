@@ -1,9 +1,9 @@
 import { Decimal } from '@trendpilot/domain';
-import type { CloseResult, OpeningRequest, SimResult } from '../paper/simulator';
+import type { CloseResult, OpeningRequest, SimResult, VenueDiagnostics } from '../paper/simulator';
 import type { CloseRequest, ExecutionVenue, ProtectionState } from '../venue/types';
 import { MEXC_EXTERNAL_OID_MAX } from '../paper/clientOrderId';
 import { livePilotVerified, type CapabilityId, type CapabilityState } from './capabilities';
-import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, normalizeStops, TREND, trendToBasis, type MexcRequester, type NormalizedOrder, type NormalizedStop } from './mexcPrivate';
+import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, normalizeStops, TREND, trendToBasis, type MexcRequester, type NormalizedOrder, type NormalizedPosition, type NormalizedStop } from './mexcPrivate';
 
 /**
  * MEXC Futures private adapter as an ExecutionVenue (Step 11). Reached only through
@@ -14,8 +14,11 @@ import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, n
  *  - An opening order always carries its stop (stopLossPrice + lossTrend) in the same request.
  *  - Opening orders require One-way position mode: checked from the verified connection and read
  *    again from MEXC right before sending (MEXC documents reduceOnly for One-way mode only).
- *  - Closes are capped at the venue position on that side and use the close sides (4 / 2), plus
- *    reduceOnly in one-way mode, so they cannot open exposure in the opposite direction. Closes
+ *  - Closes are built by `buildMexcCloseOrder` only: matched to the exchange position (by its
+ *    MEXC positionId when TrendPilot knows it), capped at what that position holds, with the
+ *    documented close sides (4 close long / 2 close short), the position's own margin mode
+ *    (openType) and positionId, the account's position mode read from MEXC right before sending,
+ *    and reduceOnly in one-way mode. They cannot open exposure in the opposite direction. Closes
  *    are never refused for the position mode, so an existing Hedge position can still be closed.
  *  - After an uncertain submission (timeout, network error, 5xx) the adapter only looks the order
  *    up by client order ID; it never resends. Absence must be confirmed after a grace period
@@ -44,6 +47,64 @@ const D = (v: Decimal.Value) => new Decimal(v);
 /** Decimals sent to MEXC in canonical form (no trailing zeros from numeric columns). */
 const num = (v: Decimal.Value) => new Decimal(v).toFixed();
 const basisToTrend = (b: string | undefined | null) => (b === 'MARK' ? TREND.MARK : b === 'INDEX' ? TREND.INDEX : TREND.LAST);
+
+/* ───────────────────────── Close order builder (pure) ───────────────────────── */
+
+export interface MexcCloseInput {
+  symbol: string;
+  clientOrderId: string;
+  /** Side of the TrendPilot position being reduced. */
+  positionSide: 'LONG' | 'SHORT';
+  /** Account position mode as MEXC reports it right before sending. */
+  accountMode: 'ONE_WAY' | 'HEDGE';
+  /** The matched MEXC position. */
+  exchangePosition: Pick<NormalizedPosition, 'positionId' | 'side' | 'contracts' | 'marginMode'>;
+  /** Contracts the intent wants to close (capped here at what the exchange position holds). */
+  contracts: Decimal.Value;
+  qtyStep: Decimal.Value;
+  quote: { bid: string; ask: string };
+}
+
+export type MexcCloseBuild = { ok: true; vol: string; body: Record<string, unknown> } | { ok: false; reason: string; detail: string };
+
+/**
+ * The single place a MEXC close request is serialized (manual close, fixed / split / trailing
+ * take profit, signal close, reversal, emergency close; Long and Short; one-way and hedge).
+ * Documented mapping (place-order, read 2026-11-14): side 4 = close long, 2 = close short;
+ * openType 1 isolated / 2 cross; positionMode 1 hedge / 2 one-way; reduceOnly applies only in
+ * one-way mode. The side mapping is not changed without MEXC confirmation (see
+ * docs/incidents/2026-11-14-mexc-2001-close.md).
+ */
+export function buildMexcCloseOrder(i: MexcCloseInput): MexcCloseBuild {
+  const p = i.exchangePosition;
+  if (p.side !== i.positionSide) return { ok: false, reason: 'CLOSE_POSITION_MISMATCH:SIDE', detail: `TrendPilot ${i.positionSide}, MEXC ${p.side}` };
+  const positionId = Number(p.positionId);
+  if (!Number.isSafeInteger(positionId) || positionId <= 0) return { ok: false, reason: 'CLOSE_POSITION_MISMATCH:POSITION_ID', detail: `MEXC positionId ${p.positionId}` };
+  const step = new Decimal(i.qtyStep);
+  // Never more than the exchange position holds: a close can never open the other side.
+  const vol = Decimal.min(i.contracts, p.contracts).div(step).floor().times(step);
+  if (vol.lte(0)) return { ok: false, reason: 'REDUCE_ONLY_NO_POSITION', detail: `MEXC holds ${p.contracts}` };
+  const oneWay = i.accountMode === 'ONE_WAY';
+  return {
+    ok: true,
+    vol: vol.toFixed(),
+    body: {
+      symbol: i.symbol,
+      price: num(i.positionSide === 'LONG' ? i.quote.bid : i.quote.ask),
+      vol: vol.toFixed(),
+      side: i.positionSide === 'LONG' ? 4 : 2,
+      type: 5,
+      openType: p.marginMode === 'CROSS' ? 2 : 1,
+      externalOid: i.clientOrderId,
+      positionId,
+      ...(oneWay ? { reduceOnly: true } : {}),
+      positionMode: oneWay ? 2 : 1
+    }
+  };
+}
+
+/** The MEXC message without the path prefix and code suffix our transport adds. */
+const mexcMessage = (e: MexcPrivateError) => e.message.replace(/^[^:]*:\s*/, '').replace(/\s*\(code -?\d+\)$/, '').slice(0, 200);
 
 export class UncertainSubmissionError extends Error {
   constructor(readonly clientOrderId: string, cause: string) {
@@ -115,19 +176,22 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
 
   const positions = async (symbol: string) => normalizePositions(await o.requester.request('GET', '/api/v1/private/position/open_positions', { symbol })).filter((p) => p.open && D(p.contracts).gt(0));
 
+  const CREATE = '/api/v1/private/order/create';
+  type Sent = ({ accepted: true } | { rejected: string }) & { diagnostics: VenueDiagnostics };
   /** Sends an order; on an uncertain outcome only looks it up. Never resends. */
-  const submit = async (symbol: string, clientOrderId: string, body: Record<string, unknown>): Promise<{ accepted: true } | { rejected: string }> => {
+  const submit = async (symbol: string, clientOrderId: string, body: Record<string, unknown>): Promise<Sent> => {
+    const request = { method: 'POST', path: CREATE, body };
     // MEXC answers a longer externalOid with error 2030. Refuse locally so nothing is sent; an
     // older intent with a longer stored ID stays as it is and can still be looked up.
-    if (clientOrderId.length > MEXC_EXTERNAL_OID_MAX) return { rejected: 'CLIENT_ORDER_ID_TOO_LONG' };
+    if (clientOrderId.length > MEXC_EXTERNAL_OID_MAX) return { rejected: 'CLIENT_ORDER_ID_TOO_LONG', diagnostics: { request: null, response: { code: 'NOT_SENT', message: 'externalOid longer than 32 characters' } } };
     try {
-      await o.requester.request('POST', '/api/v1/private/order/create', body);
-      return { accepted: true };
+      const data = await o.requester.request<unknown>('POST', CREATE, body);
+      return { accepted: true, diagnostics: { request, response: { code: 0, message: data === undefined || data === null ? 'accepted' : `accepted ${JSON.stringify(data).slice(0, 120)}` } } };
     } catch (e) {
-      if (e instanceof MexcPrivateError && !e.uncertain) return { rejected: `MEXC_${e.code ?? e.kind}` };
+      if (e instanceof MexcPrivateError && !e.uncertain) return { rejected: `MEXC_${e.code ?? e.kind}`, diagnostics: { request, response: { code: e.code ?? e.kind, message: mexcMessage(e) } } };
       // Timeout / network / 5xx: MEXC may have accepted it. Reconcile instead of retrying.
       const found = await getOrder(symbol, clientOrderId).catch(() => null);
-      if (found) return { accepted: true };
+      if (found) return { accepted: true, diagnostics: { request, response: { code: 'UNCERTAIN_FOUND', message: (e as Error).message.slice(0, 200) } } };
       throw new UncertainSubmissionError(clientOrderId, (e as Error).message);
     }
   };
@@ -190,37 +254,43 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
     },
 
     async placeReduceOnlyClose(r: CloseRequest): Promise<CloseResult> {
-      if (!verified('REDUCE_ONLY_CLOSE')) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'CAPABILITY_UNVERIFIED:REDUCE_ONLY_CLOSE' };
+      const reject = (reason: string, diagnostics?: VenueDiagnostics): CloseResult => ({ status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason, ...(diagnostics ? { diagnostics } : {}) });
+      const notSent = (reason: string, message: string) => reject(reason, { request: null, response: { code: 'NOT_SENT', message: message.slice(0, 200) } });
+      if (!verified('REDUCE_ONLY_CLOSE')) return reject('CAPABILITY_UNVERIFIED:REDUCE_ONLY_CLOSE');
       const symbol = await o.symbolFor(r.instrumentId);
+      // Same intent, same externalOid: an order MEXC already knows is reconciled, never resent.
       const existing = await getOrder(symbol, r.clientOrderId);
       let requested = r.contracts;
+      let diagnostics: VenueDiagnostics | undefined;
       if (!existing) {
-        const pos = (await positions(symbol)).find((p) => p.side === r.positionSide);
-        const venueQty = pos ? D(pos.contracts) : D(0);
-        if (venueQty.isZero()) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'REDUCE_ONLY_NO_POSITION' };
-        // Never more than the venue holds on this side: a close can never open the other side.
-        const vol = Decimal.min(r.contracts, venueQty).div(r.contract.qtyStep).floor().times(r.contract.qtyStep);
-        if (vol.lte(0)) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'REDUCE_ONLY_NO_POSITION' };
-        requested = vol.toFixed();
-        const sent = await submit(symbol, r.clientOrderId, {
-          symbol,
-          price: num(r.positionSide === 'LONG' ? r.quote.bid : r.quote.ask),
-          vol: requested,
-          side: r.positionSide === 'LONG' ? 4 : 2,
-          type: 5,
-          openType: r.marginMode === 'CROSS' ? 2 : 1,
-          externalOid: r.clientOrderId,
-          positionId: pos ? Number(pos.positionId) : undefined,
-          ...(o.positionMode === 'ONE_WAY' ? { reduceOnly: true } : {}),
-          positionMode: o.positionMode === 'HEDGE' ? 1 : 2
-        });
-        if ('rejected' in sent) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: sent.rejected };
+        const open = await positions(symbol);
+        // Match the exchange position: by MEXC positionId when TrendPilot recorded it (a newer
+        // position on the same symbol is never closed in its place), else the one on this side.
+        let pos: NormalizedPosition | undefined;
+        if (r.positionRef) {
+          pos = open.find((p) => p.positionId === r.positionRef);
+          if (!pos) return notSent('REDUCE_ONLY_NO_POSITION', `MEXC holds no position ${r.positionRef} on ${symbol}`);
+        } else {
+          const sameSide = open.filter((p) => p.side === r.positionSide);
+          if (sameSide.length > 1) return notSent('CLOSE_POSITION_MISMATCH:AMBIGUOUS', `${sameSide.length} ${r.positionSide} positions on ${symbol}`);
+          pos = sameSide[0];
+          if (!pos) return notSent('REDUCE_ONLY_NO_POSITION', `MEXC holds no ${r.positionSide} on ${symbol}${open[0] ? ` (it holds ${open[0].side} ${open[0].contracts})` : ''}`);
+        }
+        // The account's mode can change at MEXC after it was verified: read it again before sending.
+        const accountMode = Number(await o.requester.request<number>('GET', '/api/v1/private/position/position_mode')) === 2 ? 'ONE_WAY' : 'HEDGE';
+        const built = buildMexcCloseOrder({ symbol, clientOrderId: r.clientOrderId, positionSide: r.positionSide, accountMode, exchangePosition: pos, contracts: r.contracts, qtyStep: r.contract.qtyStep, quote: r.quote });
+        if (!built.ok) return notSent(built.reason, `${built.detail}; MEXC position ${pos.positionId} ${pos.side} ${pos.contracts} ${pos.marginMode}, account ${accountMode}`);
+        requested = built.vol;
+        const sent = await submit(symbol, r.clientOrderId, built.body);
+        diagnostics = sent.diagnostics;
+        if ('rejected' in sent) return reject(sent.rejected, sent.diagnostics);
       } else {
         requested = existing.vol;
       }
       const ord = await untilFinal(symbol, r.clientOrderId);
       if (!ord) throw new UncertainSubmissionError(r.clientOrderId, 'close not final after confirmation polling');
-      return closeResult(ord, r.clientOrderId, requested, D(ord.dealVol).gt(0) || ord.state === 'FILLED' ? await fillOf(ord) : null);
+      const res = closeResult(ord, r.clientOrderId, requested, D(ord.dealVol).gt(0) || ord.state === 'FILLED' ? await fillOf(ord) : null);
+      return diagnostics ? { ...res, diagnostics } : res;
     },
 
     async lookupCloseOrder(clientOrderId, instrumentId) {
