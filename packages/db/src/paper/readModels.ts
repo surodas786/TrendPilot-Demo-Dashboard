@@ -82,7 +82,18 @@ export interface PositionDto {
    */
   takeProfitPlan: { side: 'LONG' | 'SHORT' | null; mode: string } | null;
   /** LIVE: what MEXC reports for the position at the last private sync (null for Paper). */
-  venueSync: { positionRef: string | null; liquidationPrice: string | null; fundingUsdt: string | null; syncedAt: string | null } | null;
+  venueSync: {
+    positionRef: string | null;
+    liquidationPrice: string | null;
+    fundingUsdt: string | null;
+    syncedAt: string | null;
+    /** Contracts MEXC reported for this position at the last sync (null before the first). */
+    contracts: string | null;
+    /** FILLS_PENDING: MEXC holds less than TrendPilot (closed when 0), closing fills not listed yet. */
+    closeState: string | null;
+    /** When MEXC was first seen holding none of it. */
+    flatAt: string | null;
+  } | null;
 }
 
 export interface TargetDto {
@@ -214,7 +225,15 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
     })(),
     venueSync:
       p.mode === 'LIVE'
-        ? { positionRef: p.exchangePositionRef, liquidationPrice: n(p.exchangeLiquidationPrice), fundingUsdt: n(p.exchangeFundingUsdt), syncedAt: p.exchangeSyncedAt?.toISOString() ?? null }
+        ? {
+            positionRef: p.exchangePositionRef,
+            liquidationPrice: n(p.exchangeLiquidationPrice),
+            fundingUsdt: n(p.exchangeFundingUsdt),
+            syncedAt: p.exchangeSyncedAt?.toISOString() ?? null,
+            contracts: n(p.exchangeContracts),
+            closeState: p.exchangeCloseState,
+            flatAt: p.exchangeFlatAt?.toISOString() ?? null
+          }
         : null,
     targets: [],
     trailing:

@@ -796,6 +796,15 @@ export const positions = pgTable(
     exchangeLiquidationPrice: price('exchange_liquidation_price'),
     exchangeFundingUsdt: money('exchange_funding_usdt'),
     exchangeSyncedAt: timestamp('exchange_synced_at', { withTimezone: true }),
+    /**
+     * LIVE manual-close reconciliation. `exchangeContracts`: what MEXC reported for this position at
+     * the last successful sync. `exchangeCloseState` = FILLS_PENDING when MEXC holds less than
+     * TrendPilot (fully closed when 0) but the closing fills are not yet listed, so the exit is not
+     * booked; null otherwise. `exchangeFlatAt`: when MEXC was first seen holding none of it.
+     */
+    exchangeContracts: qty('exchange_contracts'),
+    exchangeCloseState: text('exchange_close_state'),
+    exchangeFlatAt: timestamp('exchange_flat_at', { withTimezone: true }),
     settingsSnapshot: jsonb('settings_snapshot').notNull(),
     openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
     createdAt: createdAt(),
@@ -807,6 +816,7 @@ export const positions = pgTable(
     index('positions_owner_idx').on(t.ownerId, t.openedAt),
     check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE', 'DONE')`),
     check('positions_trailing_kind_valid', sql`${t.trailingKind} IN ('TAKE_PROFIT', 'STOP')`),
+    check('positions_exchange_close_state_valid', sql`${t.exchangeCloseState} IS NULL OR ${t.exchangeCloseState} IN ('FILLS_PENDING')`),
     check('positions_trailing_alloc_valid', sql`${t.trailingFilledContracts} >= 0 AND (${t.trailingPlannedContracts} IS NULL OR ${t.trailingFilledContracts} <= ${t.trailingPlannedContracts})`)
   ]
 );
@@ -1137,6 +1147,8 @@ export const exchangeConnections = pgTable(
     haltedAt: timestamp('halted_at', { withTimezone: true }),
     lastSyncAt: timestamp('last_sync_at', { withTimezone: true }),
     lastSyncError: text('last_sync_error'),
+    /** Last sync that completed every MEXC query (lastSyncAt also moves on a failed attempt). */
+    lastSyncOkAt: timestamp('last_sync_ok_at', { withTimezone: true }),
     /** Differences between MEXC and TrendPilot found by the private sync (OPS-03). */
     drift: jsonb('drift').notNull().default([]),
     revision: integer('revision').notNull().default(1),

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getDb, getMyTrade } from '@trendpilot/db';
+import { isReversalWithheld } from '@trendpilot/domain';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
@@ -27,15 +28,27 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
   const t = await getMyTrade(getDb(), user.id, id);
   if (!t) notFound();
   const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: user.timezone });
+  const live = t.mode === 'LIVE';
+  const fillsPending = t.venueSync?.closeState === 'FILLS_PENDING';
 
   return (
-    <PageContainer title={`${t.symbol} ${t.side === 'LONG' ? 'Long' : 'Short'} · Paper`} description="Simulated position with its exchange-hosted (simulated) stop loss." scope={`${user.name} · My Account`}>
+    <PageContainer
+      title={`${t.symbol} ${t.side === 'LONG' ? 'Long' : 'Short'} · ${live ? 'Live' : 'Paper'}`}
+      description={live ? 'Position on your own MEXC Futures account with its exchange-hosted stop loss.' : 'Simulated position with its exchange-hosted (simulated) stop loss.'}
+      scope={`${user.name} · My Account`}
+    >
       <p>
         <Link href="/my-trades" className="text-sm text-accent hover:underline">
           ← My Trades
         </Link>
       </p>
-      {t.status !== 'CLOSED' && (
+      {fillsPending && (
+        <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink" data-testid="fills-pending">
+          {t.venueSync!.contracts === '0' ? 'MEXC confirms this position is closed' : `MEXC now holds ${t.venueSync!.contracts} of these ${t.contracts} contracts`}
+          {t.venueSync!.flatAt ? ` (seen ${fmt(t.venueSync!.flatAt)})` : ''}. Fill details (exit price, time, fees, realized P&amp;L) are pending at MEXC; the next sync books them.
+        </p>
+      )}
+      {t.status !== 'CLOSED' && !fillsPending && (
         <div>
           <ClosePositionButton positionId={t.id} symbol={t.symbol} side={t.side} contracts={t.contracts} />
         </div>
@@ -69,7 +82,7 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
                 )
               }
             />
-            <Row label="Entry price data" value={`${t.marketData.label} · fills simulated (Paper)`} testId="market-source" />
+            <Row label="Entry price data" value={`${t.marketData.label} · ${live ? 'fills from MEXC (Live)' : 'fills simulated (Paper)'}`} testId="market-source" />
             <Row label="Opened" value={fmt(t.openedAt)} />
             {t.closedAt && <Row label="Closed" value={fmt(t.closedAt)} />}
           </dl>
@@ -119,7 +132,9 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
             {t.reversal && (
               <p className="text-muted">
                 {t.reversal.status === 'ENTRY_APPROVED' ? (
-                  <StatusPill tone="gain">Reversed into a paper {t.reversal.side === 'LONG' ? 'Long' : 'Short'} · {(t.reversal.orderState ?? 'pending').toLowerCase()}</StatusPill>
+                  <StatusPill tone="gain">Reversed into a {live ? 'Live' : 'paper'} {t.reversal.side === 'LONG' ? 'Long' : 'Short'} · {(t.reversal.orderState ?? 'pending').toLowerCase()}</StatusPill>
+                ) : t.reversal.status === 'SKIPPED' && isReversalWithheld(t.reversal.reason) ? (
+                  <StatusPill tone="warn">Reverse entry withheld · {t.reversal.reason}</StatusPill>
                 ) : t.reversal.status === 'SKIPPED' ? (
                   <StatusPill tone="neutral">Stayed flat · {t.reversal.reason}</StatusPill>
                 ) : (
@@ -277,7 +292,7 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
           )}
         </section>
         <section className="rounded-xl border border-line bg-surface p-4 text-sm">
-          <h3 className="mb-2 font-semibold text-ink">Paper ledger</h3>
+          <h3 className="mb-2 font-semibold text-ink">{live ? 'Live' : 'Paper'} ledger</h3>
           <ul className="space-y-1 text-xs">
             {t.ledger.map((l) => (
               <li key={l.id} className="flex justify-between gap-3">

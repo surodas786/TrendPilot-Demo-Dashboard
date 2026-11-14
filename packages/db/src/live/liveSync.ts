@@ -5,36 +5,75 @@ import { exchangeConnections, fills, instruments, orderBlocks, orderIntents, pap
 import { lockPaperAccount } from '../paper/accounts';
 import { recordExitFill, requestExit } from '../paper/exits';
 import type { ExecutionVenue } from '../venue/types';
-import { applyExchangeBalance, connectionFor, haltConnectionEntries, LiveVenueUnavailable, resolveAccountVenue, type ConnectionRow } from './liveMode';
-import { MexcHttpTransport, MEXC_PRIVATE_DEFAULT_BASE_URL, normalizeAssets, normalizePositions, normalizeStops, type MexcRequester, type NormalizedPosition } from './mexcPrivate';
+import { applyExchangeBalance, connectionFor, haltConnectionEntries, LiveVenueUnavailable, type ConnectionRow } from './liveMode';
+import {
+  MexcHttpTransport,
+  MexcPrivateError,
+  MEXC_PRIVATE_DEFAULT_BASE_URL,
+  normalizeAssets,
+  normalizeOrder,
+  normalizePositions,
+  normalizeStops,
+  type MexcRequester,
+  type NormalizedOrder,
+  type NormalizedPosition,
+  type NormalizedStop
+} from './mexcPrivate';
 import { open as unseal } from '../security/secretBox';
 import { mexcVenue } from './mexcVenue';
 
 /**
- * Private MEXC sync for one Live account (REP-01, OPS-03). Runs in the worker on a schedule and
- * on demand. Read-only towards MEXC except for the protective actions it queues through the normal
- * close path. Per run:
+ * Private MEXC sync for one Live account (REP-01, OPS-03). Runs in the worker on a schedule, and
+ * on demand from Admin → Live and from the investor's "Sync with MEXC" button (same code). Every
+ * MEXC call here is a read; reconciliation never sends, replaces or cancels an order. Per run:
  *  1. Balance: the Live wallet follows MEXC's cash balance (equity − unrealized) through an
  *     EXCHANGE_BALANCE_SYNC ledger row; equity and available-to-open are stored for display and
- *     for the entry margin check.
- *  2. Positions, for every open Live position with no order in flight:
- *     - same size at MEXC → store MEXC positionId, liquidation price and cumulative funding, and
- *       verify the stop still covers the whole position (else: UNPROTECTED, entries halted,
- *       emergency close queued);
- *     - smaller at MEXC → book the exchange-side close fills found in MEXC's deal history once
- *       each (stop loss when the stop is gone, otherwise a close made on MEXC), then re-compare;
+ *     for the entry margin check. Applied again after exits are booked, so wallet, margin and
+ *     available agree with MEXC at the end of the run.
+ *  2. Positions, for every open Live position whose contract has no order in flight:
+ *     - smaller (or gone) at MEXC → a close made on MEXC (or a stop MEXC triggered). The closing
+ *       fills in MEXC's deal history are booked once each (unique fill ID `mexc:<orderId>`) with
+ *       MEXC's price, time, fee and realized P&L. An order is booked only when MEXC reports it
+ *       final with all its deals listed; an order belonging to a TrendPilot close still in flight
+ *       is left to that order's own job. Fills not listed yet leave the position open with
+ *       FILLS_PENDING ("MEXC confirms closed, fill details pending").
+ *     - same size → store positionId, liquidation price and funding, and verify the stop covers
+ *       the whole quantity. After a manual partial close the result is shown (PROTECTED, or
+ *       UNPROTECTED + drift); nothing is sent. Only the scheduled worker run keeps OPS-03's
+ *       emergency close for a stop that vanished without any size change (`protectiveClose`).
  *     - anything still different (or exposure TrendPilot does not know on a traded contract) →
  *       drift recorded and new entries halted until an operator reviews it.
+ *  A failed MEXC query aborts the run before the affected position is touched: it stays as it
+ *  was (unconfirmed) and the error is stored on the connection. Reconciliation never replays a
+ *  signal and never queues an entry; a reversal overtaken by a manual close stays withheld
+ *  (paper.reverse: REVERSAL_CLOSED_ON_EXCHANGE).
  */
 
 const D = (v: Decimal.Value) => new Decimal(v);
 const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
+/** A TrendPilot close younger than this is still being confirmed by its own job: not reconciled yet. */
+export const INFLIGHT_CLOSE_GRACE_MS = 120_000;
+const DEAL_PAGE_SIZE = 100;
+const DEAL_MAX_PAGES = 20;
 
 export interface DriftItem {
-  kind: 'SIZE_MISMATCH' | 'UNKNOWN_EXPOSURE' | 'SIDE_MISMATCH' | 'STOP_MISSING';
+  kind: 'SIZE_MISMATCH' | 'UNKNOWN_EXPOSURE' | 'SIDE_MISMATCH' | 'STOP_MISSING' | 'STOP_ORPHANED';
   symbol: string;
   detail: string;
   at: string;
+}
+
+/** What a run did to one position after a close made on MEXC. */
+export interface ExchangeCloseOutcome {
+  positionId: string;
+  symbol: string;
+  /** FULL: moved to Closed Trades. PARTIAL: remainder updated. FILLS_PENDING: MEXC confirms the close, fills not listed yet. */
+  result: 'FULL' | 'PARTIAL' | 'FILLS_PENDING';
+  platformContracts: string;
+  exchangeContracts: string;
+  /** PARTIAL / FILLS_PENDING with a remainder: does the active MEXC stop cover it? */
+  stopCoverage?: 'FULL' | 'PARTIAL' | 'NONE';
+  stopContracts?: string | null;
 }
 
 export interface LiveSyncSummary {
@@ -46,6 +85,9 @@ export interface LiveSyncSummary {
   exitsRecorded: number;
   protectionFailures: number;
   drift: DriftItem[];
+  closes: ExchangeCloseOutcome[];
+  /** Positions not reconciled this run because an order for the contract is still in flight. */
+  skipped: { positionId: string; symbol: string; reason: string }[];
 }
 
 /* Test seam: reads through the same mocked exchange the Live venue uses. */
@@ -67,39 +109,78 @@ interface Deal {
   vol: string;
   price: string;
   fee: string;
+  /** MEXC's realized P&L for the deal, when listed. */
+  profit: string | null;
   timestamp: number;
 }
+const listOf = (data: unknown): unknown[] => (Array.isArray(data) ? data : ((data as { resultList?: unknown[] } | null)?.resultList ?? []));
+
 /** Deal history (`order/list/order_deals/v3`). The docs show both a paginated wrapper and a bare array. */
 export function normalizeDealHistory(data: unknown): Deal[] {
-  const list = Array.isArray(data) ? data : ((data as { resultList?: unknown[] } | null)?.resultList ?? []);
   const seen = new Map<string, Deal>();
-  for (const d of list as Record<string, unknown>[]) {
+  for (const d of listOf(data) as Record<string, unknown>[]) {
     const id = String(d.id);
     if (seen.has(id)) continue;
-    seen.set(id, { id, orderId: String(d.orderId ?? ''), side: Number(d.side), vol: D(String(d.vol ?? 0)).toFixed(), price: D(String(d.price ?? 0)).toFixed(), fee: D(String(d.fee ?? 0)).toFixed(), timestamp: Number(d.timestamp ?? 0) });
+    const profit = d.profit === null || d.profit === undefined || d.profit === '' ? null : D(String(d.profit)).toFixed();
+    seen.set(id, { id, orderId: String(d.orderId ?? ''), side: Number(d.side), vol: D(String(d.vol ?? 0)).toFixed(), price: D(String(d.price ?? 0)).toFixed(), fee: D(String(d.fee ?? 0)).toFixed(), profit, timestamp: Number(d.timestamp ?? 0) });
   }
   return [...seen.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
 }
 
-/** The venue used to record exchange-side exits: the full Live venue, or read-only when orders are off. */
-async function venueForSync(db: Db, acctId: string, ownerId: string, conn: ConnectionRow, read: MexcRequester, injected?: ExecutionVenue): Promise<ExecutionVenue> {
+/** Every deal since `startMs`, all pages. A history longer than the page cap is refused as incomplete. */
+export async function dealHistory(read: MexcRequester, symbol: string, startMs: number): Promise<Deal[]> {
+  const raw: unknown[] = [];
+  for (let page = 1; page <= DEAL_MAX_PAGES; page++) {
+    const rows = listOf(await read.request('GET', '/api/v1/private/order/list/order_deals/v3', { symbol, start_time: startMs, page_num: page, page_size: DEAL_PAGE_SIZE }));
+    raw.push(...rows);
+    if (rows.length < DEAL_PAGE_SIZE) return normalizeDealHistory(raw);
+  }
+  throw new Error(`${symbol}: MEXC deal history exceeds ${DEAL_PAGE_SIZE * DEAL_MAX_PAGES} records; not reconciled`);
+}
+
+/** One order by MEXC order ID; null when MEXC no longer lists it. */
+export async function orderById(read: MexcRequester, orderId: string): Promise<NormalizedOrder | null> {
   try {
-    return await resolveAccountVenue(db, { mode: 'LIVE', paperAccountId: acctId, ownerId }, injected);
+    const data = await read.request<Record<string, unknown> | null | undefined>('GET', `/api/v1/private/order/get/${orderId}`);
+    return data ? normalizeOrder(data) : null;
   } catch (e) {
-    if (!(e instanceof Error)) throw e;
-    // Transport off: reads still work; cancels are skipped (a triggered stop is already gone).
-    const v = mexcVenue({
-      requester: read,
-      symbolFor: async (instrumentId) => (await db.select({ s: instruments.exchangeSymbol }).from(instruments).where(eq(instruments.id, instrumentId)))[0]?.s ?? '',
-      positionMode: (conn.positionMode as 'ONE_WAY' | 'HEDGE') ?? 'ONE_WAY'
-    });
-    return { ...v, cancelOrder: async () => undefined };
+    if (e instanceof MexcPrivateError && e.kind === 'API' && e.code === 2040) return null;
+    throw e;
   }
 }
 
-export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: { env?: Record<string, string | undefined>; venue?: ExecutionVenue } = {}): Promise<LiveSyncSummary> {
+/** Reconciliation venue: MEXC reads only. Anything order-changing is refused or a no-op. */
+function readOnlyVenue(db: Db, read: MexcRequester, conn: ConnectionRow): ExecutionVenue {
+  const v = mexcVenue({
+    requester: read,
+    symbolFor: async (instrumentId) => (await db.select({ s: instruments.exchangeSymbol }).from(instruments).where(eq(instruments.id, instrumentId)))[0]?.s ?? '',
+    positionMode: (conn.positionMode as 'ONE_WAY' | 'HEDGE') ?? 'ONE_WAY'
+  });
+  const refuse = async (): Promise<never> => {
+    throw new Error('Live reconciliation never sends orders.');
+  };
+  return { ...v, placeOpeningOrderWithStop: refuse, placeReduceOnlyClose: refuse, cancelOrder: async () => undefined, resizeProtection: async (stopOrderId) => stopOrderId };
+}
+
+/** Does this MEXC stop protect `contracts` of a `side` position? (reduce-only, active, right side) */
+export const stopCoverage = (stop: NormalizedStop | undefined, side: string, contracts: Decimal.Value): 'FULL' | 'PARTIAL' | 'NONE' => {
+  if (!stop || stop.state !== 'ACTIVE' || stop.reverse || stop.positionSide !== side || D(stop.vol).lte(0)) return 'NONE';
+  return D(stop.vol).gte(contracts) ? 'FULL' : 'PARTIAL';
+};
+
+export async function syncLiveAccount(
+  db: Db,
+  ownerId: string,
+  now: Date,
+  opts: {
+    env?: Record<string, string | undefined>;
+    /** OPS-03 emergency close for a stop that vanished with no size change. Default true (worker); false for the investor's button. */
+    protectiveClose?: boolean;
+  } = {}
+): Promise<LiveSyncSummary> {
   const env = opts.env ?? process.env;
-  const out: LiveSyncSummary = { ownerId, ok: false, positionsChecked: 0, exitsRecorded: 0, protectionFailures: 0, drift: [] };
+  const protectiveClose = opts.protectiveClose ?? true;
+  const out: LiveSyncSummary = { ownerId, ok: false, positionsChecked: 0, exitsRecorded: 0, protectionFailures: 0, drift: [], closes: [], skipped: [] };
   const conn = await connectionFor(db, ownerId);
   if (!conn || conn.status === 'REVOKED' || !conn.apiKeySealed) return { ...out, error: 'no connection' };
   const at = now.toISOString();
@@ -121,9 +202,12 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       .from(positions)
       .innerJoin(instruments, eq(instruments.id, positions.instrumentId))
       .where(and(eq(positions.paperAccountId, acct.id), eq(positions.status, 'OPEN')));
-    const busy = await db.select({ instrumentId: orderIntents.instrumentId }).from(orderIntents).where(and(eq(orderIntents.paperAccountId, acct.id), inArray(orderIntents.state, [...UNRESOLVED])));
+    const busy = await db
+      .select({ instrumentId: orderIntents.instrumentId, kind: orderIntents.kind, clientOrderId: orderIntents.clientOrderId, createdAt: orderIntents.createdAt, submittedAt: orderIntents.submittedAt })
+      .from(orderIntents)
+      .where(and(eq(orderIntents.paperAccountId, acct.id), inArray(orderIntents.state, [...UNRESOLVED])));
     const inFlight = new Set(busy.map((b) => b.instrumentId));
-    const stopsBySymbol = new Map<string, ReturnType<typeof normalizeStops>>();
+    const stopsBySymbol = new Map<string, NormalizedStop[]>();
     const stopsFor = async (symbol: string) => {
       if (!stopsBySymbol.has(symbol)) stopsBySymbol.set(symbol, normalizeStops(await read.request('GET', '/api/v1/private/stoporder/open_orders', { symbol })));
       return stopsBySymbol.get(symbol)!;
@@ -135,17 +219,26 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       out.positionsChecked += 1;
       const vp = venuePositions.find((v) => v.symbol === symbol && v.side === p.side);
       if (vp) matched.add(vp);
-      if (inFlight.has(p.instrumentId)) continue; // an order is being reconciled by its own job
+      // An opening order in flight changes the size; a fresh close is still being confirmed by its own
+      // job. An older unresolved close does not block: its own orders are excluded below.
+      const blocking = busy.find((b) => b.instrumentId === p.instrumentId && (b.kind !== 'CLOSE' || now.getTime() - (b.submittedAt ?? b.createdAt).getTime() < INFLIGHT_CLOSE_GRACE_MS));
+      if (blocking) {
+        out.skipped.push({ positionId: p.id, symbol, reason: `${blocking.kind} order ${blocking.clientOrderId} still in flight` });
+        continue;
+      }
       const opposite = venuePositions.find((v) => v.symbol === symbol && v.side !== p.side);
       if (opposite) out.drift.push({ kind: 'SIDE_MISMATCH', symbol, detail: `MEXC also holds a ${opposite.side} of ${opposite.contracts} contracts`, at });
 
-      let venueQty = vp ? D(vp.contracts) : D(0);
+      const venueQty = vp ? D(vp.contracts) : D(0);
       let platformQty = D(p.contracts);
+      let cur = p;
+      let reconciledHere = false;
 
       if (venueQty.lt(platformQty)) {
-        // Closed (partly) at MEXC: book the exchange fills not recorded yet.
-        venue ??= await venueForSync(db, acct.id, ownerId, conn, read, opts.venue);
-        const deals = normalizeDealHistory(await read.request('GET', '/api/v1/private/order/list/order_deals/v3', { symbol, start_time: p.openedAt.getTime() - 60_000, page_num: 1, page_size: 1000 }));
+        // Closed (partly) on MEXC: book the exchange fills not recorded yet.
+        venue ??= readOnlyVenue(db, read, conn);
+        const since = p.openedAt.getTime() - 60_000;
+        const deals = await dealHistory(read, symbol, since);
         const closeSide = p.side === 'LONG' ? 4 : 2;
         const known = new Set(
           [
@@ -155,30 +248,61 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
         );
         const byOrder = new Map<string, Deal[]>();
         for (const d of deals) {
-          if (d.side !== closeSide || d.timestamp < p.openedAt.getTime() - 60_000) continue;
+          if (d.side !== closeSide || d.timestamp < since) continue;
           if (known.has(`mexc:${d.orderId}`)) continue;
           byOrder.set(d.orderId, [...(byOrder.get(d.orderId) ?? []), d]);
         }
+        const gap = platformQty.minus(venueQty);
+        const listed = [...byOrder.values()].flat().reduce((t, d) => t.plus(d.vol), D(0));
         const stops = await stopsFor(symbol);
         const stopRef = p.stopOrderRef?.replace(/^mexc-sl:/, '');
         const stopStillActive = stops.some((s) => s.stopId === stopRef && s.state === 'ACTIVE');
         for (const [orderId, ds] of byOrder) {
           const vol = ds.reduce((t, d) => t.plus(d.vol), D(0));
+          const ord = await orderById(read, orderId);
+          // A TrendPilot order (externalOid = our client order ID) that is still unresolved is booked by its own job.
+          const [own] = ord?.externalOid ? await db.select().from(orderIntents).where(and(eq(orderIntents.paperAccountId, acct.id), eq(orderIntents.clientOrderId, ord.externalOid))) : [];
+          if (own && (UNRESOLVED as readonly string[]).includes(own.state)) continue;
+          // Complete only when MEXC reports the order final with every deal listed (or, when MEXC no
+          // longer lists the order, when the listed deals account for the whole difference).
+          const complete = ord ? ['FILLED', 'CANCELLED', 'INVALID'].includes(ord.state) && vol.gte(ord.dealVol) : listed.gte(gap);
+          if (!complete) continue;
           const price = ds.reduce((t, d) => t.plus(D(d.price).times(d.vol)), D(0)).div(vol);
           const fee = ds.reduce((t, d) => t.plus(d.fee), D(0));
+          const profit = ds.every((d) => d.profit !== null) ? ds.reduce((t, d) => t.plus(d.profit!), D(0)).toFixed() : null;
           const stopSide = p.side === 'LONG' ? price.lte(p.stopPrice) : price.gte(p.stopPrice);
-          const reason: ExitReason = !stopStillActive && stopSide ? 'STOP_LOSS' : 'EXTERNAL_CLOSE';
+          const reason: ExitReason = own ? ((own.exitReason as ExitReason | null) ?? 'EXTERNAL_CLOSE') : !stopStillActive && stopSide ? 'STOP_LOSS' : 'EXTERNAL_CLOSE';
           const recorded = await db.transaction(async (tx) => {
             const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
             if (!locked || locked.status !== 'OPEN') return false;
-            const fill = { fillId: `mexc:${orderId}`, contracts: vol.toFixed(), price: price.toDecimalPlaces(12).toFixed(), fee: fee.toDecimalPlaces(8).toFixed(), filledAt: new Date(Math.max(...ds.map((d) => d.timestamp))) };
-            return (await recordExitFill(db, tx, { position: locked, fill, reason, intentId: null, now, venue: venue! })).recorded;
+            const fill = { fillId: `mexc:${orderId}`, contracts: vol.toFixed(), price: price.toDecimalPlaces(12).toFixed(), fee: fee.toDecimalPlaces(8).toFixed(), filledAt: new Date(Math.max(...ds.map((d) => d.timestamp))), realizedPnl: profit };
+            return (await recordExitFill(db, tx, { position: locked, fill, reason, intentId: own?.id ?? null, now, venue: venue!, closeOnVenueFlat: true })).recorded;
           });
-          if (recorded) out.exitsRecorded += 1;
+          if (recorded) {
+            out.exitsRecorded += 1;
+            reconciledHere = true;
+          }
         }
-        const [after] = await db.select().from(positions).where(eq(positions.id, p.id));
-        platformQty = after?.status === 'OPEN' ? D(after.contracts) : D(0);
-        venueQty = vp ? D(vp.contracts) : D(0);
+        cur = (await db.select().from(positions).where(eq(positions.id, p.id)))[0]!;
+        if (cur.status !== 'OPEN') {
+          out.closes.push({ positionId: p.id, symbol, result: 'FULL', platformContracts: '0', exchangeContracts: venueQty.toFixed() });
+          await db.update(positions).set({ exchangeContracts: '0', exchangeCloseState: null, exchangeFlatAt: cur.exchangeFlatAt ?? now, exchangeSyncedAt: now, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+          const orphan = stops.find((s) => s.stopId === stopRef && s.state === 'ACTIVE');
+          if (orphan) out.drift.push({ kind: 'STOP_ORPHANED', symbol, detail: `position closed on MEXC but stop ${orphan.stopId} (${orphan.vol} contracts) is still active there`, at });
+          continue;
+        }
+        platformQty = D(cur.contracts);
+        if (venueQty.lt(platformQty)) {
+          // MEXC confirms the (partial) close; its fills are not all listed yet. Nothing more is booked.
+          const stop = stops.find((s) => s.stopId === stopRef);
+          const coverage = stopCoverage(stop, p.side, venueQty);
+          await db
+            .update(positions)
+            .set({ exchangeContracts: venueQty.toFixed(), exchangeCloseState: 'FILLS_PENDING', exchangeFlatAt: venueQty.isZero() ? (cur.exchangeFlatAt ?? now) : null, exchangeSyncedAt: now, updatedAt: sql`now()` })
+            .where(eq(positions.id, p.id));
+          out.closes.push({ positionId: p.id, symbol, result: 'FILLS_PENDING', platformContracts: platformQty.toFixed(), exchangeContracts: venueQty.toFixed(), ...(venueQty.gt(0) ? { stopCoverage: coverage, stopContracts: stop?.vol ?? null } : {}) });
+          continue;
+        }
       }
 
       if (!venueQty.eq(platformQty)) {
@@ -187,23 +311,36 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       }
       if (platformQty.isZero() || !vp) continue;
 
-      // Same size: store the exchange view and verify the stop still covers the whole position.
+      // Same size: store the exchange view and verify the stop covers the whole open quantity.
       await db
         .update(positions)
-        .set({ exchangePositionRef: vp.positionId, exchangeLiquidationPrice: vp.liquidationPrice, exchangeFundingUsdt: vp.fundingFee, exchangeSyncedAt: now, updatedAt: sql`now()` })
+        .set({ exchangePositionRef: vp.positionId, exchangeLiquidationPrice: vp.liquidationPrice, exchangeFundingUsdt: vp.fundingFee, exchangeContracts: venueQty.toFixed(), exchangeCloseState: null, exchangeFlatAt: null, exchangeSyncedAt: now, updatedAt: sql`now()` })
         .where(eq(positions.id, p.id));
-      const stopRef = p.stopOrderRef?.replace(/^mexc-sl:/, '');
+      const stopRef = cur.stopOrderRef?.replace(/^mexc-sl:/, '');
       const stop = (await stopsFor(symbol)).find((s) => s.stopId === stopRef);
-      const covered = !!stop && stop.state === 'ACTIVE' && !stop.reverse && D(stop.vol).eq(platformQty) && stop.positionSide === p.side;
-      if (!covered && p.protectionStatus === 'PROTECTED') {
+      const coverage = stopCoverage(stop, p.side, platformQty);
+      const covered = coverage === 'FULL';
+      const stopDetail = stop ? `stop ${stop.state}, covers ${stop.vol} of ${platformQty.toFixed()}` : 'stop not listed at MEXC';
+
+      if (reconciledHere) {
+        // Manual partial close: show what the active stop covers now. Nothing is sent.
+        out.closes.push({ positionId: p.id, symbol, result: 'PARTIAL', platformContracts: platformQty.toFixed(), exchangeContracts: venueQty.toFixed(), stopCoverage: coverage, stopContracts: stop?.vol ?? null });
+        await db
+          .update(positions)
+          .set({ protectionStatus: covered ? 'PROTECTED' : 'UNPROTECTED', stopContracts: coverage === 'NONE' ? null : stop!.vol, protectionVerifiedAt: now, updatedAt: sql`now()` })
+          .where(eq(positions.id, p.id));
+        if (!covered) out.drift.push({ kind: 'STOP_MISSING', symbol, detail: `after a close on MEXC: ${stopDetail}`, at });
+        continue;
+      }
+      if (!covered && cur.protectionStatus === 'PROTECTED') {
         out.protectionFailures += 1;
-        out.drift.push({ kind: 'STOP_MISSING', symbol, detail: stop ? `stop ${stop.state}, covers ${stop.vol} of ${platformQty.toFixed()}` : 'stop not listed at MEXC', at });
+        out.drift.push({ kind: 'STOP_MISSING', symbol, detail: stopDetail, at });
         await db.transaction(async (tx) => {
           const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
           if (!locked || locked.status !== 'OPEN') return;
           await tx.update(positions).set({ protectionStatus: 'UNPROTECTED', stopContracts: stop?.vol ?? null, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
-          // OPS-03: exposure without a verified stop is closed at once.
-          await requestExit(tx, { position: { ...locked, protectionStatus: 'UNPROTECTED' }, reason: 'PROTECTION_FAILURE', now });
+          // OPS-03: exposure without a verified stop is closed at once (scheduled worker run only).
+          if (protectiveClose) await requestExit(tx, { position: { ...locked, protectionStatus: 'UNPROTECTED' }, reason: 'PROTECTION_FAILURE', now });
         });
       }
     }
@@ -224,15 +361,22 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       out.drift.push({ kind: 'UNKNOWN_EXPOSURE', symbol: vp.symbol, detail: `MEXC holds a ${vp.side} of ${vp.contracts} contracts that TrendPilot did not open`, at });
     }
 
+    // Booked exits moved the local wallet by their P&L and fees, which MEXC's balance already
+    // contains: match it to MEXC again so wallet, margin and available agree at the end of the run.
+    if (usdt && out.exitsRecorded > 0) {
+      const b = await applyExchangeBalance(db, ownerId, usdt, `sync:${conn.id}:${at}:after-exits`, now);
+      out.balance = { equity: usdt.equity, available: usdt.availableOpen, walletAdjustment: D(out.balance?.walletAdjustment ?? 0).plus(b.walletAdjustment).toFixed() };
+    }
+
     if (out.drift.length) await haltConnectionEntries(db, ownerId, `DRIFT ${out.drift.map((d) => `${d.kind} ${d.symbol}`).join(', ')}`.slice(0, 200), null, 'live-sync');
     await db
       .update(exchangeConnections)
-      .set({ lastSyncAt: now, lastSyncError: null, ...(out.drift.length ? { drift: out.drift } : {}), updatedAt: sql`now()` })
+      .set({ lastSyncAt: now, lastSyncOkAt: now, lastSyncError: null, ...(out.drift.length ? { drift: out.drift } : {}), updatedAt: sql`now()` })
       .where(eq(exchangeConnections.id, conn.id));
     out.ok = true;
     return out;
   } catch (e) {
-    const msg = (e instanceof LiveVenueUnavailable ? e.message : (e as Error).message ?? 'sync failed').slice(0, 300);
+    const msg = (e instanceof LiveVenueUnavailable ? e.message : ((e as Error).message ?? 'sync failed')).slice(0, 300);
     await db.update(exchangeConnections).set({ lastSyncAt: now, lastSyncError: msg, updatedAt: sql`now()` }).where(eq(exchangeConnections.id, conn.id));
     return { ...out, error: msg };
   }
@@ -255,7 +399,7 @@ export async function liveAccountsToSync(db: Db): Promise<string[]> {
   return out;
 }
 
-export async function syncAllLiveAccounts(db: Db, now: Date, opts: { env?: Record<string, string | undefined> } = {}): Promise<LiveSyncSummary[]> {
+export async function syncAllLiveAccounts(db: Db, now: Date, opts: { env?: Record<string, string | undefined>; protectiveClose?: boolean } = {}): Promise<LiveSyncSummary[]> {
   const out: LiveSyncSummary[] = [];
   for (const ownerId of await liveAccountsToSync(db)) out.push(await syncLiveAccount(db, ownerId, now, opts));
   return out;

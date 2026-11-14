@@ -268,11 +268,15 @@ export function advanceTrailing(side: Side, s: TrailingState, price: string, cfg
 
 /* ───────────────────────── STR-06 close and reverse ───────────────────────── */
 
-export type ReversalWithheldReason = 'REVERSAL_CLOSE_INCOMPLETE' | 'REVERSAL_NOT_FLAT' | 'REVERSAL_PROTECTION_UNRECONCILED' | 'REVERSAL_ORDERS_UNRESOLVED';
+export type ReversalWithheldReason = 'REVERSAL_CLOSE_INCOMPLETE' | 'REVERSAL_NOT_FLAT' | 'REVERSAL_PROTECTION_UNRECONCILED' | 'REVERSAL_ORDERS_UNRESOLVED' | 'REVERSAL_CLOSED_ON_EXCHANGE';
 
 export const REVERSAL_REASON_TEXT: Record<ReversalWithheldReason, string> = {
   REVERSAL_CLOSE_INCOMPLETE: 'The closing order did not confirm a flat position, so the opposite entry was withheld. The remainder stays protected by its stop.',
   REVERSAL_NOT_FLAT: 'The venue still reports exposure, so the opposite entry was withheld.',
   REVERSAL_PROTECTION_UNRECONCILED: 'The old stop is still active at the venue, so the opposite entry was withheld.',
-  REVERSAL_ORDERS_UNRESOLVED: 'Another order is still unresolved for this contract, so the opposite entry was withheld.'
+  REVERSAL_ORDERS_UNRESOLVED: 'Another order is still unresolved for this contract, so the opposite entry was withheld.',
+  REVERSAL_CLOSED_ON_EXCHANGE: 'The position was closed directly on the exchange, not by the closing order, so the opposite entry was withheld.'
 };
+
+/** A reversal whose opening leg was withheld because the original close was not confirmed. */
+export const isReversalWithheld = (reason: string | null | undefined): boolean => !!reason && reason in REVERSAL_REASON_TEXT;

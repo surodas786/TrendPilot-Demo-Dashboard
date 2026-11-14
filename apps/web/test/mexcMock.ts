@@ -61,6 +61,8 @@ export interface MockFaults {
   lookupNetworkError: boolean;
   /** Lookups start failing right after the next order is accepted. */
   lookupFailsAfterAccept: boolean;
+  /** Read paths (prefix match) that fail with a network error, e.g. the deal history. */
+  failingReads: string[];
 }
 
 export class MockMexc implements MexcRequester {
@@ -72,7 +74,7 @@ export class MockMexc implements MexcRequester {
    */
   missingOrder: 'ERROR_2040' | 'EMPTY_DATA' = 'ERROR_2040';
   orders = new Map<string, MockOrder>();
-  deals = new Map<number, { id: number; orderId: number; symbol: string; side: number; vol: string; price: string; fee: string; timestamp: number }[]>();
+  deals = new Map<number, { id: number; orderId: number; symbol: string; side: number; vol: string; price: string; fee: string; timestamp: number; profit?: string }[]>();
   stops = new Map<number, MockStop>();
   positions = new Map<string, MockPosition>();
   calls: { method: string; path: string; body?: unknown }[] = [];
@@ -84,11 +86,13 @@ export class MockMexc implements MexcRequester {
   faults: MockFaults = this.defaults();
   /** Exchange clock (ms). Tests on a fixed signal clock drive it from that clock. */
   now: () => number = () => Date.now();
+  /** Orders whose deals MEXC has not listed yet (delayed in deal history and order details). */
+  delayedDeals = new Set<number>();
   private seq = 1000;
   private invisible = new Map<string, number>();
 
   defaults(): MockFaults {
-    return { attachStop: 'yes', fillRatio: 1, timeoutAfterAccept: 0, timeoutBeforeAccept: 0, rejectCode: null, invisibleLookups: 0, duplicateDeals: false, stopAutoShrink: false, lookupNetworkError: false, lookupFailsAfterAccept: false };
+    return { attachStop: 'yes', fillRatio: 1, timeoutAfterAccept: 0, timeoutBeforeAccept: 0, rejectCode: null, invisibleLookups: 0, duplicateDeals: false, stopAutoShrink: false, lookupNetworkError: false, lookupFailsAfterAccept: false, failingReads: [] };
   }
   reset() {
     this.faults = this.defaults();
@@ -98,10 +102,17 @@ export class MockMexc implements MexcRequester {
 
   async request<T>(method: 'GET' | 'POST', path: string, params: Record<string, unknown> | unknown[] | null = null): Promise<T> {
     this.calls.push({ method, path, body: params ?? undefined });
+    if (method === 'GET' && this.faults.failingReads.some((f) => path.startsWith(f))) throw new MexcPrivateError(`GET ${path}: network error`, 'NETWORK');
+    if (method === 'GET' && path.startsWith('/api/v1/private/order/get/')) {
+      const o = [...this.orders.values()].find((x) => x.orderId === Number(path.split('/').pop()));
+      if (!o) throw new MexcPrivateError(`${path}: order not exist (code 2040)`, 'API', 2040);
+      return { ...o, leverage: 10, openType: 1, makerFee: '0', errorCode: 0, updateTime: o.createTime } as T;
+    }
     if (method === 'POST' && path === '/api/v1/private/order/create') return this.create(params as Record<string, unknown>) as T;
     if (method === 'GET' && path.startsWith('/api/v1/private/order/external/')) return this.lookup(path) as T;
     if (method === 'GET' && path.startsWith('/api/v1/private/order/deal_details/')) {
-      const list = this.deals.get(Number(path.split('/').pop())) ?? [];
+      const id = Number(path.split('/').pop());
+      const list = this.delayedDeals.has(id) ? [] : (this.deals.get(id) ?? []);
       return (this.faults.duplicateDeals ? [...list, ...list] : list) as T;
     }
     if (method === 'GET' && path === '/api/v1/private/stoporder/open_orders') return [...this.stops.values()].filter((s) => s.state === 1 || s.state === 5) as T;
@@ -111,7 +122,7 @@ export class MockMexc implements MexcRequester {
       return [{ currency: 'USDT', equity: this.assets.equity, availableBalance: this.assets.availableOpen, availableOpen: this.assets.availableOpen, positionMargin: '0', frozenBalance: '0', unrealized: this.assets.unrealized, bonus: '0' }] as T;
     if (method === 'GET' && path === '/api/v1/private/order/list/order_deals/v3') {
       const sym = (params as Record<string, unknown> | null)?.symbol;
-      return [...this.deals.values()].flat().filter((d) => !sym || d.symbol === sym) as T;
+      return [...this.deals.values()].flat().filter((d) => (!sym || d.symbol === sym) && !this.delayedDeals.has(d.orderId)) as T;
     }
     if (method === 'GET' && path === '/api/v1/private/position/position_mode') return this.positionMode as T;
     if (method === 'POST' && path === '/api/v1/private/stoporder/cancel') {
@@ -224,15 +235,25 @@ export class MockMexc implements MexcRequester {
     return id;
   }
 
-  /** A manual close on the MEXC web UI (no externalOid from TrendPilot). */
-  manualClose(symbol: string, positionType: 1 | 2, vol: string, price: string) {
+  /**
+   * A manual close on the MEXC web UI (no externalOid from TrendPilot). `fee` and `profit` are
+   * MEXC's own figures for the deal (profit omitted when undefined). Returns the MEXC order ID.
+   */
+  manualClose(symbol: string, positionType: 1 | 2, vol: string, price: string, o: { fee?: string; profit?: string; delayed?: boolean } = {}) {
     const pos = this.positions.get(`${symbol}:${positionType}`)!;
     const id = this.seq++;
     const side = positionType === 1 ? 4 : 2;
-    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: '0', createTime: this.now() });
-    this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol, side, vol, price, fee: '0', timestamp: this.now() }]);
+    const fee = o.fee ?? '0';
+    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: fee, createTime: this.now() });
+    this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol, side, vol, price, fee, timestamp: this.now(), ...(o.profit !== undefined ? { profit: o.profit } : {}) }]);
+    if (o.delayed) this.delayedDeals.add(id);
     pos.holdVol = D(pos.holdVol).minus(vol).toFixed();
-    for (const s of this.stops.values()) if (s.positionId === pos.positionId && s.state === 1 && D(pos.holdVol).isZero()) s.state = 2;
+    for (const s of this.stops.values()) {
+      if (s.positionId !== pos.positionId || s.state !== 1) continue;
+      if (D(pos.holdVol).isZero()) s.state = 2;
+      else if (this.faults.stopAutoShrink) s.vol = Decimal.min(s.vol, pos.holdVol).toFixed();
+    }
+    return id;
   }
 
   /** Exposure opened directly on MEXC (unknown to TrendPilot). */
