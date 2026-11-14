@@ -223,13 +223,20 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                     </td>
                     <td className="px-4 py-2.5 text-ink" data-testid="exit-reason">
                       {EXIT_LABEL[p.closeReason ?? ''] ?? p.closeReason}
+                      {p.venueSync?.closeState === 'FILLS_PENDING' && (
+                        <span className="mt-1 block" data-testid="fills-pending">
+                          <StatusPill tone="warn" icon={HourglassIcon}>
+                            Closed on MEXC · fill details pending
+                          </StatusPill>
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-muted tabular-nums" data-testid="remaining">
                       {p.initialContracts} · {p.contracts}
                     </td>
                     <td className="px-4 py-2.5 text-muted tabular-nums">{p.avgEntryPrice}</td>
                     <td className={`px-4 py-2.5 tabular-nums ${Number(p.realizedPnlUsdt) >= 0 ? 'text-gain' : 'text-loss'}`} data-testid="realized-pnl">
-                      {signed(p.realizedPnlUsdt)}
+                      {p.venueSync?.closeState === 'FILLS_PENDING' ? <span className="text-subtle">Pending</span> : signed(p.realizedPnlUsdt)}
                     </td>
                     <td className="px-4 py-2.5 text-muted tabular-nums">{usdt(p.feesUsdt)}</td>
                     <td className={`px-4 py-2.5 font-semibold tabular-nums ${Number(p.netRealizedUsdt) >= 0 ? 'text-gain' : 'text-loss'}`} data-testid="net-pnl">

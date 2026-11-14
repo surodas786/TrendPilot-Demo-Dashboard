@@ -805,6 +805,8 @@ export const positions = pgTable(
     exchangeContracts: qty('exchange_contracts'),
     exchangeCloseState: text('exchange_close_state'),
     exchangeFlatAt: timestamp('exchange_flat_at', { withTimezone: true }),
+    /** Contracts closed on MEXC whose fills are not booked yet (FILLS_PENDING, also after the position is CLOSED). */
+    exchangePendingContracts: qty('exchange_pending_contracts'),
     settingsSnapshot: jsonb('settings_snapshot').notNull(),
     openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
     createdAt: createdAt(),

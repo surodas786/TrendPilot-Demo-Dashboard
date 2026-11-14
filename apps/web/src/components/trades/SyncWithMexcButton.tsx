@@ -12,7 +12,7 @@ interface SyncResult {
     busy?: boolean;
     error?: string;
     exitsRecorded: number;
-    closes: { symbol: string; result: 'FULL' | 'PARTIAL' | 'FILLS_PENDING'; platformContracts: string; exchangeContracts: string; stopCoverage?: string; stopContracts?: string | null }[];
+    closes: { symbol: string; result: 'FULL' | 'FULL_FILLS_PENDING' | 'FILLS_BACKFILLED' | 'PARTIAL' | 'FILLS_PENDING'; platformContracts: string; exchangeContracts: string; stopCoverage?: string; stopContracts?: string | null; pendingContracts?: string }[];
     skipped: { symbol: string; reason: string }[];
     drift: { kind: string; symbol: string; detail: string }[];
   };
@@ -36,6 +36,8 @@ function summary(s: SyncResult['sync']): string {
   const parts: string[] = [];
   for (const c of s.closes) {
     if (c.result === 'FULL') parts.push(`${c.symbol}: closed on MEXC — moved to closed positions`);
+    else if (c.result === 'FULL_FILLS_PENDING') parts.push(`${c.symbol}: closed on MEXC — moved to closed positions · fill details pending${c.pendingContracts ? ` (${c.pendingContracts} contracts)` : ''}`);
+    else if (c.result === 'FILLS_BACKFILLED') parts.push(`${c.symbol}: exit price, fees and P&L filled in from MEXC`);
     else if (c.result === 'PARTIAL')
       parts.push(`${c.symbol}: ${c.platformContracts} contracts remain; stop ${c.stopCoverage === 'FULL' ? `covers them (${c.stopContracts})` : c.stopCoverage === 'PARTIAL' ? `covers only ${c.stopContracts}` : 'does not cover them'}`);
     else parts.push(`${c.symbol}: ${c.exchangeContracts === '0' ? 'closed on MEXC' : `MEXC holds ${c.exchangeContracts}`} · fill details pending`);

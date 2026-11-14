@@ -93,6 +93,8 @@ export interface PositionDto {
     closeState: string | null;
     /** When MEXC was first seen holding none of it. */
     flatAt: string | null;
+    /** Contracts closed on MEXC whose fills (price, fee, P&L) are not booked yet. */
+    pendingContracts: string | null;
   } | null;
 }
 
@@ -232,7 +234,8 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
             syncedAt: p.exchangeSyncedAt?.toISOString() ?? null,
             contracts: n(p.exchangeContracts),
             closeState: p.exchangeCloseState,
-            flatAt: p.exchangeFlatAt?.toISOString() ?? null
+            flatAt: p.exchangeFlatAt?.toISOString() ?? null,
+            pendingContracts: n(p.exchangePendingContracts)
           }
         : null,
     targets: [],

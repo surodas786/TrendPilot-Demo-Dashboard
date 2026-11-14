@@ -13,6 +13,7 @@ import * as conn from '@/app/v1/me/exchange-connection/route';
 import * as activate from '@/app/v1/me/live/activate/route';
 import * as meSync from '@/app/v1/me/live/sync/route';
 import * as mySignals from '@/app/v1/me/signals/route';
+import * as holdingsRoute from '@/app/v1/me/holdings/route';
 import * as platform from '@/app/v1/admin/live/platform/route';
 import * as capabilities from '@/app/v1/admin/live/capabilities/route';
 import * as contracts from '@/app/v1/admin/live/contracts/[id]/route';
@@ -214,36 +215,86 @@ describe('Partial close made directly on MEXC', () => {
 });
 
 describe('Delayed fills and failed queries', () => {
-  it('MEXC confirms the close before its fills are listed: FILLS_PENDING, nothing booked; the fills are booked once when they appear', async () => {
+  it('MEXC holds none of the position but fills are delayed: closed at once (remaining 0, margin released, no stop coverage); fills backfilled once later', async () => {
     const p = await openLive();
     const mx = await mockOf(A);
     const owner = await userId(A);
     clock.now = later(10);
-    const orderId = mx.manualClose('BTC_USDT', 1, human(p.contracts), '65300', { fee: '0.02', delayed: true });
+    const orderId = mx.manualClose('BTC_USDT', 1, human(p.contracts), '65300', { fee: '0.02', profit: '0.6', delayed: true });
+    mx.assets = { equity: '1000.58', availableOpen: '1000.58', unrealized: '0' };
     let r = await syncLiveAccount(direct.db, owner, plus(clock.now, 5));
     expect(r).toMatchObject({ ok: true, exitsRecorded: 0, drift: [] });
-    expect(r.closes).toEqual([expect.objectContaining({ result: 'FILLS_PENDING', exchangeContracts: '0' })]);
+    expect(r.closes).toEqual([expect.objectContaining({ result: 'FULL_FILLS_PENDING', pendingContracts: human(p.contracts) })]);
     let row = await posById(p.id);
-    expect(row).toMatchObject({ status: 'OPEN', exchangeCloseState: 'FILLS_PENDING' });
-    expect(D(row.contracts).eq(p.contracts)).toBe(true);
-    expect(D(row.exchangeContracts!).isZero()).toBe(true);
-    expect(row.exchangeFlatAt).toEqual(plus(clock.now, 5));
+    expect(row).toMatchObject({ status: 'CLOSED', closeReason: 'EXTERNAL_CLOSE', exchangeCloseState: 'FILLS_PENDING', protectionStatus: 'PENDING' });
+    expect(D(row.contracts).isZero()).toBe(true);
+    expect(D(row.initialContracts).eq(p.initialContracts)).toBe(true); // opening quantity kept
+    expect(D(row.marginUsdt).isZero()).toBe(true);
+    expect(D(row.exchangePendingContracts!).eq(p.contracts)).toBe(true);
+    expect(row.closedAt).toEqual(plus(clock.now, 5));
     expect(await exitsOf(p.id)).toHaveLength(0);
+    let acct = (await getMyPaperAccount(direct.db, owner, 'LIVE'))!;
+    expect(D(acct.positionMarginUsdt).isZero()).toBe(true);
+    expect(D(acct.walletBalanceUsdt).eq('1000.58')).toBe(true);
+    // Open exposure, unrealized P&L and stop coverage: the position is no longer in the open lists.
+    const holdings = await call(holdingsRoute.GET, { path: '/x?mode=LIVE', cookie: cookies.a });
+    expect(holdings.body.positions).toHaveLength(0);
     const dto = (await listMyPositions(direct.db, owner)).find((x) => x.id === p.id)!;
-    expect(dto.venueSync).toMatchObject({ closeState: 'FILLS_PENDING', contracts: '0' });
+    expect(dto).toMatchObject({ status: 'CLOSED', contracts: '0', venueSync: expect.objectContaining({ closeState: 'FILLS_PENDING' }) });
+    const marginRows = async () => (await direct.db.select().from(schema.ledgerEntries).where(and(eq(schema.ledgerEntries.paperAccountId, p.paperAccountId), eq(schema.ledgerEntries.kind, 'POSITION_MARGIN_RELEASE')))).length;
+    const releasesAfterClose = await marginRows();
 
-    // Still delayed on the next run: unchanged, first-seen time kept.
-    r = await syncLiveAccount(direct.db, owner, plus(clock.now, 35));
-    expect(r.exitsRecorded).toBe(0);
-    expect((await posById(p.id)).exchangeFlatAt).toEqual(plus(clock.now, 5));
+    // Still delayed: repeated runs change nothing and book nothing twice.
+    for (const s of [35, 65]) expect((await syncLiveAccount(direct.db, owner, plus(clock.now, s))).exitsRecorded).toBe(0);
+    expect(await marginRows()).toBe(releasesAfterClose);
+    expect((await posById(p.id)).closedAt).toEqual(plus(clock.now, 5));
 
+    // Fills arrive: price, fee and MEXC's realized P&L are backfilled once; margin is not released again.
     mx.delayedDeals.delete(orderId);
-    r = await syncLiveAccount(direct.db, owner, plus(clock.now, 65));
+    r = await syncLiveAccount(direct.db, owner, plus(clock.now, 95));
     expect(r.exitsRecorded).toBe(1);
+    expect(r.closes).toEqual([expect.objectContaining({ result: 'FILLS_BACKFILLED' })]);
     row = await posById(p.id);
-    expect(row).toMatchObject({ status: 'CLOSED', closeReason: 'EXTERNAL_CLOSE', exchangeCloseState: null });
-    expect(D((await exitsOf(p.id))[0]!.price).eq('65300')).toBe(true);
+    expect(row).toMatchObject({ status: 'CLOSED', exchangeCloseState: null, exchangePendingContracts: null });
+    expect(D(row.realizedPnlUsdt).eq('0.6')).toBe(true);
+    expect(row.closedAt!.getTime()).toBe(clock.now.getTime()); // the fill time
+    const [exit] = await exitsOf(p.id);
+    expect(D(exit!.price).eq('65300')).toBe(true);
+    expect(D(exit!.fee).eq('0.02')).toBe(true);
+    expect(D(exit!.marginReleased).isZero()).toBe(true);
+    expect(await marginRows()).toBe(releasesAfterClose);
+    acct = (await getMyPaperAccount(direct.db, owner, 'LIVE'))!;
+    expect(D(acct.walletBalanceUsdt).eq('1000.58')).toBe(true); // matched to MEXC again after the backfill
+    for (const s of [125, 155]) expect((await syncLiveAccount(direct.db, owner, plus(clock.now, s))).exitsRecorded).toBe(0);
+    expect(await exitsOf(p.id)).toHaveLength(1);
+    expect((await fillLedger(p.paperAccountId)).filter((l) => l.refId === exit!.exchangeFillId)).toHaveLength(2); // P&L + fee
     expect(orderChanges(mx)).toHaveLength(1); // only the opening order from the alert
+  });
+
+  it('the production state left by the previous release (open, FILLS_PENDING, MEXC 0) closes on the next sync; other positions and reservations are untouched', async () => {
+    await openLive({ both: true });
+    const [p] = await livePos(A);
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    expect((await syncLiveAccount(direct.db, owner, plus(clock.now, 5))).ok).toBe(true);
+    // As stored at 13:14:45: open, 1 540-style quantity, Protected, margin held, FILLS_PENDING with MEXC 0.
+    await direct.db.update(schema.positions).set({ exchangeCloseState: 'FILLS_PENDING', exchangeContracts: '0', exchangeFlatAt: later(9) }).where(eq(schema.positions.id, p!.id));
+    // Another reservation on the same Live account must survive the margin refresh.
+    await direct.db.update(schema.paperAccounts).set({ orderReserve: '5' }).where(eq(schema.paperAccounts.id, p!.paperAccountId));
+    clock.now = later(10);
+    mx.manualClose('BTC_USDT', 1, human(p!.contracts), '65200', { delayed: true });
+    mx.assets = { equity: '1000', availableOpen: '1000', unrealized: '0' };
+    const viaButton = await call(meSync.POST, { method: 'POST', path: '/x', cookie: cookies.a });
+    expect(viaButton.body.sync.closes).toEqual([expect.objectContaining({ result: 'FULL_FILLS_PENDING' })]);
+    expect(await posById(p!.id)).toMatchObject({ status: 'CLOSED', contracts: expect.stringMatching(/^0(\.0+)?$/), protectionStatus: 'PENDING', exchangeFlatAt: later(-1) });
+    const acct = (await getMyPaperAccount(direct.db, owner, 'LIVE'))!;
+    expect(D(acct.positionMarginUsdt).isZero()).toBe(true);
+    expect(D(acct.orderReserveUsdt).eq('5')).toBe(true);
+    expect(D(acct.availableUsdt).eq('995')).toBe(true); // MEXC available minus the reservation
+    expect((await connRow(A)).drift).toEqual([]);
+    // B's position is not touched.
+    const [pb] = await livePos(B);
+    expect(pb).toMatchObject({ status: 'OPEN' });
   });
 
   it('a failed deal-history or position query leaves the position unconfirmed and records the error', async () => {
