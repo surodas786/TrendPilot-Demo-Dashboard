@@ -581,3 +581,105 @@ describe('Live reversal: flat first, fresh MEXC margin, 32-character order IDs',
     expect(sides(mx)).toEqual([1, 4]);
   });
 });
+
+describe('Importing the manual closing fill (14 Nov XAU follow-up)', () => {
+  /** Closed on MEXC with fills delayed: the position is closed (fills pending), then MEXC lists them. */
+  type CloseOpts = NonNullable<Parameters<MockMexc['manualClose']>[4]>;
+  async function closedPending(opts: CloseOpts | ((contracts: string) => CloseOpts) = {}) {
+    const p = await openLive();
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    expect((await syncLiveAccount(direct.db, owner, plus(clock.now, 5))).ok).toBe(true); // stores the MEXC position ID
+    clock.now = later(10);
+    const o = typeof opts === 'function' ? opts(human(p.contracts)) : opts;
+    const orderId = mx.manualClose('BTC_USDT', 1, human(p.contracts), '65300', { delayed: true, ...o });
+    const flatAt = plus(clock.now, 60);
+    expect((await syncLiveAccount(direct.db, owner, flatAt)).closes).toEqual([expect.objectContaining({ result: 'FULL_FILLS_PENDING' })]);
+    return { p, mx, owner, orderId, flatAt, executedAt: clock.now };
+  }
+
+  it('the close time shown while pending is when TrendPilot detected it; after import it is MEXC’s execution time', async () => {
+    const { p, mx, owner, orderId, flatAt, executedAt } = await closedPending({ fee: '0.03' });
+    expect((await posById(p.id)).closedAt).toEqual(flatAt);
+    expect((await posById(p.id)).exchangePendingReason).toMatch(/lists no unbooked closing fill/);
+    mx.delayedDeals.delete(orderId);
+    await syncLiveAccount(direct.db, owner, plus(flatAt, 30));
+    const row = await posById(p.id);
+    expect(row).toMatchObject({ exchangeCloseState: null, exchangePendingReason: null });
+    expect(row.closedAt).toEqual(executedAt);
+  });
+
+  it('a One-way Sell (side 3) tied to the position ID is imported with a weighted price; one not tied to it is not', async () => {
+    const { p, mx, owner, orderId } = await closedPending((contracts) => ({
+      oneWaySide: true,
+      dealPositionId: true,
+      fee: '0.05',
+      parts: [
+        { vol: D(contracts).minus(1).toFixed(), price: '65300', fee: '0.04' },
+        { vol: '1', price: '65200', fee: '0.01' }
+      ]
+    }));
+    mx.delayedDeals.delete(orderId);
+    const r = await syncLiveAccount(direct.db, owner, plus(clock.now, 120));
+    expect(r.closes).toEqual([expect.objectContaining({ result: 'FILLS_BACKFILLED' })]);
+    const [exit] = await exitsOf(p.id);
+    const n = D(human(p.contracts));
+    expect(D(exit!.price).eq(D('65300').times(n.minus(1)).plus('65200').div(n).toDecimalPlaces(12))).toBe(true);
+    expect(D(exit!.fee).eq('0.05')).toBe(true);
+    expect(exit!.exchangeFillId).toBe(`mexc:${orderId}`);
+  });
+
+  it('a side-3 order that MEXC does not tie to this position stays pending with the specific reason', async () => {
+    const { p, mx, owner, orderId } = await closedPending({ oneWaySide: true, orderWithoutPositionId: true });
+    mx.delayedDeals.delete(orderId);
+    await syncLiveAccount(direct.db, owner, plus(clock.now, 120));
+    const row = await posById(p.id);
+    expect(row.exchangeCloseState).toBe('FILLS_PENDING');
+    expect(row.exchangePendingReason).toMatch(new RegExp(`order ${orderId} \\(side 3\\) is not tied to position`));
+    expect(await exitsOf(p.id)).toHaveLength(0);
+    const dto = (await listMyPositions(direct.db, owner)).find((x) => x.id === p.id)!;
+    expect(dto.venueSync!.pendingReason).toMatch(/not tied to position/);
+  });
+
+  it('a deal time returned as createTime is still read (not filtered out as time 0)', async () => {
+    const { p, mx, owner, orderId, executedAt } = await closedPending({ createTimeOnly: true });
+    mx.delayedDeals.delete(orderId);
+    await syncLiveAccount(direct.db, owner, plus(clock.now, 120));
+    expect((await exitsOf(p.id))[0]!.filledAt).toEqual(executedAt);
+  });
+
+  it('MEXC profit that already includes the fee: realized P&L is stored gross and the fee counted once', async () => {
+    const p0 = await openLive();
+    const n = D(human(p0.contracts));
+    const gross = D('65300').minus(p0.avgEntryPrice).times(n).times('0.0001'); // BTC multiplier 0.0001
+    const fee = '0.07';
+    const mx = await mockOf(A);
+    const owner = await userId(A);
+    clock.now = later(10);
+    mx.manualClose('BTC_USDT', 1, n.toFixed(), '65300', { fee, profit: gross.minus(fee).toFixed() });
+    await syncLiveAccount(direct.db, owner, plus(clock.now, 5));
+    const [exit] = await exitsOf(p0.id);
+    expect(D(exit!.realizedPnl).minus(gross).abs().lt('0.00000001')).toBe(true);
+    const row = await posById(p0.id);
+    expect(D(row.realizedPnlUsdt).minus(gross).abs().lt('0.00000001')).toBe(true);
+    // Net = gross − entry fee − exit fee; the exit fee appears once.
+    const feeRows = (await fillLedger(p0.paperAccountId)).filter((l) => l.refId === exit!.exchangeFillId && l.kind === 'TRADING_FEE');
+    expect(feeRows).toHaveLength(1);
+    expect(D(feeRows[0]!.amount).eq(D(fee).neg())).toBe(true);
+  });
+
+  it('deal history unavailable: values stay pending with that reason; the account sync itself still completes', async () => {
+    const { p, mx, owner, orderId } = await closedPending();
+    mx.delayedDeals.delete(orderId);
+    mx.faults.failingReads = ['/api/v1/private/order/list/order_deals'];
+    const r = await syncLiveAccount(direct.db, owner, plus(clock.now, 120));
+    expect(r.ok).toBe(true);
+    expect(r.skipped).toEqual([expect.objectContaining({ positionId: p.id, reason: expect.stringMatching(/^MEXC history unavailable/) })]);
+    expect(await posById(p.id)).toMatchObject({ status: 'CLOSED', exchangeCloseState: 'FILLS_PENDING' });
+    expect((await posById(p.id)).exchangePendingReason).toMatch(/^MEXC history unavailable/);
+    mx.faults.failingReads = [];
+    await syncLiveAccount(direct.db, owner, plus(clock.now, 150));
+    expect(await exitsOf(p.id)).toHaveLength(1);
+    expect(orderChanges(mx)).toHaveLength(1);
+  });
+});
