@@ -164,8 +164,8 @@ describe('Live is Off by default; credentials stay server-side', () => {
   });
 });
 
-describe('One-way position mode is required for Live entries', () => {
-  it('a Hedge account: the Live page names One-way as the reason (with the halt), the evaluation records both, and nothing is sent', async () => {
+describe('position mode: One-way or Hedge, read from MEXC per connection', () => {
+  it('a verified Hedge account: the Live page shows Hedge; only the operator halt blocks; once lifted, the entry is sent in Hedge form', async () => {
     await openFromAlert({
       market: async () => {
         await connectAndBlock('a', A);
@@ -181,26 +181,20 @@ describe('One-way position mode is required for Live entries', () => {
     });
     const row = await connRow(A);
     expect(row).toMatchObject({ status: 'VERIFIED', positionMode: 'HEDGE' });
+    expect((row.verification as { positionModeNote: string }).positionModeNote).toMatch(/^Hedge mode: orders use positionMode 1/);
     const status = (await call(meLive.GET, { path: '/x', cookie: cookies.a })).body;
     expect(status.connection.positionMode).toBe('HEDGE');
     expect(status.entries).toMatchObject({ allowed: false, reason: 'LIVE_PLATFORM_HALTED' });
-    expect(status.entries.blockers.map((b: { reason: string }) => b.reason)).toEqual(['LIVE_PLATFORM_HALTED', 'LIVE_POSITION_MODE']);
-    expect(status.entries.blockers[1].text).toMatch(/^One-way position mode required/);
-    const d = (await decisionsOf(A)).find((x) => x.status === 'SKIPPED' && x.reason === 'LIVE_NOT_ELIGIBLE')!;
-    expect(d.detail).toMatchObject({ liveReason: 'LIVE_PLATFORM_HALTED', liveBlockers: ['LIVE_PLATFORM_HALTED', 'LIVE_POSITION_MODE'] });
-    expect((d.detail as { reasonText: string }).reasonText).toMatch(/One-way position mode required/);
+    expect(status.entries.blockers.map((b: { reason: string }) => b.reason)).toEqual(['LIVE_PLATFORM_HALTED']);
     expect((await mockOf(A)).creates()).toHaveLength(0);
-    expect(await livePos(A)).toHaveLength(0);
 
-    // With the halt lifted, Hedge alone blocks the entry; after switching to One-way and Save and check, the gate clears.
-    const ctrl = (await direct.db.select().from(schema.liveControl))[0]!;
-    expect(ctrl.entriesHalted).toBe(true);
-    // Lift the halt in the database only for this check (the admin resume path is covered elsewhere).
     await direct.db.update(schema.liveControl).set({ entriesHalted: false, haltReason: null });
     await nextAlert('BULLISH_FLIP', 2);
-    const d2 = (await decisionsOf(A)).filter((x) => x.status === 'SKIPPED' && x.reason === 'LIVE_NOT_ELIGIBLE').at(-1)!;
-    expect(d2.detail).toMatchObject({ liveReason: 'LIVE_POSITION_MODE', liveBlockers: ['LIVE_POSITION_MODE'], positionMode: 'HEDGE' });
-    expect((await mockOf(A)).creates()).toHaveLength(0);
+    const [create] = (await mockOf(A)).creates().map((c) => c.body as Record<string, unknown>);
+    expect(create).toMatchObject({ symbol: 'BTC_USDT', side: 1, type: 5, positionMode: 1, lossTrend: 2 });
+    expect(create!.stopLossPrice).toBeTruthy(); // the configured stop is attached at entry
+    expect('reduceOnly' in create!).toBe(false);
+    expect((await livePos(A))[0]).toMatchObject({ side: 'LONG', protectionStatus: 'PROTECTED' });
 
     (await mockOf(A)).positionMode = 2;
     expect((await call(verifyConn.POST, { method: 'POST', path: '/x', cookie: cookies.a })).status).toBe(200);
@@ -208,6 +202,7 @@ describe('One-way position mode is required for Live entries', () => {
     expect(after.connection.positionMode).toBe('ONE_WAY');
     expect(after.entries.blockers.map((b: { reason: string }) => b.reason)).not.toContain('LIVE_POSITION_MODE');
   });
+
 });
 
 describe('Live entry, attached stop, partial fill, reduce-only close — next to Paper on the same alert', () => {
@@ -618,11 +613,11 @@ describe('Routing of a bearish alert for an investor whose only block for the pa
     expect((await livePos(A))[0]!.protectionStatus).toBe('PROTECTED');
   });
 
-  it('a blocked Live entry records its exact reason, queues nothing and never falls back to Paper', async () => {
+  it('an unknown position mode blocks the entry with its exact reason, queues nothing and never falls back to Paper', async () => {
     await shortAlert(async () => {
       await connectAndBlock('a', A);
       await platformOn();
-      await direct.db.update(schema.exchangeConnections).set({ positionMode: 'HEDGE' }).where(eq(schema.exchangeConnections.ownerId, await userId(A)));
+      await direct.db.update(schema.exchangeConnections).set({ positionMode: null }).where(eq(schema.exchangeConnections.ownerId, await userId(A)));
     });
     const [entry] = (await decisionsOf(A)).filter((d) => d.step === 'ENTRY_V1');
     expect(entry).toMatchObject({ status: 'SKIPPED', reason: 'LIVE_NOT_ELIGIBLE' });
@@ -635,6 +630,6 @@ describe('Routing of a bearish alert for an investor whose only block for the pa
 
     const [o] = await signalsOf();
     expect(o).toMatchObject({ mode: 'LIVE', side: 'SHORT', entry: { status: 'SKIPPED', reason: 'LIVE_NOT_ELIGIBLE', orderId: null } });
-    expect(o!.entry!.reasonText).toMatch(/One-way/);
+    expect(o!.entry!.reasonText).toMatch(/position mode is not verified/);
   });
 });

@@ -13,8 +13,12 @@ import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, n
  * Safety rules:
  *  - An order is never sent unless its capability is verified on a live pilot (capabilities.ts).
  *  - An opening order always carries its stop (stopLossPrice + lossTrend) in the same request.
- *  - Opening orders require One-way position mode: checked from the verified connection and read
- *    again from MEXC right before sending (MEXC documents reduceOnly for One-way mode only).
+ *  - The order builder follows the verified position mode (One-way or Hedge), read again from
+ *    MEXC right before every order. If MEXC reports another mode, nothing is sent
+ *    (POSITION_MODE_MISMATCH:<mode>): the mismatch is surfaced, never guessed around.
+ *  - Hedge: positionMode 1, sides 1 open long / 3 open short / 4 close long / 2 close short, no
+ *    reduceOnly (documented for One-way only); every close is bound to its MEXC positionId, so
+ *    closing one leg never touches the other leg or its stop.
  *  - Closes are built by `buildMexcCloseOrder` only: matched to the exchange position (by its
  *    MEXC positionId when TrendPilot knows it), capped at what that position holds, with the
  *    documented close sides (4 close long / 2 close short), the position's own margin mode
@@ -40,8 +44,12 @@ export interface MexcVenueOptions {
 }
 
 const MISSING_STOP = 'mexc-sl:missing';
-/** Rejection reason for an opening order on an account that is not in One-way mode. */
-export const POSITION_MODE_REQUIRED = 'POSITION_MODE_ONE_WAY_REQUIRED';
+/** Rejection prefix when MEXC reports another position mode than the verified one (`…:<MEXC mode>`). */
+export const POSITION_MODE_MISMATCH = 'POSITION_MODE_MISMATCH';
+/** @deprecated One-way is no longer required; kept for older callers. */
+export const POSITION_MODE_REQUIRED = POSITION_MODE_MISMATCH;
+/** MEXC position_mode → mode (1 Hedge, 2 One-way; anything else is unknown). */
+export const positionModeOf = (raw: unknown): 'ONE_WAY' | 'HEDGE' | null => (Number(raw) === 2 ? 'ONE_WAY' : Number(raw) === 1 ? 'HEDGE' : null);
 const stopRef = (id: string) => `mexc-sl:${id}`;
 const stopIdOf = (ref: string) => ref.replace(/^mexc-sl:/, '');
 const D = (v: Decimal.Value) => new Decimal(v);
@@ -216,15 +224,14 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
 
     async placeOpeningOrderWithStop(r: OpeningRequest & { leverage?: number; marginMode?: 'ISOLATED' | 'CROSS' }): Promise<SimResult> {
       if (!r.stop) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'STOP_REQUIRED' };
-      if (o.positionMode !== 'ONE_WAY') return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: POSITION_MODE_REQUIRED };
       if (!verified('OPEN_WITH_ATTACHED_STOP')) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'CAPABILITY_UNVERIFIED:OPEN_WITH_ATTACHED_STOP' };
       if (!r.leverage) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: 'LEVERAGE_REQUIRED' };
       const symbol = await o.symbolFor(r.instrumentId);
       const existing = await getOrder(symbol, r.clientOrderId);
       if (!existing) {
         // The account's mode can change at MEXC after it was verified: read it again before sending.
-        const mode = Number(await o.requester.request<number>('GET', '/api/v1/private/position/position_mode'));
-        if (mode !== 2) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: POSITION_MODE_REQUIRED };
+        const mode = positionModeOf(await o.requester.request<number>('GET', '/api/v1/private/position/position_mode'));
+        if (mode !== o.positionMode) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: `${POSITION_MODE_MISMATCH}:${mode ?? 'UNKNOWN'}` };
         const sent = await submit(symbol, r.clientOrderId, {
           symbol,
           price: num(r.side === 'LONG' ? r.quote.ask : r.quote.bid),
@@ -236,7 +243,7 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
           externalOid: r.clientOrderId,
           stopLossPrice: num(r.stop.price),
           lossTrend: basisToTrend(r.stop.basis),
-          positionMode: 2 // One-way only (checked above)
+          positionMode: o.positionMode === 'HEDGE' ? 1 : 2 // the verified mode, re-read above
         });
         if ('rejected' in sent) return { status: 'REJECTED', orderId: '', clientOrderId: r.clientOrderId, reason: sent.rejected };
       }
@@ -290,7 +297,10 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
         }
         // The account's mode can change at MEXC after it was verified: read it again before sending.
         const modeRaw = Number(await o.requester.request<number>('GET', '/api/v1/private/position/position_mode'));
-        const accountMode = modeRaw === 2 ? 'ONE_WAY' : 'HEDGE';
+        const fresh = positionModeOf(modeRaw);
+        // The builder follows the verified mode; a different mode at MEXC is surfaced, nothing is sent.
+        if (fresh !== o.positionMode) return notSent(`${POSITION_MODE_MISMATCH}:${fresh ?? 'UNKNOWN'}`, `MEXC reports position mode ${modeRaw}, TrendPilot verified ${o.positionMode}`);
+        const accountMode = o.positionMode;
         // Exchange evidence kept with the request. positionType (held position), positionMode
         // (account) and side (order) are separate fields even where their numbers coincide.
         const context = { revision: codeRevision(), positionModeRaw: modeRaw, accountMode, position: { positionId: pos.positionId, positionType: pos.side === 'SHORT' ? 2 : 1, openType: pos.marginMode === 'CROSS' ? 2 : 1, holdVol: pos.contracts, frozenVol: pos.frozen }, requestedContracts: D(r.contracts).toFixed() };
@@ -356,10 +366,15 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
       await o.requester.request('POST', '/api/v1/private/stoporder/cancel', { orders: [{ stopPlanOrderId: Number(stopIdOf(orderId)) }] });
     },
 
-    async position(_account, instrumentId) {
+    async position(_account, instrumentId, _tx, side) {
       const symbol = await o.symbolFor(instrumentId);
       const open = await positions(symbol);
-      if (open.length > 1) throw new MexcPrivateError(`${symbol}: both a Long and a Short are open at MEXC (hedge mode); one-way exposure per contract is required`, 'REFUSED');
+      // Hedge: one leg per side. A caller that names its side gets exactly that leg.
+      if (side) {
+        const leg = open.filter((p) => p.side === side).reduce((t, p) => t.plus(p.contracts), D(0));
+        return { side: leg.gt(0) ? side : null, contracts: leg.toFixed() };
+      }
+      if (open.length > 1) throw new MexcPrivateError(`${symbol}: both a Long and a Short are open at MEXC (Hedge legs); name the side to read one leg`, 'REFUSED');
       return open[0] ? { side: open[0].side, contracts: open[0].contracts } : { side: null, contracts: '0' };
     },
 

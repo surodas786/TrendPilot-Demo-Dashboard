@@ -36,6 +36,10 @@ describe('operations view', () => {
     expect((await call(ops.GET, { path: '/x' })).status).toBe(401);
   });
 
+  it('names the code revision the web process runs', async () => {
+    expect((await view()).webRevision).toMatch(/^([0-9a-f]{40}|unknown)$/);
+  });
+
   it('flags a worker and feed that never started', async () => {
     const d = await view();
     expect(d).toMatchObject({ mode: 'PAPER', liveOrderTransport: 'disabled', database: { ok: true }, serviceSummary: { worker: 'NEVER_STARTED', 'market-feed': 'NEVER_STARTED' } });

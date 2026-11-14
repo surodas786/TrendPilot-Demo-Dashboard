@@ -23,7 +23,7 @@ import {
   type NormalizedStop
 } from './mexcPrivate';
 import { open as unseal } from '../security/secretBox';
-import { mexcVenue } from './mexcVenue';
+import { mexcVenue, positionModeOf } from './mexcVenue';
 
 /**
  * Private MEXC sync for one Live account (REP-01, OPS-03). Runs in the worker on a schedule, and
@@ -68,7 +68,7 @@ const SYNC_LEASE_SECONDS = 120;
 export const SYNC_BUSY = 'A sync for this account is already running; try again in a moment.';
 
 export interface DriftItem {
-  kind: 'SIZE_MISMATCH' | 'UNKNOWN_EXPOSURE' | 'SIDE_MISMATCH' | 'STOP_MISSING' | 'STOP_ORPHANED';
+  kind: 'SIZE_MISMATCH' | 'UNKNOWN_EXPOSURE' | 'SIDE_MISMATCH' | 'STOP_MISSING' | 'STOP_ORPHANED' | 'POSITION_MODE_CHANGED';
   symbol: string;
   detail: string;
   at: string;
@@ -112,6 +112,8 @@ export interface LiveSyncSummary {
   exitsRecorded: number;
   protectionFailures: number;
   drift: DriftItem[];
+  /** Position mode MEXC reported in this run (null: unknown value). */
+  positionMode?: 'ONE_WAY' | 'HEDGE' | null;
   closes: ExchangeCloseOutcome[];
   /** Positions not reconciled this run because an order for the contract is still in flight. */
   skipped: { positionId: string; symbol: string; reason: string }[];
@@ -259,6 +261,16 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       out.balance = { equity: usdt.equity, available: usdt.availableOpen, walletAdjustment: b.walletAdjustment };
     }
     const acct = await db.transaction((tx) => lockPaperAccount(tx, ownerId, 'LIVE'));
+
+    // Position mode, every run: the order builder follows the verified mode, so a change made on
+    // MEXC is recorded here and surfaced (drift halts new entries until someone resumes them).
+    const modeRaw = await read.request<number>('GET', '/api/v1/private/position/position_mode');
+    const mode = positionModeOf(modeRaw);
+    out.positionMode = mode;
+    if (mode !== conn.positionMode) {
+      await db.update(exchangeConnections).set({ positionMode: mode, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` }).where(eq(exchangeConnections.id, conn.id));
+      out.drift.push({ kind: 'POSITION_MODE_CHANGED', symbol: '*', detail: `MEXC position mode is now ${mode ?? `unknown (${String(modeRaw)})`}; TrendPilot had ${conn.positionMode ?? 'none'}`, at });
+    }
 
     // 2. Positions.
     const venuePositions = normalizePositions(await read.request('GET', '/api/v1/private/position/open_positions', {})).filter((p) => p.open && D(p.contracts).gt(0));
@@ -421,7 +433,15 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       const opposite = venuePositions.find((v) => v.symbol === symbol && v.side !== p.side);
       if (opposite) {
         reported.add(opposite);
-        out.drift.push({ kind: 'SIDE_MISMATCH', symbol, detail: `MEXC also holds a ${opposite.side} of ${opposite.contracts} contracts`, at });
+        out.drift.push({
+          kind: 'SIDE_MISMATCH',
+          symbol,
+          detail:
+            mode === 'HEDGE'
+              ? `Hedge: MEXC also holds a ${opposite.side} leg of ${opposite.contracts} contracts (position ${opposite.positionId}) that TrendPilot did not open; it is left untouched`
+              : `MEXC also holds a ${opposite.side} of ${opposite.contracts} contracts`,
+          at
+        });
       }
 
       const venueQty = vp ? D(vp.contracts) : D(0);

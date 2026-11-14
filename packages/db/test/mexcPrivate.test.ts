@@ -188,12 +188,20 @@ describe('capability gate', () => {
     expect(requester.request).not.toHaveBeenCalled();
   });
 
-  it('a Hedge-mode venue refuses to open before any call, whatever the capabilities', async () => {
-    const requester = { request: vi.fn() };
-    const v = mexcVenue({ requester, symbolFor: async () => 'BTC_USDT', positionMode: 'HEDGE', capabilities: { OPEN_WITH_ATTACHED_STOP: 'VERIFIED' } });
-    const r = await v.placeOpeningOrderWithStop({ clientOrderId: 'tp-4', instrumentId: 'i', side: 'LONG', contracts: '1', stop: { price: '1', basis: 'MARK' }, leverage: 5 } as never);
-    expect(r).toMatchObject({ status: 'REJECTED', reason: 'POSITION_MODE_ONE_WAY_REQUIRED' });
-    expect(requester.request).not.toHaveBeenCalled();
+  it('a venue verified in one mode refuses to open when MEXC reports the other: nothing is sent', async () => {
+    const calls: { method: string; path: string }[] = [];
+    const requester = {
+      request: vi.fn(async (method: string, path: string) => {
+        calls.push({ method, path });
+        if (path.includes('/order/external/')) return null; // no such order yet
+        if (path.endsWith('/position/position_mode')) return 2; // MEXC: One-way
+        throw new Error(`unexpected ${method} ${path}`);
+      })
+    };
+    const v = mexcVenue({ requester: requester as never, symbolFor: async () => 'BTC_USDT', positionMode: 'HEDGE', capabilities: { OPEN_WITH_ATTACHED_STOP: 'VERIFIED' } });
+    const r = await v.placeOpeningOrderWithStop({ clientOrderId: 'tp-4', instrumentId: 'i', side: 'LONG', contracts: '1', stop: { price: '1', basis: 'MARK' }, leverage: 5, quote: { bid: '1', ask: '1' } } as never);
+    expect(r).toMatchObject({ status: 'REJECTED', reason: 'POSITION_MODE_MISMATCH:ONE_WAY' });
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
   });
 
   it('an opening request without a stop is refused before any call', async () => {

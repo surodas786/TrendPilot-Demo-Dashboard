@@ -107,11 +107,16 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks:
     let held: { contracts: string };
     try {
       venue = await resolveAccountVenue(db, { mode: pos!.mode, paperAccountId: pos!.paperAccountId, ownerId: pos!.ownerId }, hooks.venue);
-      held = await venue.position(pos!.paperAccountId, pos!.instrumentId, tx);
+      // The original leg (by side: in Hedge mode the other leg is separate).
+      held = await venue.position(pos!.paperAccountId, pos!.instrumentId, tx, pos!.side as 'LONG' | 'SHORT');
     } catch (e) {
       return withhold('REVERSAL_NOT_FLAT', { venueError: (e as Error).message.slice(0, 200) });
     }
     if (!new Decimal(held.contracts).isZero()) return withhold('REVERSAL_NOT_FLAT', { venueContracts: held.contracts });
+    // Hedge: the opposite leg may already exist at MEXC. Opening into it is adding to a position.
+    const opposite = await venue.position(pos!.paperAccountId, pos!.instrumentId, tx, pos!.side === 'LONG' ? 'SHORT' : 'LONG').catch(() => null);
+    if (opposite === null) return withhold('REVERSAL_NOT_FLAT', { venueError: 'opposite leg could not be read' });
+    if (!new Decimal(opposite.contracts).isZero() && !c!.block.allowAdds) return withhold('REVERSAL_OPPOSITE_LEG_EXISTS', { oppositeContracts: opposite.contracts });
     if (pos!.stopOrderRef) {
       if (pos!.mode === 'PAPER') {
         const [stop] = await tx.select({ status: simOrders.status }).from(simOrders).where(eq(simOrders.clientOrderId, pos!.stopOrderRef));

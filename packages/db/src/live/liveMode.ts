@@ -26,7 +26,7 @@ import { paperVenue } from '../venue/paper';
 import type { ExecutionVenue } from '../venue/types';
 import type { CapabilityId, CapabilityState } from './capabilities';
 import { MexcHttpTransport, MexcPrivateError, MEXC_PRIVATE_DEFAULT_BASE_URL, normalizeAssets, normalizePositions, normalizeStops, type MexcCredentials, type MexcRequester } from './mexcPrivate';
-import { mexcVenue, POSITION_MODE_REQUIRED, UncertainSubmissionError } from './mexcVenue';
+import { mexcVenue, POSITION_MODE_MISMATCH, positionModeOf, UncertainSubmissionError } from './mexcVenue';
 
 /**
  * Live mode (OPS-01/02/03): exchange connections, the platform switch, the contract allowlist,
@@ -257,13 +257,14 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
         if (e instanceof UncertainSubmissionError) await halt(`UNCERTAIN_ORDER ${r.clientOrderId}`);
         throw e;
       }
-      if (result.status === 'REJECTED' && result.reason === POSITION_MODE_REQUIRED) {
-        // MEXC reports Hedge although the last check said One-way: record it and stop new entries.
+      if (result.status === 'REJECTED' && result.reason.startsWith(POSITION_MODE_MISMATCH)) {
+        // MEXC reports another mode than the verified one: record what MEXC says, stop new entries.
+        const now = result.reason.split(':')[1] ?? null;
         await db
           .update(exchangeConnections)
-          .set({ positionMode: 'HEDGE', revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
+          .set({ positionMode: now === 'ONE_WAY' || now === 'HEDGE' ? now : null, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
           .where(eq(exchangeConnections.ownerId, o.ownerId));
-        await halt(`POSITION_MODE ${r.clientOrderId}: MEXC account is not in One-way mode`);
+        await halt(`POSITION_MODE ${r.clientOrderId}: MEXC reports ${now ?? 'an unknown mode'}, TrendPilot verified another`);
         return { ...result, reason: `LIVE_REFUSED:LIVE_POSITION_MODE` };
       }
       if (result.status === 'FILLED') {
@@ -368,8 +369,7 @@ export async function verifyConnection(db: Db, ownerId: string, correlationId = 
   let positionMode: 'ONE_WAY' | 'HEDGE' | null = null;
   try {
     const r = requesterFor(conn, 'READ_ONLY', env);
-    const mode = await r.request<number>('GET', '/api/v1/private/position/position_mode');
-    positionMode = Number(mode) === 2 ? 'ONE_WAY' : 'HEDGE';
+    positionMode = positionModeOf(await r.request<number>('GET', '/api/v1/private/position/position_mode'));
     const usdt = normalizeAssets(await r.request('GET', '/api/v1/private/account/assets')).find((a) => a.currency === 'USDT');
     const open = normalizePositions(await r.request('GET', '/api/v1/private/position/open_positions', {})).filter((p) => p.open);
     const stops = normalizeStops(await r.request('GET', '/api/v1/private/stoporder/open_orders', {})).filter((s) => s.state === 'ACTIVE');
@@ -379,8 +379,10 @@ export async function verifyConnection(db: Db, ownerId: string, correlationId = 
       positionMode,
       positionModeNote:
         positionMode === 'ONE_WAY'
-          ? 'One-way mode: required for Live entries.'
-          : 'Hedge mode: Live entries need One-way mode. Switch the MEXC Futures account to One-way, then press Save and check again. Closes of any open position still work.',
+          ? 'One-way mode: orders use positionMode 2, closes carry reduceOnly.'
+          : positionMode === 'HEDGE'
+            ? 'Hedge mode: orders use positionMode 1; each close is bound to its MEXC position (Long and Short are separate legs).'
+            : 'MEXC returned an unknown position mode; Live entries stay blocked until it reads 1 (Hedge) or 2 (One-way).',
       usdt: usdt ? { equity: usdt.equity, available: usdt.availableOpen } : null,
       openPositions: open.map((p) => ({ symbol: p.symbol, side: p.side, contracts: p.contracts })),
       activeStops: stops.length,

@@ -20,7 +20,7 @@ export const PILOT_REQUIRED_CHECKS = {
   ELIGIBILITY_CONFIRMED: 'Written confirmation from MEXC that this account may place automated futures orders for this use',
   KYC_AND_KEY_PERMISSIONS: 'KYC complete; API key has only the permissions needed; IP whitelist set as required',
   READ_ONLY_CHECK: '`npm run ops:mexc-readonly-check` passed on the pilot account',
-  POSITION_MODE: 'Account position mode recorded (one-way preferred) and matches the adapter configuration',
+  POSITION_MODE: 'Account position mode (One-way or Hedge) read from MEXC, stored on the connection, and equal at the last sync',
   CONTRACT_SPEC_MATCH: 'MEXC contract size, tick, step and minimum equal the platform instrument',
   ACCOUNT_FLAT_AT_START: 'No open position or resting order on the pilot contract at MEXC'
 } as const;

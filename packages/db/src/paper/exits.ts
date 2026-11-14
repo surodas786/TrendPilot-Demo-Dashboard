@@ -272,7 +272,7 @@ export async function recordExitFill(
   let newStopRef: string | null = null;
   if (remaining.isZero()) {
     // Confirm zero at the venue before clearing the stop and closing the position.
-    const held = input.venueConfirmedFlat ? { contracts: '0' } : await venue.position(p.paperAccountId, p.instrumentId, tx);
+    const held = input.venueConfirmedFlat ? { contracts: '0' } : await venue.position(p.paperAccountId, p.instrumentId, tx, p.side as 'LONG' | 'SHORT');
     if (D(held.contracts).isZero()) {
       // Best effort: a stop the venue already executed (or removed) may refuse a cancel. The
       // inspection below decides; a cancel error must not undo the recorded exit.

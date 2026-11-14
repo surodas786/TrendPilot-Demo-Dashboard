@@ -6,16 +6,19 @@
  * at `--at` (default now) would do, and every blocker.
  *
  * One READ ONLY transaction, no account lock, no rows created: the database refuses any write.
- * No alert is created, no job is queued and nothing is sent to MEXC. The worker's last check
- * right before sending (the position MEXC reports) needs the exchange and is not run here.
+ * No alert is created, no job is queued and no order is sent. With `--mexc`, the position mode and
+ * the open positions on the symbol are also read from MEXC (READ_ONLY transport, GET only) and
+ * compared with what TrendPilot stored: a different mode is a blocker.
  *
- *   npm run ops:live-preflight -- --email investor@… --symbol XAU_USDT --side SHORT [--at 2026-11-13T16:50:00+06:00] [--ref 4100.5]
+ *   npm run ops:live-preflight -- --email investor@… --symbol XAU_USDT --side SHORT [--mexc] [--at 2026-11-13T16:50:00+06:00] [--ref 4100.5]
  */
 import { and, eq, or } from 'drizzle-orm';
 import { Decimal, ENTRY_REASON_TEXT, evaluateBlockForSignal, INTERVAL_TIMEFRAME, lastClosedBarOpen, LIVE_REFUSAL_TEXT, liveAccountBlockers, type SignalInterval, type Weekday } from '@trendpilot/domain';
 import { createDb } from '../client';
 import { loadRootEnv, requireEnv } from '../env';
-import { connectionFor, connectionState, controlState, getLiveControl, limitsOf } from '../live/liveMode';
+import { connectionFor, connectionState, controlState, getLiveControl, limitsOf, type ConnectionRow } from '../live/liveMode';
+import { mexcReadOnly } from '../live/liveSync';
+import { positionModeOf } from '../live/mexcVenue';
 import { latestQuote } from '../paper/market';
 import { assessEntry, windowOf } from '../paper/entry';
 import { instruments, orderBlocks, paperAccounts, strategyVersions, users } from '../schema';
@@ -37,6 +40,7 @@ if (!email || (side !== 'LONG' && side !== 'SHORT') || Number.isNaN(now.getTime(
 const h = createDb(requireEnv('DATABASE_URL'), 1);
 const out: Record<string, unknown> = { readOnly: true, evaluatedAt: now.toISOString(), side };
 const blockers: string[] = [];
+let connRow: ConnectionRow | null = null;
 
 try {
   await h.db.transaction(
@@ -93,6 +97,7 @@ try {
       const [account] = await tx.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, u.id), eq(paperAccounts.mode, 'LIVE')));
       const control = await getLiveControl(tx);
       const conn = await connectionFor(tx, u.id);
+      connRow = conn ?? null;
       out.live = {
         transportEnabled: controlState(control).transportEnabled,
         platformLiveEnabled: control.liveEnabled,
@@ -148,6 +153,21 @@ try {
     },
     { accessMode: 'read only' }
   );
+  if (process.argv.includes('--mexc') && connRow) {
+    const c: ConnectionRow = connRow;
+    const read = mexcReadOnly(c); // GET only
+    const raw = await read.positionMode();
+    const mexcMode = positionModeOf(raw);
+    const legs = (await read.openPositions()).filter((p) => p.symbol === symbol && p.open);
+    const stops = await read.stops(symbol);
+    out.mexc = {
+      positionModeRaw: raw,
+      positionMode: mexcMode,
+      storedPositionMode: c.positionMode,
+      legs: legs.map((l) => ({ positionId: l.positionId, positionType: l.side === 'SHORT' ? 2 : 1, side: l.side, openType: l.marginMode === 'CROSS' ? 2 : 1, holdVol: l.contracts, frozenVol: l.frozen, activeStops: stops.filter((s) => s.positionId === l.positionId && s.state === 'ACTIVE').map((s) => ({ stopId: s.stopId, price: s.stopLossPrice, vol: s.vol })) }))
+    };
+    if (mexcMode !== c.positionMode) blockers.push(`mexc: position mode is ${mexcMode ?? `unknown (${raw})`} at MEXC but ${c.positionMode ?? 'none'} in TrendPilot; run ops:live-sync (records it and halts entries) or Save and check`);
+  }
   out.blockers = blockers;
   out.verdict = blockers.length ? 'BLOCKED: a Live alert now would record these reasons and queue nothing' : 'ELIGIBLE: a Live alert now would queue one Live paper.submit job (MEXC position re-checked at send)';
   console.log(JSON.stringify(out, null, 2));
