@@ -250,7 +250,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
             </thead>
             <tbody className="divide-y divide-line tabular-nums">
               {closed.map((p) => (
-                <tr key={p.id} data-testid="closed-row" className="cursor-pointer transition-colors duration-150 hover:bg-inset/60" onClick={() => go(p.id)}>
+                <tr key={p.id} data-testid="closed-row" data-fills-pending={p.venueSync?.closeState === 'FILLS_PENDING' ? 'true' : undefined} className="cursor-pointer transition-colors duration-150 hover:bg-inset/60" onClick={() => go(p.id)}>
                   <td className="px-4 py-2.5">
                     <Link href={`/my-holdings/${p.id}`} onClick={(e) => e.stopPropagation()} className="font-medium text-ink hover:text-accent">
                       {p.pair}
@@ -265,10 +265,20 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                   <td className="px-3 py-2.5">
                     <SideLabel side={p.side} />
                   </td>
-                  <td className="px-3 py-2.5 text-right text-ink">{p.initialContracts}</td>
+                  <td className="px-3 py-2.5 text-right text-ink">
+                    {p.initialContracts}
+                    <span className="block text-[11px] text-subtle">{p.contracts} remaining</span>
+                  </td>
                   <td className="px-3 py-2.5 text-right text-ink">{priceOrUnavailable(p.avgEntryPrice)}</td>
-                  <td className="px-3 py-2.5 text-muted">{p.closeReason ? (EXIT_LABEL[p.closeReason] ?? p.closeReason) : '—'}</td>
-                  <td className={cn('px-3 py-2.5 text-right', pnlTone(p.netRealizedUsdt))}>{signedUsdt(p.netRealizedUsdt)}</td>
+                  <td className="px-3 py-2.5 text-muted">
+                    {p.closeReason ? (EXIT_LABEL[p.closeReason] ?? p.closeReason) : '—'}
+                    {p.venueSync?.closeState === 'FILLS_PENDING' && (
+                      <span className="block">
+                        <StatusPill tone="warn">Closed on MEXC · fill details pending</StatusPill>
+                      </span>
+                    )}
+                  </td>
+                  <td className={cn('px-3 py-2.5 text-right', pnlTone(p.netRealizedUsdt))}>{p.venueSync?.closeState === 'FILLS_PENDING' ? <span className="text-subtle">Pending</span> : signedUsdt(p.netRealizedUsdt)}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-muted">{fmtTime(p.closedAt, timezone)}</td>
                 </tr>
               ))}

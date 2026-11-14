@@ -44,8 +44,9 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
       </p>
       {fillsPending && (
         <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink" data-testid="fills-pending">
-          {t.venueSync!.contracts === '0' ? 'Closed on MEXC' : `MEXC now holds ${t.venueSync!.contracts} of these ${t.contracts} contracts`}
-          {t.venueSync!.flatAt ? ` (seen ${fmt(t.venueSync!.flatAt)})` : ''}. Fill details (exit price, time, fees, realized P&amp;L) are pending at MEXC; the next sync books them.
+          {t.status === 'CLOSED'
+            ? `Closed on MEXC${t.venueSync!.flatAt ? ` (seen ${fmt(t.venueSync!.flatAt)})` : ''} · fill details pending for ${t.venueSync!.pendingContracts ?? t.initialContracts} contracts. Remaining is 0 and the margin was released; exit price, fees and realized P&L are filled in from MEXC on a later sync.`
+            : `MEXC now holds ${t.venueSync!.contracts} of these ${t.contracts} contracts · fill details pending; the next sync books them.`}
         </p>
       )}
       {t.status !== 'CLOSED' && !fillsPending && (

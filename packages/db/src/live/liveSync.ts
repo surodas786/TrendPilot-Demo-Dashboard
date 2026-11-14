@@ -1,8 +1,11 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
-import { Decimal, type ExitReason } from '@trendpilot/domain';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { Decimal, realizedPnl, type ExitReason } from '@trendpilot/domain';
+
+type PositionRow = typeof positions.$inferSelect;
 import type { Db } from '../client';
-import { exchangeConnections, fills, instruments, orderBlocks, orderIntents, paperAccounts, positionExits, positions } from '../schema';
-import { lockPaperAccount } from '../paper/accounts';
+import { exchangeConnections, fills, instruments, orderBlocks, orderIntents, paperAccounts, positionExits, positions, positionTargets } from '../schema';
+
+import { book, lockPaperAccount } from '../paper/accounts';
 import { recordExitFill } from '../paper/exits';
 import type { ExecutionVenue } from '../venue/types';
 import { applyExchangeBalance, connectionFor, haltConnectionEntries, LiveVenueUnavailable, type ConnectionRow } from './liveMode';
@@ -85,8 +88,14 @@ export async function refreshLiveBalance(db: Db, ownerId: string, now: Date, env
 export interface ExchangeCloseOutcome {
   positionId: string;
   symbol: string;
-  /** FULL: moved to Closed Trades. PARTIAL: remainder updated. FILLS_PENDING: MEXC confirms the close, fills not listed yet. */
-  result: 'FULL' | 'PARTIAL' | 'FILLS_PENDING';
+  /**
+   * FULL: moved to Closed with its fills. FULL_FILLS_PENDING: MEXC holds none of it, moved to Closed,
+   * fill details pending. FILLS_BACKFILLED: the pending fills were booked. PARTIAL: remainder
+   * updated. FILLS_PENDING: MEXC confirms a partial close, fills not listed yet.
+   */
+  result: 'FULL' | 'FULL_FILLS_PENDING' | 'FILLS_BACKFILLED' | 'PARTIAL' | 'FILLS_PENDING';
+  /** Contracts closed on MEXC whose fills are not booked yet. */
+  pendingContracts?: string;
   platformContracts: string;
   exchangeContracts: string;
   /** PARTIAL / FILLS_PENDING with a remainder: does the active MEXC stop cover it? */
@@ -251,6 +260,89 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       return stopsBySymbol.get(symbol)!;
     };
     let venue: ExecutionVenue | null = null;
+    let balanceDirty = false;
+
+    /**
+     * Closing orders of position `p` that MEXC reports final with every deal listed (or, when MEXC no
+     * longer lists the order, whose listed deals cover `gap`), not booked yet, not belonging to a
+     * TrendPilot order still in flight, and not belonging to another MEXC position.
+     */
+    const completeCloses = async (p: PositionRow, symbol: string, gap: Decimal) => {
+      const since = p.openedAt.getTime() - 60_000;
+      const deals = await dealHistory(read, symbol, since);
+      const closeSide = p.side === 'LONG' ? 4 : 2;
+      const known = new Set(
+        [
+          ...(await db.select({ id: fills.exchangeFillId }).from(fills).where(eq(fills.paperAccountId, acct.id))).map((r) => r.id),
+          ...(await db.select({ id: positionExits.exchangeFillId }).from(positionExits).where(eq(positionExits.paperAccountId, acct.id))).map((r) => r.id)
+        ]
+      );
+      const byOrder = new Map<string, Deal[]>();
+      for (const d of deals) {
+        if (d.side !== closeSide || d.timestamp < since) continue;
+        if (known.has(`mexc:${d.orderId}`)) continue;
+        byOrder.set(d.orderId, [...(byOrder.get(d.orderId) ?? []), d]);
+      }
+      const listed = [...byOrder.values()].flat().reduce((t, d) => t.plus(d.vol), D(0));
+      const stopRef = p.stopOrderRef?.replace(/^mexc-sl:/, '');
+      const stopStillActive = (await stopsFor(symbol)).some((x) => x.stopId === stopRef && x.state === 'ACTIVE');
+      const out: { fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date; realizedPnl: string | null }; reason: ExitReason; intentId: string | null }[] = [];
+      for (const [orderId, ds] of byOrder) {
+        const vol = ds.reduce((t, d) => t.plus(d.vol), D(0));
+        const ord = await orderById(read, orderId);
+        // A TrendPilot order (externalOid = our client order ID) that is still unresolved is booked by its own job.
+        const [own] = ord?.externalOid ? await db.select().from(orderIntents).where(and(eq(orderIntents.paperAccountId, acct.id), eq(orderIntents.clientOrderId, ord.externalOid))) : [];
+        if (own && (UNRESOLVED as readonly string[]).includes(own.state)) continue;
+        // An order of another MEXC position (e.g. one opened later on the same symbol) is not this position's close.
+        if (ord?.positionId && p.exchangePositionRef && ord.positionId !== p.exchangePositionRef) continue;
+        const complete = ord ? ['FILLED', 'CANCELLED', 'INVALID'].includes(ord.state) && vol.gte(ord.dealVol) : listed.gte(gap);
+        if (!complete) continue;
+        const price = ds.reduce((t, d) => t.plus(D(d.price).times(d.vol)), D(0)).div(vol);
+        const fee = ds.reduce((t, d) => t.plus(d.fee), D(0));
+        const profit = ds.every((d) => d.profit !== null) ? ds.reduce((t, d) => t.plus(d.profit!), D(0)).toFixed() : null;
+        const stopSide = p.side === 'LONG' ? price.lte(p.stopPrice) : price.gte(p.stopPrice);
+        const reason: ExitReason = own ? ((own.exitReason as ExitReason | null) ?? 'EXTERNAL_CLOSE') : !stopStillActive && stopSide ? 'STOP_LOSS' : 'EXTERNAL_CLOSE';
+        out.push({
+          fill: { fillId: `mexc:${orderId}`, contracts: vol.toFixed(), price: price.toDecimalPlaces(12).toFixed(), fee: fee.toDecimalPlaces(8).toFixed(), filledAt: new Date(Math.max(...ds.map((d) => d.timestamp))), realizedPnl: profit },
+          reason,
+          intentId: own?.id ?? null
+        });
+      }
+      return out;
+    };
+
+    /** Closes an open position MEXC no longer holds (fills pending). Exactly once per position. */
+    const closeOnExchangeFlat = async (p: PositionRow): Promise<boolean> =>
+      db.transaction(async (tx) => {
+        const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
+        if (!locked || locked.status !== 'OPEN') return false;
+        await book(tx, { id: locked.paperAccountId, ownerId: locked.ownerId }, [
+          { kind: 'POSITION_MARGIN_RELEASE', bucket: 'POSITION_MARGIN', amount: D(locked.marginUsdt).neg().toFixed(), refType: 'position', refId: `exchange-flat:${locked.id}`, memo: 'Margin released: closed on MEXC (fill details pending)' }
+        ]);
+        await tx
+          .update(positions)
+          .set({
+            status: 'CLOSED',
+            closeReason: 'EXTERNAL_CLOSE',
+            closedAt: locked.exchangeFlatAt ?? now,
+            contracts: '0',
+            quantity: '0',
+            marginUsdt: '0',
+            stopContracts: '0',
+            protectionStatus: 'PENDING',
+            protectionVerifiedAt: now,
+            exchangeContracts: '0',
+            exchangeCloseState: 'FILLS_PENDING',
+            exchangePendingContracts: locked.contracts,
+            exchangeFlatAt: locked.exchangeFlatAt ?? now,
+            exchangeSyncedAt: now,
+            updatedAt: sql`now()`
+          })
+          .where(eq(positions.id, locked.id));
+        await tx.update(positionTargets).set({ status: 'CANCELLED', updatedAt: sql`now()` }).where(and(eq(positionTargets.positionId, locked.id), ne(positionTargets.status, 'DONE')));
+        return true;
+      });
+
     const matched = new Set<NormalizedPosition>();
     const reported = new Set<NormalizedPosition>();
 
@@ -281,48 +373,13 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       if (venueQty.lt(platformQty)) {
         // Closed (partly) on MEXC: book the exchange fills not recorded yet.
         venue ??= readOnlyVenue(db, read, conn);
-        const since = p.openedAt.getTime() - 60_000;
-        const deals = await dealHistory(read, symbol, since);
-        const closeSide = p.side === 'LONG' ? 4 : 2;
-        const known = new Set(
-          [
-            ...(await db.select({ id: fills.exchangeFillId }).from(fills).where(eq(fills.paperAccountId, acct.id))).map((r) => r.id),
-            ...(await db.select({ id: positionExits.exchangeFillId }).from(positionExits).where(eq(positionExits.paperAccountId, acct.id))).map((r) => r.id)
-          ]
-        );
-        const byOrder = new Map<string, Deal[]>();
-        for (const d of deals) {
-          if (d.side !== closeSide || d.timestamp < since) continue;
-          if (known.has(`mexc:${d.orderId}`)) continue;
-          byOrder.set(d.orderId, [...(byOrder.get(d.orderId) ?? []), d]);
-        }
-        const gap = platformQty.minus(venueQty);
-        const listed = [...byOrder.values()].flat().reduce((t, d) => t.plus(d.vol), D(0));
         const stops = await stopsFor(symbol);
         const stopRef = p.stopOrderRef?.replace(/^mexc-sl:/, '');
-        const stopStillActive = stops.some((s) => s.stopId === stopRef && s.state === 'ACTIVE');
-        for (const [orderId, ds] of byOrder) {
-          const vol = ds.reduce((t, d) => t.plus(d.vol), D(0));
-          const ord = await orderById(read, orderId);
-          // A TrendPilot order (externalOid = our client order ID) that is still unresolved is booked by its own job.
-          const [own] = ord?.externalOid ? await db.select().from(orderIntents).where(and(eq(orderIntents.paperAccountId, acct.id), eq(orderIntents.clientOrderId, ord.externalOid))) : [];
-          if (own && (UNRESOLVED as readonly string[]).includes(own.state)) continue;
-          // An order of another MEXC position (e.g. one opened later on the same symbol) is not this position's close.
-          if (ord?.positionId && p.exchangePositionRef && ord.positionId !== p.exchangePositionRef) continue;
-          // Complete only when MEXC reports the order final with every deal listed (or, when MEXC no
-          // longer lists the order, when the listed deals account for the whole difference).
-          const complete = ord ? ['FILLED', 'CANCELLED', 'INVALID'].includes(ord.state) && vol.gte(ord.dealVol) : listed.gte(gap);
-          if (!complete) continue;
-          const price = ds.reduce((t, d) => t.plus(D(d.price).times(d.vol)), D(0)).div(vol);
-          const fee = ds.reduce((t, d) => t.plus(d.fee), D(0));
-          const profit = ds.every((d) => d.profit !== null) ? ds.reduce((t, d) => t.plus(d.profit!), D(0)).toFixed() : null;
-          const stopSide = p.side === 'LONG' ? price.lte(p.stopPrice) : price.gte(p.stopPrice);
-          const reason: ExitReason = own ? ((own.exitReason as ExitReason | null) ?? 'EXTERNAL_CLOSE') : !stopStillActive && stopSide ? 'STOP_LOSS' : 'EXTERNAL_CLOSE';
+        for (const c of await completeCloses(p, symbol, platformQty.minus(venueQty))) {
           const recorded = await db.transaction(async (tx) => {
             const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
             if (!locked || locked.status !== 'OPEN') return false;
-            const fill = { fillId: `mexc:${orderId}`, contracts: vol.toFixed(), price: price.toDecimalPlaces(12).toFixed(), fee: fee.toDecimalPlaces(8).toFixed(), filledAt: new Date(Math.max(...ds.map((d) => d.timestamp))), realizedPnl: profit };
-            return (await recordExitFill(db, tx, { position: locked, fill, reason, intentId: own?.id ?? null, now, venue: venue!, venueConfirmedFlat: venueQty.isZero() })).recorded;
+            return (await recordExitFill(db, tx, { position: locked, fill: c.fill, reason: c.reason, intentId: c.intentId, now, venue: venue!, venueConfirmedFlat: venueQty.isZero() })).recorded;
           });
           if (recorded) {
             out.exitsRecorded += 1;
@@ -330,23 +387,34 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
           }
         }
         cur = (await db.select().from(positions).where(eq(positions.id, p.id)))[0]!;
+        const orphan = stops.find((s) => s.stopId === stopRef && s.state === 'ACTIVE');
         if (cur.status !== 'OPEN') {
           out.closes.push({ positionId: p.id, symbol, result: 'FULL', platformContracts: '0', exchangeContracts: venueQty.toFixed() });
-          await db.update(positions).set({ exchangeContracts: '0', exchangeCloseState: null, exchangeFlatAt: cur.exchangeFlatAt ?? now, exchangeSyncedAt: now, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
-          const orphan = stops.find((s) => s.stopId === stopRef && s.state === 'ACTIVE');
+          await db.update(positions).set({ exchangeContracts: '0', exchangeCloseState: null, exchangePendingContracts: null, exchangeFlatAt: cur.exchangeFlatAt ?? now, exchangeSyncedAt: now, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
           if (orphan) out.drift.push({ kind: 'STOP_ORPHANED', symbol, detail: `position closed on MEXC but stop ${orphan.stopId} (${orphan.vol} contracts) is still active there`, at });
           continue;
         }
         platformQty = D(cur.contracts);
+        if (venueQty.isZero()) {
+          // MEXC holds none of this position (matched by position ID) but has not listed all its
+          // closing fills yet: close it now. Opening quantity is kept; remaining goes to zero; the
+          // remaining margin is released once (ledger ref per position); price, fees and realized
+          // P&L are backfilled from the fills on a later run.
+          const closed = await closeOnExchangeFlat(cur);
+          out.closes.push({ positionId: p.id, symbol, result: 'FULL_FILLS_PENDING', platformContracts: '0', exchangeContracts: '0', pendingContracts: platformQty.toFixed() });
+          if (orphan) out.drift.push({ kind: 'STOP_ORPHANED', symbol, detail: `position closed on MEXC but stop ${orphan.stopId} (${orphan.vol} contracts) is still active there`, at });
+          balanceDirty = balanceDirty || closed;
+          continue;
+        }
         if (venueQty.lt(platformQty)) {
-          // MEXC confirms the (partial) close; its fills are not all listed yet. Nothing more is booked.
+          // MEXC confirms a partial close; its fills are not all listed yet. Nothing more is booked.
           const stop = stops.find((s) => s.stopId === stopRef);
           const coverage = stopCoverage(stop, p.side, venueQty);
           await db
             .update(positions)
-            .set({ exchangeContracts: venueQty.toFixed(), exchangeCloseState: 'FILLS_PENDING', exchangeFlatAt: venueQty.isZero() ? (cur.exchangeFlatAt ?? now) : null, exchangeSyncedAt: now, updatedAt: sql`now()` })
+            .set({ exchangeContracts: venueQty.toFixed(), exchangeCloseState: 'FILLS_PENDING', exchangeFlatAt: null, exchangeSyncedAt: now, updatedAt: sql`now()` })
             .where(eq(positions.id, p.id));
-          out.closes.push({ positionId: p.id, symbol, result: 'FILLS_PENDING', platformContracts: platformQty.toFixed(), exchangeContracts: venueQty.toFixed(), ...(venueQty.gt(0) ? { stopCoverage: coverage, stopContracts: stop?.vol ?? null } : {}) });
+          out.closes.push({ positionId: p.id, symbol, result: 'FILLS_PENDING', platformContracts: platformQty.toFixed(), exchangeContracts: venueQty.toFixed(), stopCoverage: coverage, stopContracts: stop?.vol ?? null });
           continue;
         }
       }
@@ -391,6 +459,56 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
       }
     }
 
+    // Positions closed on MEXC whose fills were pending: book price, fees and realized P&L once they
+    // are listed (no quantity or margin change — both were settled when the position closed).
+    const pendingClosed = await db
+      .select({ p: positions, symbol: instruments.exchangeSymbol })
+      .from(positions)
+      .innerJoin(instruments, eq(instruments.id, positions.instrumentId))
+      .where(and(eq(positions.paperAccountId, acct.id), eq(positions.status, 'CLOSED'), eq(positions.exchangeCloseState, 'FILLS_PENDING')));
+    for (const { p, symbol } of pendingClosed) {
+      const pending = D(p.exchangePendingContracts ?? '0');
+      if (pending.lte(0)) continue;
+      const candidates = await completeCloses(p, symbol, pending);
+      for (const c of candidates) {
+        const booked = await db.transaction(async (tx) => {
+          const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
+          if (!locked || locked.exchangeCloseState !== 'FILLS_PENDING') return false;
+          const left = D(locked.exchangePendingContracts ?? '0');
+          const qty = Decimal.min(c.fill.contracts, left);
+          if (qty.lte(0)) return false;
+          const [inst] = await tx.select({ multiplier: instruments.contractMultiplier }).from(instruments).where(eq(instruments.id, locked.instrumentId));
+          const pnl = c.fill.realizedPnl !== null && qty.eq(c.fill.contracts) ? D(c.fill.realizedPnl).toFixed() : realizedPnl(locked.side as 'LONG' | 'SHORT', locked.avgEntryPrice, c.fill.price, qty.toFixed(), inst!.multiplier);
+          const [exit] = await tx
+            .insert(positionExits)
+            .values({ ownerId: locked.ownerId, paperAccountId: locked.paperAccountId, positionId: locked.id, intentId: c.intentId, reason: c.reason, exchangeFillId: c.fill.fillId, contracts: qty.toFixed(), price: c.fill.price, fee: c.fill.fee, realizedPnl: pnl, marginReleased: '0', remainingContracts: '0', filledAt: c.fill.filledAt })
+            .onConflictDoNothing({ target: [positionExits.paperAccountId, positionExits.exchangeFillId] })
+            .returning({ id: positionExits.id });
+          if (!exit) return false;
+          await book(tx, { id: locked.paperAccountId, ownerId: locked.ownerId }, [
+            { kind: 'REALIZED_PNL', bucket: 'WALLET', amount: pnl, refType: 'fill', refId: c.fill.fillId, memo: `Realized P&L (${c.reason}, backfilled from MEXC)` },
+            { kind: 'TRADING_FEE', bucket: 'WALLET', amount: D(c.fill.fee).neg().toFixed(), refType: 'fill', refId: c.fill.fillId, memo: 'MEXC fee (exit, backfilled)' }
+          ]);
+          const remainingPending = left.minus(qty);
+          const done = remainingPending.lte(0);
+          await tx
+            .update(positions)
+            .set({
+              realizedPnlUsdt: D(locked.realizedPnlUsdt).plus(pnl).toFixed(),
+              feesUsdt: D(locked.feesUsdt).plus(c.fill.fee).toFixed(),
+              exchangePendingContracts: done ? null : remainingPending.toFixed(),
+              ...(done ? { exchangeCloseState: null, closedAt: c.fill.filledAt, ...(c.reason !== 'EXTERNAL_CLOSE' && locked.closeReason === 'EXTERNAL_CLOSE' ? { closeReason: c.reason } : {}) } : {}),
+              updatedAt: sql`now()`
+            })
+            .where(eq(positions.id, locked.id));
+          return true;
+        });
+        if (booked) out.exitsRecorded += 1;
+      }
+      const [after] = await db.select({ state: positions.exchangeCloseState, pending: positions.exchangePendingContracts }).from(positions).where(eq(positions.id, p.id));
+      if (candidates.length) out.closes.push({ positionId: p.id, symbol, result: after?.state ? 'FULL_FILLS_PENDING' : 'FILLS_BACKFILLED', platformContracts: '0', exchangeContracts: '0', ...(after?.pending ? { pendingContracts: D(after.pending).toFixed() } : {}) });
+    }
+
     // Exposure at MEXC on a contract this investor trades Live, unknown to TrendPilot.
     const traded = await db
       .select({ symbol: instruments.exchangeSymbol })
@@ -416,7 +534,7 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
 
     // Booked exits moved the local wallet by their P&L and fees, which MEXC's balance already
     // contains: match it to MEXC again so wallet, margin and available agree at the end of the run.
-    if (usdt && out.exitsRecorded > 0) {
+    if (usdt && (out.exitsRecorded > 0 || balanceDirty)) {
       const b = await applyExchangeBalance(db, ownerId, usdt, `sync:${conn.id}:${at}:after-exits`, now);
       out.balance = { equity: usdt.equity, available: usdt.availableOpen, walletAdjustment: D(out.balance?.walletAdjustment ?? 0).plus(b.walletAdjustment).toFixed() };
     }

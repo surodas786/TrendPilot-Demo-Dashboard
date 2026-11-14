@@ -185,7 +185,7 @@ else {
   const gap = platformQty.minus(venueQty);
   const listed = orderRows.reduce((t, r) => t.plus(String(r.listedDealVol)), D(0));
   say(`MEXC holds ${gap.toFixed()} contracts less than TrendPilot (${venueQty.isZero() ? 'fully closed' : 'partly closed'} at MEXC). Closing deals listed: ${listed.toFixed()} contracts in ${orderRows.length} order(s).`);
-  if (!orderRows.length) say('No closing deals listed yet. PREVIOUS SYNC: recorded SIZE_MISMATCH drift and halted entries, leaving the position open. NEW SYNC: shows "MEXC confirms closed, fill details pending" (FILLS_PENDING) and books the fills once MEXC lists them.');
+  if (!orderRows.length) say('No closing deals listed yet. PREVIOUS SYNC: recorded SIZE_MISMATCH drift and halted entries, leaving the position open. NEW SYNC: when MEXC holds none of it (by position ID) the position is closed at once (remaining 0, margin released, "Closed on MEXC · fill details pending") and price, fees and P&L are backfilled when MEXC lists the fills.');
   else if (listed.lt(gap)) say('Listed deals cover less than the difference: the rest is booked when MEXC lists it (FILLS_PENDING meanwhile).');
   if (venueQty.isZero() && stop?.state === 'ACTIVE') say(`! Stop ${stop.stopId} is still ACTIVE at MEXC with the position flat. PREVIOUS SYNC: the exit was booked but the position stayed OPEN (with 0 contracts) because the stop was still listed. NEW SYNC: closes it and reports STOP_ORPHANED.`);
 }
