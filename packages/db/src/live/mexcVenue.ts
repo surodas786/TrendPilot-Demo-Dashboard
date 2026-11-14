@@ -2,6 +2,7 @@ import { Decimal } from '@trendpilot/domain';
 import type { CloseResult, OpeningRequest, SimResult, VenueDiagnostics } from '../paper/simulator';
 import type { CloseRequest, ExecutionVenue, ProtectionState } from '../venue/types';
 import { MEXC_EXTERNAL_OID_MAX } from '../paper/clientOrderId';
+import { codeRevision } from '../revision';
 import { livePilotVerified, type CapabilityId, type CapabilityState } from './capabilities';
 import { MexcPrivateError, normalizeDeals, normalizeOrder, normalizePositions, normalizeStops, TREND, trendToBasis, type MexcRequester, type NormalizedOrder, type NormalizedPosition, type NormalizedStop } from './mexcPrivate';
 
@@ -292,7 +293,7 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
         const accountMode = modeRaw === 2 ? 'ONE_WAY' : 'HEDGE';
         // Exchange evidence kept with the request. positionType (held position), positionMode
         // (account) and side (order) are separate fields even where their numbers coincide.
-        const context = { positionModeRaw: modeRaw, accountMode, position: { positionId: pos.positionId, positionType: pos.side === 'SHORT' ? 2 : 1, openType: pos.marginMode === 'CROSS' ? 2 : 1, holdVol: pos.contracts, frozenVol: pos.frozen }, requestedContracts: D(r.contracts).toFixed() };
+        const context = { revision: codeRevision(), positionModeRaw: modeRaw, accountMode, position: { positionId: pos.positionId, positionType: pos.side === 'SHORT' ? 2 : 1, openType: pos.marginMode === 'CROSS' ? 2 : 1, holdVol: pos.contracts, frozenVol: pos.frozen }, requestedContracts: D(r.contracts).toFixed() };
         const built = buildMexcCloseOrder({ symbol, clientOrderId: r.clientOrderId, positionSide: r.positionSide, accountMode, exchangePosition: pos, contracts: r.contracts, qtyStep: r.contract.qtyStep, quote: r.quote });
         if (!built.ok) return reject(built.reason, { request: { method: 'NOT_SENT', path: CREATE, body: {}, context }, response: { code: 'NOT_SENT', message: built.detail.slice(0, 200) } });
         requested = built.vol;

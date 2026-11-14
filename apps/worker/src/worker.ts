@@ -1,7 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { codeRevision, createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
 import { assertLiveTransportAllowed } from '@trendpilot/domain';
 
 /**
@@ -26,15 +25,8 @@ export interface RunningWorker {
 
 export const workerIdentity = () => `worker-${hostname()}-${process.pid}`;
 
-/** Code revision this process runs (GIT_SHA if the deploy sets it, else the checkout's HEAD), read once at start. */
-export function workerRevision(env: Record<string, string | undefined> = process.env): string {
-  if (env.GIT_SHA) return env.GIT_SHA.slice(0, 40);
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim().slice(0, 40);
-  } catch {
-    return 'unknown';
-  }
-}
+/** Code revision this process runs (see codeRevision). */
+export const workerRevision = (env: Record<string, string | undefined> = process.env): string => codeRevision(env);
 
 const describe = (r: ProcessResult) =>
   r.summary

@@ -44,6 +44,8 @@ const print = (title: string, rows: unknown[] | Record<string, unknown>) => {
   if (list.length) console.table(list);
 };
 const json = (title: string, v: unknown) => console.log(`\n## ${title}\n${JSON.stringify(v, null, 2)}`);
+/** One column of the side-by-side comparison per traced attempt. */
+const attempts: { oid: string; at: string; label: string; revision: string; endpoint: string; body: Row; code: string; message: string }[] = [];
 const SIDE: Record<number, string> = { 1: '1 open long / buy', 2: '2 close short', 3: '3 open short / sell', 4: '4 close long' };
 
 const baseUrl = process.env.MEXC_PRIVATE_BASE_URL || MEXC_PRIVATE_DEFAULT_BASE_URL;
@@ -169,6 +171,10 @@ try {
         sent = ((i.venue_request as Row).body ?? {}) as Row;
         json('ACTUAL request (stored by the deployed revision)', i.venue_request);
         json('ACTUAL MEXC response (code, message)', i.venue_response);
+        const vr = i.venue_request as Row;
+        const ctx = (vr.context ?? {}) as Row;
+        const resp = (i.venue_response ?? {}) as Row;
+        attempts.push({ oid: String(i.client_order_id), at: new Date(String(i.created_at)).toISOString(), label: 'ACTUAL', revision: String(ctx.revision ?? 'not recorded (before c1e1f66+)'), endpoint: `${vr.method} ${vr.path}`, body: sent, code: String(resp.code ?? i.state_reason), message: String(resp.message ?? '') });
       } else {
         // Revisions before d3d52dd did not keep the request: rebuilt from the stored inputs.
         const vp = venuePositions.find((v) => v.side === side);
@@ -187,6 +193,7 @@ try {
         };
         json('RECONSTRUCTED request (pre-d3d52dd rules: openType from TrendPilot, mode from the stored connection; vol before the MEXC cap)', sent);
         console.log(`MEXC response as recorded: ${i.state_reason} (message not retained before d3d52dd)`);
+        attempts.push({ oid: String(i.client_order_id), at: new Date(String(i.created_at)).toISOString(), label: 'RECONSTRUCTED', revision: 'pre-d3d52dd (inferred: no request stored)', endpoint: `POST ${MEXC_ORDER_CREATE_PATH}`, body: sent, code: String(i.state_reason), message: '(not retained)' });
       }
       const vp = (p?.exchange_position_ref ? venuePositions.find((v) => v.positionId === p.exchange_position_ref) : undefined) ?? venuePositions.find((v) => v.side === side);
       if (!vp || !accountMode) {
@@ -205,4 +212,21 @@ try {
   }
 } finally {
   await h2.close();
+}
+
+if (attempts.length) {
+  const fields = ['symbol', 'side', 'type', 'price', 'vol', 'openType', 'positionId', 'reduceOnly', 'positionMode', 'externalOid'];
+  const rows: Row[] = [
+    { field: 'time (UTC)', ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), a.at])) },
+    { field: 'request is', ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), a.label])) },
+    { field: 'worker revision', ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), a.revision.slice(0, 12)])) },
+    { field: 'endpoint', ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), a.endpoint])) },
+    ...fields.map((f) => ({ field: `body.${f}`, ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), JSON.stringify(a.body[f])])) })),
+    { field: 'MEXC code', ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), a.code])) },
+    { field: 'MEXC message', ...Object.fromEntries(attempts.map((a) => [a.oid.slice(0, 8), a.message.slice(0, 60)])) }
+  ];
+  print('Side by side (columns = externalOid prefix, in time order)', rows);
+  const keys = attempts.map((a) => a.oid.slice(0, 8));
+  const changed = rows.filter((r) => r.field !== 'time (UTC)' && !String(r.field).endsWith('externalOid') && new Set(keys.map((k) => r[k])).size > 1).map((r) => r.field);
+  console.log(`\nChanged between attempts (besides time and externalOid): ${changed.length ? changed.join(', ') : 'nothing'}`);
 }
