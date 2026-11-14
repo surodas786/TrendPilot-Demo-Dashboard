@@ -21,7 +21,7 @@ import * as approve from '@/app/v1/admin/live/connections/[id]/approve/route';
 import { setTestClock } from '@/server/clock';
 import { BTC, blockBody, call, direct, teardown, userId, USERS } from '../helpers';
 import { MockMexc } from '../mexcMock';
-import { ALL_DAYS, clock, cookies, drain, openFromAlert, plus, positionsOf } from '../paperReplay';
+import { ALL_DAYS, clock, cookies, deliver, drain, M15, openFromAlert, plus, positionsOf, publishVersion } from '../paperReplay';
 
 const A = USERS.investorA.email;
 const D = (v: Decimal.Value) => new Decimal(v);
@@ -50,7 +50,7 @@ afterAll(async () => {
   await teardown();
 });
 
-async function openLive(side: 'LONG' | 'SHORT', block: Record<string, unknown> = {}) {
+async function openLive(side: 'LONG' | 'SHORT', block: Record<string, unknown> = {}, o: { reverse?: boolean } = {}) {
   await openFromAlert({
     side,
     a: null,
@@ -58,7 +58,8 @@ async function openLive(side: 'LONG' | 'SHORT', block: Record<string, unknown> =
     market: async () => {
       const put = await call(conn.PUT, { method: 'PUT', path: '/x', cookie: cookies.a, body: { accountRef: 'UID …4821', apiKey: 'mx0vglTESTKEYAAAAAAA1234', secretKey: 'TESTSECRETaaaaaaaaaaaaaaaaaaaaaa' } });
       expect(put.body.connection.status).toBe('VERIFIED');
-      const created = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: blockBody({ mode: 'LIVE', weekdays: ALL_DAYS, ...TWELVE, ...block }) });
+      const version = o.reverse ? { strategyVersionId: await publishVersion({ oppositePolicy: 'CLOSE_AND_REVERSE' }) } : {};
+      const created = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: blockBody({ mode: 'LIVE', weekdays: ALL_DAYS, ...TWELVE, ...version, ...block }) });
       expect(created.status).toBe(201);
       expect((await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: created.body.id }, ifMatch: created.body.revision })).status).toBe(200);
       expect((await call(approve.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: put.body.connection.id }, body: LIMITS })).status).toBe(200);
@@ -271,5 +272,80 @@ describe('ambiguous responses, partial fills and manual closes', () => {
     expect(D(mx.positions.get('BTC_USDT:2')!.holdVol).isZero()).toBe(true);
     expect(mx.positions.get('BTC_USDT:1')).toBeUndefined();
     void p;
+  });
+});
+
+/** The exact close body the builder must send for this position (price = executable quote). */
+const expectedClose = (side: 'LONG' | 'SHORT', vol: string, price: string, externalOid: string, positionId: number) => ({
+  symbol: 'BTC_USDT',
+  price,
+  vol,
+  side: side === 'LONG' ? 4 : 2,
+  type: 5,
+  openType: 1,
+  externalOid,
+  positionId,
+  reduceOnly: true,
+  positionMode: 2
+});
+
+describe('exact serialized close request: manual close and reversal, Long and Short', () => {
+  for (const side of ['LONG', 'SHORT'] as const) {
+    it(`manual close of a ${side}`, async () => {
+      const p = await openLive(side);
+      const mexcPos = mx.positions.get(`BTC_USDT:${side === 'LONG' ? 1 : 2}`)!;
+      const r = await call(closeRoute.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: p.id }, headers: { 'idempotency-key': `manual-${side}` } });
+      expect(r.status).toBe(202);
+      await drain(clock.now, direct.db);
+      const [close] = await closeIntents(p.id);
+      const quote = (await direct.db.select().from(schema.marketQuotes).where(eq(schema.marketQuotes.instrumentId, BTC)).orderBy(schema.marketQuotes.asOf)).at(-1)!;
+      const price = D(side === 'LONG' ? quote.bid : quote.ask).toFixed();
+      expect(closeCreates().map((c) => c.body)).toEqual([expectedClose(side, D(p.contracts).toFixed(), price, close!.clientOrderId, mexcPos.positionId)]);
+      expect(close).toMatchObject({ exitReason: 'MANUAL_CLOSE', state: 'FILLED' });
+      expect(close!.venueRequest).toEqual({ method: 'POST', path: '/api/v1/private/order/create', body: closeCreates()[0]!.body });
+    });
+
+    it(`reversal of a ${side}: the exact close first, the opposite entry only after MEXC is flat`, async () => {
+      const p = await openLive(side, {}, { reverse: true });
+      const posType = side === 'LONG' ? 1 : 2;
+      const mexcPos = mx.positions.get(`BTC_USDT:${posType}`)!;
+      const next = new Date(BAR.getTime() + M15);
+      clock.now = plus(new Date(next.getTime() + M15), 3);
+      setTestClock(() => clock.now);
+      const mid = side === 'LONG' ? '64900' : '65100';
+      const { recordMarketTick } = await import('@trendpilot/db');
+      await recordMarketTick(direct.db, { instrumentId: BTC, asOf: clock.now, bid: D(mid).minus('0.5').toFixed(), ask: D(mid).plus('0.5').toFixed(), mark: mid, last: mid });
+      mx.price.BTC_USDT = mid;
+      await drain(clock.now, direct.db);
+      expect(await deliver(side === 'LONG' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', next, mid)).toBe(202);
+      await drain(clock.now, direct.db);
+      const [close] = await closeIntents(p.id);
+      expect(close).toMatchObject({ exitReason: 'REVERSAL_CLOSE', state: 'FILLED' });
+      const price = D(side === 'LONG' ? D(mid).minus('0.5') : D(mid).plus('0.5')).toFixed();
+      const creates = mx.creates().map((c) => c.body as Record<string, unknown>);
+      expect(creates[0]).toEqual(expectedClose(side, D(p.contracts).toFixed(), price, close!.clientOrderId, mexcPos.positionId));
+      // The opening leg (side 3 open short / 1 open long) comes only after the close, once MEXC holds none of the old side.
+      expect(creates.slice(1).map((b) => b.side)).toEqual([side === 'LONG' ? 3 : 1]);
+      expect(D(mexcPos.holdVol).isZero()).toBe(true);
+    });
+  }
+
+  it('a reversal whose close MEXC rejects with 2001 opens nothing and does not resend on later prices', async () => {
+    const p = await openLive('LONG', {}, { reverse: true });
+    mx.faults.rejectClosesWith = 2001;
+    const next = new Date(BAR.getTime() + M15);
+    clock.now = plus(new Date(next.getTime() + M15), 3);
+    setTestClock(() => clock.now);
+    const { recordMarketTick } = await import('@trendpilot/db');
+    await recordMarketTick(direct.db, { instrumentId: BTC, asOf: clock.now, bid: '64899.5', ask: '64900.5', mark: '64900', last: '64900' });
+    await drain(clock.now, direct.db);
+    expect(await deliver('BEARISH_FLIP', next, '64900')).toBe(202);
+    await drain(clock.now, direct.db);
+    for (let k = 0; k < 10; k++) await px(k % 2 ? '64900' : '64800', 5);
+    expect(await closeIntents(p.id)).toEqual([expect.objectContaining({ exitReason: 'REVERSAL_CLOSE', state: 'REJECTED', stateReason: 'MEXC_2001' })]);
+    expect(mx.creates().map((c) => (c.body as Record<string, unknown>).side)).toEqual([4]); // one close, no opening order
+    expect(mx.positions.get('BTC_USDT:2')).toBeUndefined();
+    expect(await posById(p.id)).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
+    expect((await posById(p.id)).exitHaltReason).toMatch(/^MEXC_2001 on REVERSAL_CLOSE/);
   });
 });
