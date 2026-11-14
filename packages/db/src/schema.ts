@@ -807,6 +807,8 @@ export const positions = pgTable(
     exchangeFlatAt: timestamp('exchange_flat_at', { withTimezone: true }),
     /** Contracts closed on MEXC whose fills are not booked yet (FILLS_PENDING, also after the position is CLOSED). */
     exchangePendingContracts: qty('exchange_pending_contracts'),
+    /** Why the closing fills are still pending (shown to the investor), e.g. nothing listed yet or order not final. */
+    exchangePendingReason: text('exchange_pending_reason'),
     settingsSnapshot: jsonb('settings_snapshot').notNull(),
     openedAt: timestamp('opened_at', { withTimezone: true }).notNull(),
     createdAt: createdAt(),

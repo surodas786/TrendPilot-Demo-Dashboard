@@ -214,7 +214,10 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
               <tbody className="divide-y divide-line">
                 {closed.map((p) => (
                   <tr key={p.id} data-testid={`closed-${p.symbol}`} data-reason={p.closeReason ?? ''}>
-                    <td className="whitespace-nowrap px-4 py-2.5 text-muted">{p.closedAt ? fmt(p.closedAt) : '—'}</td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-muted">
+                      {p.closedAt ? fmt(p.closedAt) : '—'}
+                      {p.venueSync?.closeState === 'FILLS_PENDING' && <span className="block text-xs text-subtle">detected by TrendPilot</span>}
+                    </td>
                     <td className="px-4 py-2.5 text-ink">
                       {p.symbol} <ModeBadge mode={p.mode} />
                     </td>
@@ -228,6 +231,11 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                           <StatusPill tone="warn" icon={HourglassIcon}>
                             Closed on MEXC · fill details pending
                           </StatusPill>
+                          {p.venueSync.pendingReason && (
+                            <span className="mt-0.5 block text-xs text-subtle" data-testid="pending-reason">
+                              {p.venueSync.pendingReason}
+                            </span>
+                          )}
                         </span>
                       )}
                     </td>
@@ -238,9 +246,12 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                     <td className={`px-4 py-2.5 tabular-nums ${Number(p.realizedPnlUsdt) >= 0 ? 'text-gain' : 'text-loss'}`} data-testid="realized-pnl">
                       {p.venueSync?.closeState === 'FILLS_PENDING' ? <span className="text-subtle">Pending</span> : signed(p.realizedPnlUsdt)}
                     </td>
-                    <td className="px-4 py-2.5 text-muted tabular-nums">{usdt(p.feesUsdt)}</td>
+                    <td className="px-4 py-2.5 text-muted tabular-nums" data-testid="fees">
+                      {usdt(p.feesUsdt)}
+                      {p.venueSync?.closeState === 'FILLS_PENDING' && <span className="block text-xs text-subtle">Recorded fees so far</span>}
+                    </td>
                     <td className={`px-4 py-2.5 font-semibold tabular-nums ${Number(p.netRealizedUsdt) >= 0 ? 'text-gain' : 'text-loss'}`} data-testid="net-pnl">
-                      {signed(p.netRealizedUsdt)}
+                      {p.venueSync?.closeState === 'FILLS_PENDING' ? <span className="font-normal text-subtle">Pending</span> : signed(p.netRealizedUsdt)}
                     </td>
                     <td className="px-4 py-2.5">
                       <Link href={`/my-trades/${p.id}`} className="text-sm font-semibold text-accent hover:underline">

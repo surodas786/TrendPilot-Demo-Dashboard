@@ -275,6 +275,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                     {p.venueSync?.closeState === 'FILLS_PENDING' && (
                       <span className="block">
                         <StatusPill tone="warn">Closed on MEXC · fill details pending</StatusPill>
+                        {p.venueSync.pendingReason && <span className="mt-0.5 block text-[11px] text-subtle">{p.venueSync.pendingReason}</span>}
                       </span>
                     )}
                   </td>

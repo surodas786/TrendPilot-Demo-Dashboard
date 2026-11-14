@@ -126,7 +126,12 @@ const stop = stops.find((s) => s.stopId === stopId);
 
 const deals = await mexc.deals(symbol, openedMs - 60_000);
 const closeSide = side === 'LONG' ? 4 : 2;
-const closing = deals.filter((d) => d.side === closeSide && d.timestamp >= openedMs - 60_000);
+const reducingSide = side === 'LONG' ? 3 : 1; // One-way mode: a manual Sell/Buy may carry the other direction's open side
+print(
+  `Every MEXC deal on ${symbol} since the position opened (sides: 1 open long, 2 close short, 3 open short / one-way sell, 4 close long)`,
+  deals.map((d) => ({ dealId: d.id, orderId: d.orderId, side: d.side, vol: d.vol, price: d.price, fee: d.fee, profit: d.profit, positionId: d.positionId, at: d.timestamp ? new Date(d.timestamp).toISOString() : '(no time field)' }))
+);
+const closing = deals.filter((d) => (d.side === closeSide || d.side === reducingSide) && d.timestamp >= openedMs - 60_000);
 const byOrder = new Map<string, typeof closing>();
 for (const d of closing) byOrder.set(d.orderId, [...(byOrder.get(d.orderId) ?? []), d]);
 const orderRows: Row[] = [];
@@ -136,6 +141,8 @@ for (const [orderId, ds] of byOrder) {
   const own = intents.find((i) => ord?.externalOid && i.client_order_id === ord.externalOid);
   orderRows.push({
     orderId,
+    orderPositionId: ord?.positionId ?? null,
+    matchesStoredPosition: pos.exchange_position_ref ? (ord?.positionId ?? ds[0]?.positionId ?? null) === String(pos.exchange_position_ref) : 'no stored position ID',
     externalOid: ord?.externalOid ?? null,
     placedBy: own ? `TrendPilot intent ${own.id} (${own.kind} ${own.state})` : 'MEXC (manual / stop)',
     state: ord?.state ?? 'not listed',
@@ -147,7 +154,7 @@ for (const [orderId, ds] of byOrder) {
     lastDealAt: new Date(Math.max(...ds.map((d) => d.timestamp))).toISOString()
   });
 }
-print(`MEXC closing deals (side ${closeSide}) since the position opened, per order`, orderRows);
+print(`MEXC reducing deals (side ${closeSide} or ${reducingSide}) since the position opened, per order`, orderRows);
 const closeLookups: Row[] = [];
 for (const i of intents.filter((x) => x.kind === 'CLOSE')) {
   try {

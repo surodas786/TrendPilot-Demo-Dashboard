@@ -242,13 +242,51 @@ export class MockMexc implements MexcRequester {
    * A manual close on the MEXC web UI (no externalOid from TrendPilot). `fee` and `profit` are
    * MEXC's own figures for the deal (profit omitted when undefined). Returns the MEXC order ID.
    */
-  manualClose(symbol: string, positionType: 1 | 2, vol: string, price: string, o: { fee?: string; profit?: string; delayed?: boolean } = {}) {
+  manualClose(
+    symbol: string,
+    positionType: 1 | 2,
+    vol: string,
+    price: string,
+    o: {
+      fee?: string;
+      profit?: string;
+      delayed?: boolean;
+      /** One-way mode: a manual Sell/Buy recorded with the open side of the other direction (3 / 1). */
+      oneWaySide?: boolean;
+      /** Deal records carry the MEXC positionId. */
+      dealPositionId?: boolean;
+      /** The order carries no positionId (as some histories return). */
+      orderWithoutPositionId?: boolean;
+      /** The execution time is returned as createTime instead of timestamp. */
+      createTimeOnly?: boolean;
+      /** Split into this many deals (weighted price). */
+      parts?: { vol: string; price: string; fee?: string }[];
+    } = {}
+  ) {
     const pos = this.positions.get(`${symbol}:${positionType}`)!;
     const id = this.seq++;
-    const side = positionType === 1 ? 4 : 2;
+    const side = o.oneWaySide ? (positionType === 1 ? 3 : 1) : positionType === 1 ? 4 : 2;
     const fee = o.fee ?? '0';
-    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: fee, createTime: this.now(), positionId: pos.positionId });
-    this.deals.set(id, [{ id: id * 10 + 1, orderId: id, symbol, side, vol, price, fee, timestamp: this.now(), ...(o.profit !== undefined ? { profit: o.profit } : {}) }]);
+    this.orders.set(`web-${id}`, { orderId: id, externalOid: `web-${id}`, symbol, side, vol, dealVol: vol, dealAvgPrice: price, state: 3, takerFee: fee, createTime: this.now(), ...(o.orderWithoutPositionId ? {} : { positionId: pos.positionId }) });
+    const parts = o.parts ?? [{ vol, price, fee }];
+    this.deals.set(
+      id,
+      parts.map((pt, k) => {
+        const t = this.now();
+        return {
+          id: id * 10 + 1 + k,
+          orderId: id,
+          symbol,
+          side,
+          vol: pt.vol,
+          price: pt.price,
+          fee: pt.fee ?? '0',
+          ...(o.createTimeOnly ? { createTime: t } : { timestamp: t }),
+          ...(o.dealPositionId ? { positionId: pos.positionId } : {}),
+          ...(o.profit !== undefined && k === 0 ? { profit: o.profit } : o.profit !== undefined ? { profit: '0' } : {})
+        } as never;
+      })
+    );
     if (o.delayed) this.delayedDeals.add(id);
     pos.holdVol = D(pos.holdVol).minus(vol).toFixed();
     for (const s of this.stops.values()) {

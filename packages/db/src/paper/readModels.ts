@@ -95,6 +95,8 @@ export interface PositionDto {
     flatAt: string | null;
     /** Contracts closed on MEXC whose fills (price, fee, P&L) are not booked yet. */
     pendingContracts: string | null;
+    /** Why the fills are still pending (null when not pending or not checked yet). */
+    pendingReason: string | null;
   } | null;
 }
 
@@ -235,7 +237,8 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
             contracts: n(p.exchangeContracts),
             closeState: p.exchangeCloseState,
             flatAt: p.exchangeFlatAt?.toISOString() ?? null,
-            pendingContracts: n(p.exchangePendingContracts)
+            pendingContracts: n(p.exchangePendingContracts),
+            pendingReason: p.exchangePendingReason
           }
         : null,
     targets: [],

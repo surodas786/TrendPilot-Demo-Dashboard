@@ -141,6 +141,8 @@ interface Deal {
   /** MEXC's realized P&L for the deal, when listed. */
   profit: string | null;
   timestamp: number;
+  /** MEXC position the deal belongs to, when listed. */
+  positionId: string | null;
 }
 const listOf = (data: unknown): unknown[] => (Array.isArray(data) ? data : ((data as { resultList?: unknown[] } | null)?.resultList ?? []));
 
@@ -151,7 +153,10 @@ export function normalizeDealHistory(data: unknown): Deal[] {
     const id = String(d.id);
     if (seen.has(id)) continue;
     const profit = d.profit === null || d.profit === undefined || d.profit === '' ? null : D(String(d.profit)).toFixed();
-    seen.set(id, { id, orderId: String(d.orderId ?? ''), side: Number(d.side), vol: D(String(d.vol ?? 0)).toFixed(), price: D(String(d.price ?? 0)).toFixed(), fee: D(String(d.fee ?? 0)).toFixed(), profit, timestamp: Number(d.timestamp ?? 0) });
+    // The execution time is `timestamp` in the docs; some responses carry createTime/updateTime instead.
+    const ts = Number(d.timestamp ?? d.createTime ?? d.updateTime ?? 0);
+    const positionId = d.positionId === null || d.positionId === undefined || Number(d.positionId) === 0 ? null : String(d.positionId);
+    seen.set(id, { id, orderId: String(d.orderId ?? ''), side: Number(d.side), vol: D(String(d.vol ?? 0)).toFixed(), price: D(String(d.price ?? 0)).toFixed(), fee: D(String(d.fee ?? 0)).toFixed(), profit, timestamp: ts, positionId });
   }
   return [...seen.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
 }
@@ -270,45 +275,86 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
     const completeCloses = async (p: PositionRow, symbol: string, gap: Decimal) => {
       const since = p.openedAt.getTime() - 60_000;
       const deals = await dealHistory(read, symbol, since);
+      // Close side (4 close long / 2 close short). In One-way mode a manual Sell/Buy that reduces the
+      // position can be recorded with the open side of the other direction (3 / 1): accepted only when
+      // MEXC ties the deal or its order to this position's ID.
       const closeSide = p.side === 'LONG' ? 4 : 2;
+      const reducingSide = p.side === 'LONG' ? 3 : 1;
+      const ref = p.exchangePositionRef;
+      const [inst] = await db.select({ multiplier: instruments.contractMultiplier }).from(instruments).where(eq(instruments.id, p.instrumentId));
       const known = new Set(
         [
           ...(await db.select({ id: fills.exchangeFillId }).from(fills).where(eq(fills.paperAccountId, acct.id))).map((r) => r.id),
           ...(await db.select({ id: positionExits.exchangeFillId }).from(positionExits).where(eq(positionExits.paperAccountId, acct.id))).map((r) => r.id)
         ]
       );
+      const notes: string[] = [];
       const byOrder = new Map<string, Deal[]>();
+      let earlier = 0;
       for (const d of deals) {
-        if (d.side !== closeSide || d.timestamp < since) continue;
+        if (d.side !== closeSide && d.side !== reducingSide) continue;
+        if (d.timestamp < since) {
+          earlier += 1;
+          continue;
+        }
         if (known.has(`mexc:${d.orderId}`)) continue;
+        if (d.positionId && ref && d.positionId !== ref) continue;
         byOrder.set(d.orderId, [...(byOrder.get(d.orderId) ?? []), d]);
       }
-      const listed = [...byOrder.values()].flat().reduce((t, d) => t.plus(d.vol), D(0));
       const stopRef = p.stopOrderRef?.replace(/^mexc-sl:/, '');
       const stopStillActive = (await stopsFor(symbol)).some((x) => x.stopId === stopRef && x.state === 'ACTIVE');
-      const out: { fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date; realizedPnl: string | null }; reason: ExitReason; intentId: string | null }[] = [];
+      const closes: { fill: { fillId: string; contracts: string; price: string; fee: string; filledAt: Date; realizedPnl: string | null }; reason: ExitReason; intentId: string | null }[] = [];
+      let listed = D(0);
+      const accepted: [string, Deal[], NormalizedOrder | null][] = [];
       for (const [orderId, ds] of byOrder) {
-        const vol = ds.reduce((t, d) => t.plus(d.vol), D(0));
         const ord = await orderById(read, orderId);
+        const tied = !!ref && (ds.some((d) => d.positionId === ref) || ord?.positionId === ref);
+        if (ord?.positionId && ref && ord.positionId !== ref) {
+          notes.push(`MEXC order ${orderId} belongs to position ${ord.positionId}, not ${ref}`);
+          continue;
+        }
+        if (ds.some((d) => d.side === reducingSide) && !tied) {
+          notes.push(`MEXC order ${orderId} (side ${reducingSide}) is not tied to position ${ref ?? '(unknown)'}; not treated as this close`);
+          continue;
+        }
+        accepted.push([orderId, ds, ord]);
+        listed = listed.plus(ds.reduce((t, d) => t.plus(d.vol), D(0)));
+      }
+      for (const [orderId, ds, ord] of accepted) {
+        const vol = ds.reduce((t, d) => t.plus(d.vol), D(0));
         // A TrendPilot order (externalOid = our client order ID) that is still unresolved is booked by its own job.
         const [own] = ord?.externalOid ? await db.select().from(orderIntents).where(and(eq(orderIntents.paperAccountId, acct.id), eq(orderIntents.clientOrderId, ord.externalOid))) : [];
-        if (own && (UNRESOLVED as readonly string[]).includes(own.state)) continue;
-        // An order of another MEXC position (e.g. one opened later on the same symbol) is not this position's close.
-        if (ord?.positionId && p.exchangePositionRef && ord.positionId !== p.exchangePositionRef) continue;
+        if (own && (UNRESOLVED as readonly string[]).includes(own.state)) {
+          notes.push(`MEXC order ${orderId} is TrendPilot order ${own.clientOrderId} (${own.state}); booked by its own job`);
+          continue;
+        }
+        // Complete only when MEXC reports the order final with every deal listed (or, when MEXC no
+        // longer lists the order, when the listed deals account for the whole difference).
         const complete = ord ? ['FILLED', 'CANCELLED', 'INVALID'].includes(ord.state) && vol.gte(ord.dealVol) : listed.gte(gap);
-        if (!complete) continue;
+        if (!complete) {
+          notes.push(ord ? `MEXC order ${orderId} is ${ord.state}; deals listed ${vol.toFixed()} of ${ord.dealVol}` : `MEXC no longer lists order ${orderId} and its deals (${vol.toFixed()}) do not cover ${gap.toFixed()}`);
+          continue;
+        }
         const price = ds.reduce((t, d) => t.plus(D(d.price).times(d.vol)), D(0)).div(vol);
         const fee = ds.reduce((t, d) => t.plus(d.fee), D(0));
-        const profit = ds.every((d) => d.profit !== null) ? ds.reduce((t, d) => t.plus(d.profit!), D(0)).toFixed() : null;
+        // Realized P&L is stored gross (fees are booked separately). MEXC's deal profit is used when it
+        // matches the gross figure; if it matches gross − fee it already includes the fee, which is then
+        // added back so the fee is counted once.
+        const gross = D(realizedPnl(p.side as 'LONG' | 'SHORT', p.avgEntryPrice, price.toFixed(), vol.toFixed(), inst!.multiplier));
+        const profitRaw = ds.every((d) => d.profit !== null) ? ds.reduce((t, d) => t.plus(d.profit!), D(0)) : null;
+        const pnl = profitRaw === null ? gross : profitRaw.minus(gross).abs().lte(profitRaw.plus(fee).minus(gross).abs()) ? profitRaw : profitRaw.plus(fee);
         const stopSide = p.side === 'LONG' ? price.lte(p.stopPrice) : price.gte(p.stopPrice);
         const reason: ExitReason = own ? ((own.exitReason as ExitReason | null) ?? 'EXTERNAL_CLOSE') : !stopStillActive && stopSide ? 'STOP_LOSS' : 'EXTERNAL_CLOSE';
-        out.push({
-          fill: { fillId: `mexc:${orderId}`, contracts: vol.toFixed(), price: price.toDecimalPlaces(12).toFixed(), fee: fee.toDecimalPlaces(8).toFixed(), filledAt: new Date(Math.max(...ds.map((d) => d.timestamp))), realizedPnl: profit },
+        closes.push({
+          fill: { fillId: `mexc:${orderId}`, contracts: vol.toFixed(), price: price.toDecimalPlaces(12).toFixed(), fee: fee.toDecimalPlaces(8).toFixed(), filledAt: new Date(Math.max(...ds.map((d) => d.timestamp))), realizedPnl: pnl.toDecimalPlaces(8).toFixed() },
           reason,
           intentId: own?.id ?? null
         });
       }
-      return out;
+      if (!byOrder.size && !notes.length) {
+        notes.push(`MEXC deal history lists no unbooked closing fill for this position since ${new Date(since).toISOString()} (${deals.length} deals read${earlier ? `, ${earlier} older` : ''})`);
+      }
+      return { closes, notes };
     };
 
     /** Closes an open position MEXC no longer holds (fills pending). Exactly once per position. */
@@ -375,7 +421,7 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
         venue ??= readOnlyVenue(db, read, conn);
         const stops = await stopsFor(symbol);
         const stopRef = p.stopOrderRef?.replace(/^mexc-sl:/, '');
-        for (const c of await completeCloses(p, symbol, platformQty.minus(venueQty))) {
+        for (const c of (await completeCloses(p, symbol, platformQty.minus(venueQty))).closes) {
           const recorded = await db.transaction(async (tx) => {
             const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
             if (!locked || locked.status !== 'OPEN') return false;
@@ -469,7 +515,17 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
     for (const { p, symbol } of pendingClosed) {
       const pending = D(p.exchangePendingContracts ?? '0');
       if (pending.lte(0)) continue;
-      const candidates = await completeCloses(p, symbol, pending);
+      let found: Awaited<ReturnType<typeof completeCloses>>;
+      try {
+        found = await completeCloses(p, symbol, pending);
+      } catch (e) {
+        // History unavailable: values stay pending with the reason; nothing else on the account depends on it.
+        const reason = `MEXC history unavailable: ${(e as Error).message}`.slice(0, 300);
+        await db.update(positions).set({ exchangePendingReason: reason, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+        out.skipped.push({ positionId: p.id, symbol, reason });
+        continue;
+      }
+      const candidates = found.closes;
       for (const c of candidates) {
         const booked = await db.transaction(async (tx) => {
           const [locked] = await tx.select().from(positions).where(eq(positions.id, p.id)).for('update');
@@ -497,6 +553,7 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
               realizedPnlUsdt: D(locked.realizedPnlUsdt).plus(pnl).toFixed(),
               feesUsdt: D(locked.feesUsdt).plus(c.fill.fee).toFixed(),
               exchangePendingContracts: done ? null : remainingPending.toFixed(),
+              exchangePendingReason: null,
               ...(done ? { exchangeCloseState: null, closedAt: c.fill.filledAt, ...(c.reason !== 'EXTERNAL_CLOSE' && locked.closeReason === 'EXTERNAL_CLOSE' ? { closeReason: c.reason } : {}) } : {}),
               updatedAt: sql`now()`
             })
@@ -506,6 +563,10 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
         if (booked) out.exitsRecorded += 1;
       }
       const [after] = await db.select({ state: positions.exchangeCloseState, pending: positions.exchangePendingContracts }).from(positions).where(eq(positions.id, p.id));
+      if (after?.state === 'FILLS_PENDING') {
+        const reason = (found.notes.join('; ') || 'Closing fills listed by MEXC do not cover the closed quantity yet').slice(0, 500);
+        await db.update(positions).set({ exchangePendingReason: reason, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+      }
       if (candidates.length) out.closes.push({ positionId: p.id, symbol, result: after?.state ? 'FULL_FILLS_PENDING' : 'FILLS_BACKFILLED', platformContracts: '0', exchangeContracts: '0', ...(after?.pending ? { pendingContracts: D(after.pending).toFixed() } : {}) });
     }
 

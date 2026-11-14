@@ -45,7 +45,7 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
       {fillsPending && (
         <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink" data-testid="fills-pending">
           {t.status === 'CLOSED'
-            ? `Closed on MEXC${t.venueSync!.flatAt ? ` (seen ${fmt(t.venueSync!.flatAt)})` : ''} · fill details pending for ${t.venueSync!.pendingContracts ?? t.initialContracts} contracts. Remaining is 0 and the margin was released; exit price, fees and realized P&L are filled in from MEXC on a later sync.`
+            ? `Closed on MEXC${t.venueSync!.flatAt ? ` (seen ${fmt(t.venueSync!.flatAt)})` : ''} · fill details pending for ${t.venueSync!.pendingContracts ?? t.initialContracts} contracts. Remaining is 0 and the margin was released; exit price, fees and realized P&L are filled in from MEXC on a later sync.${t.venueSync!.pendingReason ? ` Why still pending: ${t.venueSync!.pendingReason}.` : ''}`
             : `MEXC now holds ${t.venueSync!.contracts} of these ${t.contracts} contracts · fill details pending; the next sync books them.`}
         </p>
       )}
@@ -66,11 +66,11 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
             <Row label="Leverage · margin mode" value={`${t.leverage}× · ${t.marginMode}`} />
             <Row label="Margin" value={`${t.marginUsdt} USDT`} />
             <Row label="Liquidation (estimate, isolated)" value={t.liquidationEstimate} />
-            <Row label="Realized P&L (gross)" value={signedUsdt(t.realizedPnlUsdt)} testId="realized-pnl" />
-            <Row label="Fees (open + close)" value={`${t.feesUsdt} USDT`} />
-            <Row label="Net realized (after fees)" value={signedUsdt(t.netRealizedUsdt)} testId="net-pnl" />
+            <Row label="Realized P&L (gross)" value={fillsPending && t.status === 'CLOSED' ? 'Pending' : signedUsdt(t.realizedPnlUsdt)} testId="realized-pnl" />
+            <Row label={fillsPending ? 'Recorded fees so far' : 'Fees (open + close)'} value={`${t.feesUsdt} USDT`} testId="fees" />
+            <Row label="Net realized (after fees)" value={fillsPending && t.status === 'CLOSED' ? 'Pending' : signedUsdt(t.netRealizedUsdt)} testId="net-pnl" />
             <Row label="Funding (simulated, booked)" value={t.funding.length ? signedUsdt(t.fundingUsdt) : 'None booked'} testId="funding-total" />
-            <Row label="Net realized incl. funding" value={signedUsdt(t.netRealizedWithFundingUsdt)} testId="net-with-funding" />
+            <Row label="Net realized incl. funding" value={fillsPending && t.status === 'CLOSED' ? 'Pending' : signedUsdt(t.netRealizedWithFundingUsdt)} testId="net-with-funding" />
             <Row
               label="Triggering signal"
               value={
@@ -85,7 +85,7 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
             />
             <Row label="Entry price data" value={`${t.marketData.label} · ${live ? 'fills from MEXC (Live)' : 'fills simulated (Paper)'}`} testId="market-source" />
             <Row label="Opened" value={fmt(t.openedAt)} />
-            {t.closedAt && <Row label="Closed" value={fmt(t.closedAt)} />}
+            {t.closedAt && <Row label={fillsPending ? 'Closed (detected by TrendPilot; MEXC time pending)' : 'Closed'} value={fmt(t.closedAt)} />}
           </dl>
         </section>
         <section className="rounded-xl border border-line bg-surface p-4 text-sm" data-testid="stop-detail">
