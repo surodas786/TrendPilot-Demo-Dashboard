@@ -49,8 +49,11 @@ export interface ExecutionVenue {
    */
   resizeProtection(stopOrderId: string, contracts: string, instrumentId: string): Promise<string>;
   cancelOrder(orderId: string, instrumentId: string): Promise<void>;
-  /** Net venue position for the account and contract. */
-  position(paperAccountId: string, instrumentId: string, tx?: Executor): Promise<{ side: string | null; contracts: string }>;
+  /**
+   * Venue position for the account and contract. With `side`, only that leg (Hedge keeps a Long and
+   * a Short separately; One-way reports zero for the other side). Without it, the net position.
+   */
+  position(paperAccountId: string, instrumentId: string, tx?: Executor, side?: 'LONG' | 'SHORT'): Promise<{ side: string | null; contracts: string }>;
   /** Venue stop order ID for a position's stored stop reference. */
   stopOrderIdFor(stopRef: string, tx?: Executor): Promise<string | null>;
 }

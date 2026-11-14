@@ -131,15 +131,24 @@ describe('serialized close request through the real flow', () => {
     expect(mx.positions.get('BTC_USDT:2')).toBeUndefined();
   });
 
-  it('margin mode and account mode are read from MEXC, not from TrendPilot (cross position, Hedge account)', async () => {
+  it('margin mode comes from the MEXC position (cross), not from TrendPilot', async () => {
     const p = await openLive('SHORT');
     mx.positions.get('BTC_USDT:2')!.openType = 2; // MEXC reports a cross position
-    mx.positionMode = 1; // account switched to Hedge after verification
     await direct.db.transaction((tx) => requestExit(tx, { position: p, reason: 'MANUAL_CLOSE', now: clock.now }));
     await drain(clock.now, direct.db);
-    const body = closeCreates()[0]!.body as Record<string, unknown>;
-    expect(body).toMatchObject({ side: 2, openType: 2, positionMode: 1 });
-    expect('reduceOnly' in body).toBe(false);
+    expect(closeCreates()[0]!.body).toMatchObject({ side: 2, openType: 2, positionMode: 2, reduceOnly: true });
+  });
+
+  it('MEXC switched to Hedge after One-way was verified: the close is not sent; the mismatch is surfaced and automatic exits pause', async () => {
+    const p = await openLive('SHORT');
+    mx.positionMode = 1;
+    await direct.db.transaction((tx) => requestExit(tx, { position: p, reason: 'MANUAL_CLOSE', now: clock.now }));
+    await drain(clock.now, direct.db);
+    expect(closeCreates()).toHaveLength(0);
+    const [close] = await closeIntents(p.id);
+    expect(close).toMatchObject({ state: 'REJECTED', stateReason: 'POSITION_MODE_MISMATCH:HEDGE' });
+    expect((await posById(p.id)).exitHaltReason).toMatch(/^POSITION_MODE_MISMATCH:HEDGE/);
+    expect([...mx.stops.values()].filter((s) => s.state === 1)).toHaveLength(1); // the stop stays
   });
 
   it('a stored MEXC position ID that MEXC no longer holds sends nothing (a newer position is never closed in its place)', async () => {

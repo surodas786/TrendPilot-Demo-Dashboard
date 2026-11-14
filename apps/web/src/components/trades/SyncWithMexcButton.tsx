@@ -29,7 +29,8 @@ const DRIFT_LABEL: Record<string, string> = {
   UNKNOWN_EXPOSURE: 'Position on MEXC not opened by TrendPilot',
   SIDE_MISMATCH: 'Opposite side open on MEXC',
   STOP_MISSING: 'Stop does not cover the position',
-  STOP_ORPHANED: 'Stop still active after the close'
+  STOP_ORPHANED: 'Stop still active after the close',
+  POSITION_MODE_CHANGED: 'Position mode changed on MEXC'
 };
 
 function summary(s: SyncResult['sync']): string {

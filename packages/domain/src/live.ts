@@ -36,7 +36,7 @@ export interface LiveControlState {
 export interface LiveConnectionState {
   ownerId: string;
   status: 'PENDING' | 'VERIFIED' | 'FAILED' | 'REVOKED' | string;
-  /** MEXC position mode read at the last check: 'ONE_WAY' is required for new entries. */
+  /** MEXC position mode read at the last check or sync: ONE_WAY or HEDGE (verified); null/unknown blocks entries. */
   positionMode: 'ONE_WAY' | 'HEDGE' | string | null;
   approved: boolean;
   liveEnabled: boolean;
@@ -83,7 +83,7 @@ export const LIVE_REFUSAL_TEXT: Record<LiveRefusal, string> = {
   LIVE_OWNERSHIP_MISMATCH: 'The exchange connection does not belong to this investor.',
   LIVE_CONNECTION_NOT_VERIFIED: 'The MEXC exchange connection has not been verified.',
   LIVE_POSITION_MODE:
-    'One-way position mode required: the MEXC account is not in One-way mode (Hedge mode is not supported for Live entries). Switch the MEXC Futures account to One-way, then press Save and check on the Live Trading page. Closing and protection are not affected.',
+    'The MEXC position mode is not verified (or changed since the last check). Press Save and check on the Live Trading page so TrendPilot reads One-way or Hedge from MEXC again. Closing and protection are not affected.',
   LIVE_ACCOUNT_NOT_APPROVED: 'The MEXC account has not been approved for Live trading by an administrator.',
   LIVE_NOT_ACTIVATED: 'Live trading is not activated on this account.',
   LIVE_ACCOUNT_HALTED: 'New Live entries are halted on this account. Protection and closing remain available.',
@@ -113,7 +113,7 @@ export function liveAccountBlockers(control: LiveControlState, conn: LiveConnect
   else if (conn.ownerId !== ownerId) out.push({ reason: 'LIVE_OWNERSHIP_MISMATCH' });
   else {
     if (conn.status !== 'VERIFIED') out.push({ reason: 'LIVE_CONNECTION_NOT_VERIFIED' });
-    else if (conn.positionMode !== 'ONE_WAY') out.push({ reason: 'LIVE_POSITION_MODE', detail: { positionMode: conn.positionMode ?? 'unknown' } });
+    else if (conn.positionMode !== 'ONE_WAY' && conn.positionMode !== 'HEDGE') out.push({ reason: 'LIVE_POSITION_MODE', detail: { positionMode: conn.positionMode ?? 'unknown' } });
     if (!conn.approved || !conn.limits) out.push({ reason: 'LIVE_ACCOUNT_NOT_APPROVED' });
     if (!conn.liveEnabled) out.push({ reason: 'LIVE_NOT_ACTIVATED' });
     if (conn.entriesHalted) out.push({ reason: 'LIVE_ACCOUNT_HALTED', detail: { haltReason: conn.haltReason ?? 'halted' } });

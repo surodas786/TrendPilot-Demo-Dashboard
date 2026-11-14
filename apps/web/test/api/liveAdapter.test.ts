@@ -194,26 +194,25 @@ describe('timeouts where MEXC may have accepted the order', () => {
   });
 });
 
-describe('Hedge position mode: no new entries; existing positions still close without adding exposure', () => {
+describe('Hedge position mode: entries in Hedge form; closes bound to their leg, never adding exposure', () => {
   const opens = () => createBodies().filter((b) => b.side === 1 || b.side === 3);
 
-  it('a connection verified in Hedge mode cannot open: refused before any order is sent', async () => {
+  it('a connection verified in Hedge mode opens with positionMode 1, the open side and the stop attached; no reduceOnly', async () => {
     mexc.positionMode = 1;
     await openFromAlert({ b: null, hooks: hooks(venue(MOCK_EVIDENCE, 'HEDGE')) });
-    expect(mexc.creates()).toHaveLength(0);
-    expect(mexc.calls).toHaveLength(0); // not even a lookup
     const [i] = await intentsOf(A);
-    expect(i).toMatchObject({ state: 'REJECTED', stateReason: 'POSITION_MODE_ONE_WAY_REQUIRED' });
-    expect(await positionsOf(A)).toHaveLength(0);
-    expect(await reconciled()).toBe(true); // reservation released
+    expect(createBodies()).toEqual([
+      { symbol: 'BTC_USDT', price: expect.any(String), vol: D(i!.contracts).toFixed(), leverage: 10, side: 1, type: 5, openType: 1, externalOid: i!.clientOrderId, stopLossPrice: D(i!.stopPrice).toFixed(), lossTrend: 2, positionMode: 1 }
+    ]);
+    expect((await positionsOf(A))[0]).toMatchObject({ side: 'LONG', protectionStatus: 'PROTECTED' });
   });
 
-  it('an account switched to Hedge at MEXC after it was verified: re-read right before sending, refused', async () => {
+  it('an account switched to Hedge at MEXC after One-way was verified: re-read right before sending, refused as a mismatch', async () => {
     mexc.positionMode = 1; // the stored connection still says One-way
     await openFromAlert({ b: null, hooks: hooks() });
     expect(mexc.calls.some((c) => c.method === 'GET' && c.path === '/api/v1/private/position/position_mode')).toBe(true);
     expect(mexc.creates()).toHaveLength(0);
-    expect((await intentsOf(A))[0]).toMatchObject({ state: 'REJECTED', stateReason: 'POSITION_MODE_ONE_WAY_REQUIRED' });
+    expect((await intentsOf(A))[0]).toMatchObject({ state: 'REJECTED', stateReason: 'POSITION_MODE_MISMATCH:HEDGE' });
     expect(await positionsOf(A)).toHaveLength(0);
   });
 

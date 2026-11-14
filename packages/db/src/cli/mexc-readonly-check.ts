@@ -40,7 +40,7 @@ const step = async (check: string, fn: () => Promise<string>) => {
 
 await step('position mode', async () => {
   const m = await t.request<number>('GET', '/api/v1/private/position/position_mode');
-  return m === 2 ? 'ONE_WAY (2)' : m === 1 ? 'HEDGE (1): closes rely on close sides 4/2; one-way exposure is enforced by the adapter' : `unknown (${m})`;
+  return m === 2 ? 'ONE_WAY (2)' : m === 1 ? 'HEDGE (1): orders use positionMode 1, sides 1/3 open, 4/2 close bound to the leg positionId, no reduceOnly' : `unknown (${m})`;
 });
 await step('balances', async () => normalizeAssets(await t.request('GET', '/api/v1/private/account/assets')).filter((a) => a.currency === 'USDT').map((a) => `USDT equity ${a.equity}, available ${a.available}, open ${a.availableOpen}`).join('; ') || 'no USDT asset');
 await step(`open positions (${symbol})`, async () => {

@@ -18,7 +18,10 @@ export function paperVenue(db: Db): ExecutionVenue {
       return stopOrderId;
     },
     cancelOrder: (orderId) => cancelOrder(db, orderId),
-    position: (paperAccountId, instrumentId, tx) => venuePosition(tx ?? db, paperAccountId, instrumentId),
+    position: async (paperAccountId, instrumentId, tx, side) => {
+      const net = await venuePosition(tx ?? db, paperAccountId, instrumentId);
+      return side && net.side !== side ? { side: null, contracts: '0' } : net;
+    },
     stopOrderIdFor: async (stopRef, tx) => {
       const [s] = await (tx ?? db).select({ id: simOrders.id }).from(simOrders).where(and(eq(simOrders.clientOrderId, stopRef), eq(simOrders.kind, 'STOP_MARKET')));
       return s?.id ?? null;
