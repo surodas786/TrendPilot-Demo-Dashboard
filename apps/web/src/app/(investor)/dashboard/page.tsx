@@ -6,7 +6,8 @@ import { PageContainer } from '@/components/layout/PageContainer';
 import { LiveQuotesPanel } from '@/components/market/LiveQuotesPanel';
 import { FUNDING_LABEL, fmtTime, pnlTone, usdtOrUnavailable } from '@/components/reporting/format';
 import { StatusPill } from '@/components/ui/StatusPill';
-import { ModeTabs, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
+import { connectionFor } from '@trendpilot/db';
 import { now } from '@/server/clock';
 import { requirePageRole } from '@/server/pageSession';
 
@@ -25,26 +26,32 @@ function Stat({ label, value, tone, testId, note }: { label: string; value: stri
 }
 
 /** UI-01 Dashboard: the signed-in investor's own totals for one reporting day, Paper or Live (never summed). */
-export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ date?: string; mode?: string }> }) {
+export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ date?: string; mode?: string; exchange?: string }> }) {
   const { user } = await requirePageRole('INVESTOR');
-  const { date, mode: m } = await searchParams;
+  const { date, mode: m, exchange: x } = await searchParams;
   const mode = viewModeOf(m);
+  const exchange = mode === 'LIVE' ? viewExchangeOf(x) : 'MEXC';
   const at = now();
-  const [d, quotes] = await Promise.all([
-    getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined, mode }),
-    listLatestQuotes(getDb(), at, { publishedOnly: true })
+  const [d, quotes, bitunix] = await Promise.all([
+    getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined, mode, exchange }),
+    listLatestQuotes(getDb(), at, { publishedOnly: true }),
+    connectionFor(getDb(), user.id, 'BITUNIX')
   ]);
+  const showExchanges = mode === 'LIVE' && !!bitunix && bitunix.status !== 'REVOKED';
+  const venue = exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
   const stale = d.freshness.stale;
 
   return (
     <PageContainer
       title="Dashboard"
-      description={mode === 'LIVE' ? 'Your own Live (MEXC) balance and results. Daily figures use confirmed MEXC fills and fees for the selected day.' : 'Your own paper balances and results. Daily figures use confirmed paper fills and booked funding for the selected day.'}
+      description={mode === 'LIVE' ? `Your own Live (${venue}) balance and results. Daily figures use confirmed ${venue} fills and fees for the selected day.` : 'Your own paper balances and results. Daily figures use confirmed paper fills and booked funding for the selected day.'}
       scope={`${user.name} · My Account · Reporting day ${d.day.date} (${d.timezone})`}
       actions={
         <form className="flex items-end gap-2" method="get">
+          {showExchanges && <ExchangeTabs exchange={exchange} path="/dashboard" params={{ date }} />}
           <ModeTabs mode={mode} path="/dashboard" params={{ date }} />
           {mode === 'LIVE' && <input type="hidden" name="mode" value="live" />}
+          {mode === 'LIVE' && exchange === 'BITUNIX' && <input type="hidden" name="exchange" value="bitunix" />}
           <label className="text-xs text-subtle">
             Reporting day
             <input type="date" name="date" defaultValue={d.day.date} className="mt-1 block rounded-lg border border-line bg-inset px-2 py-1.5 text-sm text-ink" />
@@ -115,7 +122,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-subtle">Funding (simulated)</dt>
+                <dt className="text-xs text-subtle">{mode === 'LIVE' ? 'Funding' : 'Funding (simulated)'}</dt>
                 <dd className={pnlTone(d.daily.funding.amountUsdt)} data-testid="daily-funding" data-status={d.daily.funding.status}>
                   {usdtOrUnavailable(d.daily.funding.amountUsdt, true)} · {FUNDING_LABEL[d.daily.funding.status]}
                 </dd>

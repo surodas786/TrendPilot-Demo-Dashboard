@@ -53,9 +53,11 @@ import { UncertainSubmissionError } from './mexcVenue';
 
 export const BITUNIX_PLACE_ORDER_PATH = '/api/v1/futures/trade/place_order';
 /** The only order-changing path the order transport may call. */
-export const BITUNIX_ORDER_PATHS: RegExp[] = [/^\/api\/v1\/futures\/trade\/place_order$/];
+export const BITUNIX_ORDER_PATHS: RegExp[] = [/^\/api\/v1\/futures\/trade\/place_order$/, /^\/api\/v1\/futures\/tpsl\/modify_order$/];
+/** Fixed-quantity TP/SL resize after a partial close (documented: modify by TP/SL orderId). */
+export const BITUNIX_TPSL_MODIFY_PATH = '/api/v1/futures/tpsl/modify_order';
 
-export type BitunixCapabilityId = 'BITUNIX_OPEN_WITH_ATTACHED_STOP' | 'BITUNIX_HEDGE_CLOSE_BY_POSITION';
+export type BitunixCapabilityId = 'BITUNIX_OPEN_WITH_ATTACHED_STOP' | 'BITUNIX_HEDGE_CLOSE_BY_POSITION' | 'BITUNIX_TPSL_RESIZE';
 
 const D = (v: Decimal.Value) => new Decimal(v);
 const num = (v: Decimal.Value) => new Decimal(v).toFixed();
@@ -444,9 +446,29 @@ export function bitunixVenue(o: BitunixVenueOptions): ExecutionVenue & { reconci
       // A whole-position TP/SL (no quantity) follows the leg's size: nothing to resize.
       if (s.slQty === null || D(s.slQty).eq(contracts)) return stopOrderId;
       void c;
-      // Modifying a TP/SL is an order-changing call this release does not make: the position is
-      // left for the existing protection check (UNPROTECTED → recovery policy).
-      throw new BitunixPrivateError('Bitunix TP/SL resize is not part of this release', 'REFUSED');
+      // Fixed quantity: modify THIS TP/SL (by its orderId) to the remaining size at the SAME trigger.
+      // Refused (existing recovery: UNPROTECTED) when unverified, or when it also carries a take
+      // profit (modifying would change that too), or when the result cannot be confirmed.
+      if (!verified('BITUNIX_TPSL_RESIZE')) throw new BitunixPrivateError('CAPABILITY_UNVERIFIED:BITUNIX_TPSL_RESIZE', 'REFUSED');
+      if (s.tpPrice !== null) throw new BitunixPrivateError('the TP/SL also carries a take profit: not modified', 'REFUSED');
+      if (s.slPrice === null) throw new BitunixPrivateError('the TP/SL has no stop price', 'REFUSED');
+      const qty = roundQtyDown(contracts, c.qtyStep);
+      if (D(qty).lte(0)) throw new BitunixPrivateError(`remaining ${contracts} is below one step`, 'REFUSED');
+      let newId = s.id;
+      try {
+        const res = await r.post<{ orderId?: string }>(BITUNIX_TPSL_MODIFY_PATH, { orderId: s.id, slPrice: num(s.slPrice), slStopType: s.slStopType ?? 'MARK_PRICE', slOrderType: 'MARKET', slQty: qty });
+        if (res?.orderId) newId = String(res.orderId);
+      } catch (e) {
+        const be = e instanceof BitunixPrivateError ? e : null;
+        if (be && !(be.kind === 'TIMEOUT' || be.kind === 'NETWORK' || (be.kind === 'HTTP' && (be.code ?? 0) >= 500))) throw e;
+        // Uncertain: confirmed (or not) by the re-read below.
+      }
+      for (let i = 0; i < confirm.attempts; i++) {
+        const now = (await readPendingTpsl(r)).items.find((t) => (t.id === newId || t.id === s.id) && t.slPrice !== null && D(t.slPrice).eq(s.slPrice!));
+        if (now && now.slQty !== null && D(now.slQty).eq(qty)) return stopRef(now.id);
+        if (i < confirm.attempts - 1) await sleep(confirm.delayMs);
+      }
+      throw new BitunixPrivateError(`TP/SL ${s.id} resize to ${qty} not confirmed by Bitunix`, 'API');
     },
 
     async cancelOrder() {

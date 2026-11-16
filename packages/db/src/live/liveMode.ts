@@ -666,6 +666,11 @@ const bumpControl = { revision: sql`${liveControl.revision} + 1`, updatedAt: sql
 export async function recordCapabilityEvidence(db: Db, adminId: string, capability: CapabilityId, state: CapabilityRecord['state'], evidence: string, correlationId = 'live'): Promise<LiveControlRow> {
   if (!['VERIFIED', 'PILOT_ACCEPTED', 'PENDING'].includes(state)) throw new DomainError(400, ErrorCode.VALIDATION_FAILED, 'state must be VERIFIED, PILOT_ACCEPTED or PENDING');
   if (!evidence?.trim()) throw new DomainError(400, ErrorCode.VALIDATION_FAILED, 'Evidence (a reference or note) is required.');
+  // A Bitunix capability is VERIFIED only on real-exchange evidence: the digest of a supervised
+  // pilot run (ops:bitunix-pilot --execute). PILOT_ACCEPTED stays available for the pilot itself.
+  if (state === 'VERIFIED' && capability.startsWith('BITUNIX_') && !/bitunix-pilot:[0-9a-f]{64}/.test(evidence)) {
+    throw new DomainError(400, ErrorCode.VALIDATION_FAILED, 'A Bitunix capability is VERIFIED only with real-exchange evidence: cite the pilot evidence reference (bitunix-pilot:<sha256>) printed by ops:bitunix-pilot --execute.');
+  }
   return db.transaction(async (tx) => {
     const c = await getLiveControl(tx);
     const ev = { ...(c.capabilityEvidence as Record<string, CapabilityRecord>), [capability]: { state, evidence: evidence.trim().slice(0, 500), by: adminId, at: new Date().toISOString() } };

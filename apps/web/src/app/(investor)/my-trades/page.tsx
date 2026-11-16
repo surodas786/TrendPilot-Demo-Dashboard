@@ -8,7 +8,7 @@ import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
 import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
 import { EXIT_LABEL, signedUsdt as signed, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, targetSummary, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
-import { ModeTabs, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,14 +28,25 @@ function ModeBadge({ mode }: { mode: string }) {
 const usdt = (v: string) => `${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT`;
 
 /** UI-04 My Trades: the signed-in investor's own positions and orders only, Paper or Live (separately). */
-export default async function MyTradesPage({ searchParams }: { searchParams: Promise<{ mode?: string }> }) {
+export default async function MyTradesPage({ searchParams }: { searchParams: Promise<{ mode?: string; exchange?: string }> }) {
   const { user } = await requirePageRole('INVESTOR');
-  const mode = viewModeOf((await searchParams).mode);
+  const sp = await searchParams;
+  const mode = viewModeOf(sp.mode);
   const live = mode === 'LIVE';
+  // Live is per exchange: its own account, positions, orders and connection.
+  const exchange = live ? viewExchangeOf(sp.exchange) : 'MEXC';
   const db = getDb();
-  const [account, allPositions, allOrders, connection] = await Promise.all([getMyPaperAccount(db, user.id, mode), listMyPositions(db, user.id), listMyOrders(db, user.id), live ? connectionFor(db, user.id) : null]);
-  const positions = allPositions.filter((p) => p.mode === mode);
-  const orders = allOrders.filter((o) => o.mode === mode);
+  const [account, allPositions, allOrders, connection, bitunix] = await Promise.all([
+    getMyPaperAccount(db, user.id, mode, exchange),
+    listMyPositions(db, user.id),
+    listMyOrders(db, user.id),
+    live ? connectionFor(db, user.id, exchange) : null,
+    connectionFor(db, user.id, 'BITUNIX')
+  ]);
+  const positions = allPositions.filter((p) => p.mode === mode && (!live || p.exchange === exchange));
+  const orders = allOrders.filter((o) => o.mode === mode && (!live || o.exchange === exchange));
+  const showExchanges = live && !!bitunix && bitunix.status !== 'REVOKED';
+  const venue = exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
   const open = positions.filter((p) => p.status !== 'CLOSED');
   const closed = positions.filter((p) => p.status === 'CLOSED');
   const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: user.timezone, dateStyle: 'medium', timeStyle: 'short' });
@@ -46,10 +57,15 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
       description={`${live ? 'Live' : 'Paper'} positions opened from shared signals with your own settings, each with its attached stop loss.`}
       scope={
         live
-          ? `${user.name} · My Account · Live — real orders and fills on your own MEXC Futures account.`
+          ? `${user.name} · My Account · Live — real orders and fills on your own ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} Futures account.`
           : `${user.name} · My Account · Paper — simulated orders and fills on fixture or public MEXC prices. No order reaches a real exchange.`
       }
-      actions={<ModeTabs mode={mode} path="/my-trades" />}
+      actions={
+        <div className="flex flex-wrap gap-2">
+          {showExchanges && <ExchangeTabs exchange={exchange} path="/my-trades" />}
+          <ModeTabs mode={mode} path="/my-trades" />
+        </div>
+      }
     >
       {live && connection && connection.status !== 'REVOKED' && (
         <SyncWithMexcButton
@@ -64,7 +80,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
       {account && (
         <dl className="grid gap-3 rounded-xl border border-line bg-surface p-4 text-sm sm:grid-cols-4" data-testid="paper-balance">
           <div>
-            <dt className="text-xs text-subtle">{live ? 'Live wallet (MEXC, synced)' : 'Paper wallet'}</dt>
+            <dt className="text-xs text-subtle">{live ? `Live wallet (${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'}, synced)` : 'Paper wallet'}</dt>
             <dd className="text-ink">{usdt(account.walletBalanceUsdt)}</dd>
           </div>
           <div>
@@ -86,7 +102,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
         <EmptyState
           icon={ListChecksIcon}
           title={live ? 'No open Live positions' : 'No open paper positions'}
-          body={live ? 'When Live is active and a shared signal passes every entry and Live check, the MEXC position and its stop appear here.' : 'When a shared signal passes all your entry checks, the simulated position and its stop appear here.'}
+          body={live ? 'When Live is active and a shared signal passes every entry and Live check, the exchange position and its stop appear here.' : 'When a shared signal passes all your entry checks, the simulated position and its stop appear here.'}
         />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-line bg-surface">
@@ -114,7 +130,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                     {p.venueSync?.closeState === 'FILLS_PENDING' && (
                       <span className="mt-1 block" data-testid="fills-pending">
                         <StatusPill tone="warn" icon={HourglassIcon}>
-                          {p.venueSync.contracts === '0' ? 'Closed on MEXC · fill details pending' : `MEXC holds ${p.venueSync.contracts} · fill details pending`}
+                          {p.venueSync.contracts === '0' ? `Closed on ${venue} · fill details pending` : `${venue} holds ${p.venueSync.contracts} · fill details pending`}
                         </StatusPill>
                       </span>
                     )}
@@ -229,7 +245,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
                       {p.venueSync?.closeState === 'FILLS_PENDING' && (
                         <span className="mt-1 block" data-testid="fills-pending">
                           <StatusPill tone="warn" icon={HourglassIcon}>
-                            Closed on MEXC · fill details pending
+                            Closed on {venue} · fill details pending
                           </StatusPill>
                           {p.venueSync.pendingReason && (
                             <span className="mt-0.5 block text-xs text-subtle" data-testid="pending-reason">
@@ -264,7 +280,7 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
             </table>
           </div>
           <p className="text-xs text-subtle">
-            Realized P&amp;L and released margin come from confirmed {live ? 'MEXC' : 'simulated'} fills{live ? ', including closes made directly on MEXC' : ''}. Fees include the opening and closing fees.
+            Realized P&amp;L and released margin come from confirmed {live ? venue : 'simulated'} fills{live ? `, including closes made directly on ${venue}` : ''}. Fees include the opening and closing fees.
           </p>
         </section>
       )}

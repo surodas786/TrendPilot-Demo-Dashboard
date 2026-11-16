@@ -73,10 +73,13 @@ async function priceFor(db: Executor, instrumentId: string, now: Date): Promise<
 }
 
 export type ReportMode = 'PAPER' | 'LIVE';
+/** Live is reported per exchange (each has its own account); Paper is always MEXC. */
+export type ReportExchange = 'MEXC' | 'BITUNIX';
 
 /** Open positions of the owner, priced from the newest quote at `now`. `mode` limits to Paper or Live. */
-export async function listMyHoldings(db: Executor, ownerId: string, now: Date, mode?: ReportMode): Promise<HoldingDto[]> {
-  const open = (await listMyPositions(db, ownerId)).filter((p) => p.status === 'OPEN' && (!mode || p.mode === mode));
+export async function listMyHoldings(db: Executor, ownerId: string, now: Date, mode?: ReportMode, exchange?: ReportExchange): Promise<HoldingDto[]> {
+  // `exchange` scopes Live to one exchange's account (a Live position trades on its contract's exchange).
+  const open = (await listMyPositions(db, ownerId)).filter((p) => p.status === 'OPEN' && (!mode || p.mode === mode) && (!exchange || p.exchange === exchange));
   if (!open.length) return [];
   const ids = open.map((p) => p.id);
   const meta = await db
@@ -105,7 +108,7 @@ export async function listMyHoldings(db: Executor, ownerId: string, now: Date, m
       liquidation:
         p.mode === 'LIVE'
           ? p.venueSync?.liquidationPrice
-            ? { price: p.venueSync.liquidationPrice, label: 'MEXC liquidation price (last sync)' }
+            ? { price: p.venueSync.liquidationPrice, label: `${p.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} liquidation price (as reported, last sync)` }
             : null
           : p.marginMode === 'ISOLATED' && p.liquidationEstimate
             ? { price: p.liquidationEstimate, label: 'Estimated (isolated margin, paper simulator)' }
@@ -119,6 +122,8 @@ export async function listMyHoldings(db: Executor, ownerId: string, now: Date, m
 
 export interface DashboardDto {
   mode: ReportMode;
+  /** The account reported: MEXC (Paper, MEXC Live) or BITUNIX (Bitunix Live). */
+  exchange: ReportExchange;
   label: string;
   timezone: string;
   day: { date: string; from: string; to: string; isToday: boolean };
@@ -226,18 +231,23 @@ async function fundingDue(db: Executor, ownerId: string, from: Date, to: Date, n
 }
 
 /** Dashboard for one mode. Paper and Live are reported separately and never summed. */
-export async function getMyDashboard(db: Executor, user: { id: string; timezone: string }, o: { now: Date; date?: string; mode?: ReportMode }): Promise<DashboardDto> {
+export async function getMyDashboard(db: Executor, user: { id: string; timezone: string }, o: { now: Date; date?: string; mode?: ReportMode; exchange?: ReportExchange }): Promise<DashboardDto> {
   const tz = user.timezone || 'Asia/Dhaka';
   const today = localDate(o.now, tz);
   const w = reportingDayWindow(o.date ?? today, tz);
   const ownerId = user.id;
   const mode: ReportMode = o.mode ?? 'PAPER';
-  // Reporting covers the MEXC account (Paper, and MEXC Live); Bitunix Live reporting is a later step.
-  const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, 'MEXC')));
+  // One account per mode AND exchange: Paper is MEXC; Live is the MEXC or the Bitunix account.
+  const exchange: ReportExchange = mode === 'LIVE' && o.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+  const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)));
   // No account for this mode yet: every figure below is zero (an impossible ID matches nothing).
   const acctId = acct?.id ?? '00000000-0000-0000-0000-000000000000';
 
-  const [account, holdings, reconciliation] = await Promise.all([getMyPaperAccount(db, ownerId, mode), listMyHoldings(db, ownerId, o.now, mode), reconcileMyAccount(db, ownerId, mode)]);
+  const [account, holdings, reconciliation] = await Promise.all([
+    getMyPaperAccount(db, ownerId, mode, exchange),
+    listMyHoldings(db, ownerId, o.now, mode, mode === 'LIVE' ? exchange : undefined),
+    reconcileMyAccount(db, ownerId, mode, exchange)
+  ]);
 
   const [ex] = await db
     .select({
@@ -277,7 +287,13 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
 
   return {
     mode,
-    label: mode === 'LIVE' ? 'Live — your MEXC Futures account: real fills, fees and balance (synced from MEXC).' : 'Paper — simulated balance and fills.',
+    exchange,
+    label:
+      mode === 'LIVE'
+        ? exchange === 'BITUNIX'
+          ? 'Live — your Bitunix Futures account: real fills, fees and balance (synced from Bitunix).'
+          : 'Live — your MEXC Futures account: real fills, fees and balance (synced from MEXC).'
+        : 'Paper — simulated balance and fills.',
     timezone: tz,
     day: { date: w.date, from: w.from.toISOString(), to: w.to.toISOString(), isToday: w.date === today },
     asOf: o.now.toISOString(),
@@ -297,9 +313,16 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
       entryFeesUsdt: s(en!.fee),
       exitFeesUsdt: s(ex!.fee),
       funding: {
-        amountUsdt: status === 'UNAVAILABLE' ? null : s(f.amount),
-        status,
-        statusText: mode === 'LIVE' ? 'Live funding is charged by MEXC and included in the synced balance; see each position for its cumulative funding.' : FUNDING_STATUS_TEXT[status],
+        // Bitunix publishes no account funding-settlement records (only a per-position total), so the
+        // day's funding is unknown, never estimated from public funding rates.
+        amountUsdt: status === 'UNAVAILABLE' || (mode === 'LIVE' && exchange === 'BITUNIX') ? null : s(f.amount),
+        status: mode === 'LIVE' && exchange === 'BITUNIX' ? 'UNAVAILABLE' : status,
+        statusText:
+          mode === 'LIVE'
+            ? exchange === 'BITUNIX'
+              ? 'Unknown for the day: Bitunix reports funding only as a running total per position (no settlement records). It is charged by Bitunix and included in the synced balance; see each position for its total.'
+              : 'Live funding is charged by MEXC and included in the synced balance; see each position for its cumulative funding.'
+            : FUNDING_STATUS_TEXT[status],
         settlementsDue: f.due,
         settlementsBooked: f.booked
       },

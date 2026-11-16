@@ -138,6 +138,21 @@ export function PositionChart({ positionId, livePrice, liveAt }: { positionId: s
         <div ref={box} className="h-[340px] w-full" />
       )}
       {data && !data.candles.length && !data.quoteLine.length && <p className="mt-2 text-xs text-subtle">No stored candles or prices for this contract yet.</p>}
+      {data && (
+        <p className="mt-2 text-xs text-subtle" data-testid="chart-tradingview">
+          {data.tradingView ? `Signal chart: TradingView ${data.tradingView.source} · ${data.tradingView.interval}m` : 'No TradingView signal is linked to this position.'}
+        </p>
+      )}
+      {data && (data.protection.status === 'MISSING' || data.protection.status === 'UNCONFIRMED') && (
+        <p className="mt-2 rounded-lg bg-loss/10 px-3 py-2 text-xs text-loss" data-testid="chart-protection" data-status={data.protection.status}>
+          Protection not confirmed by the exchange: {data.protection.text}
+        </p>
+      )}
+      {data && data.protection.status === 'CONFIRMED' && (
+        <p className="mt-2 text-xs text-gain" data-testid="chart-protection" data-status="CONFIRMED">
+          {data.protection.text}
+        </p>
+      )}
       <p className="mt-2 text-xs text-subtle">Candles and prices come from TrendPilot&apos;s market feed for this exact contract. Charting: TradingView Lightweight Charts™.</p>
     </section>
   );

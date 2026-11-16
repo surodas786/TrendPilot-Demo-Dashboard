@@ -190,14 +190,46 @@ responses captured from the live public API on the same day.
 | Public Bitunix prices and candles in the local feed (`BITUNIX_PUBLIC_WS=on`) | **live Bitunix**, local dev DB | Pass |
 | Signed REST, private WebSocket, real orders | live | **Pending**: no read-only key; orders mocked by design |
 
+## Step 5: investor reporting, P&L and funding, resize, pilot preparation
+
+| Area | Code | Notes |
+| --- | --- | --- |
+| Scope | `listMyHoldings(…, mode, exchange)`, `getMyDashboard({ exchange })`, `getMyPaperAccount(…, exchange)`, `OrderDto.exchange` | Live is reported per exchange: each has its own account. `?exchange=bitunix` selects Bitunix Live on `/dashboard`, `/my-holdings`, `/my-trades`, `/v1/me/dashboard`, `/v1/me/holdings` (unknown → 422). The default is MEXC, so existing links, screens and API answers are unchanged. Paper is always MEXC. A **MEXC / Bitunix** switch (`ExchangeTabs`) appears next to Paper / Live when the investor has a Bitunix connection, and it keeps `mode=live` and the date. Ownership checks are unchanged: another investor's position is 404. |
+| Holdings / trades | `linkBitunixPositions` → `positions.exchange_*` | Each sync writes Bitunix's own figures for linked legs: liquidation price (estimated by Bitunix, open legs only), running funding total, size and sync time. On close it writes the history's settled funding (`backfillClosedFacts` covers positions closed before the mirror confirmed). Labels follow the position's exchange (`Closed on Bitunix · fill details pending`, `Bitunix liquidation price (as reported, last sync)`). |
+| Both Hedge legs | `listBitunixExchangeOnlyLegs` | One TrendPilot position per account, contract and mode (DB index), so an opposite leg opened on Bitunix is listed read-only under **Other Bitunix legs (not managed by TrendPilot)** with side, size, entry, liquidation and funding total. TrendPilot never acts on it. |
+| Chart | `getMyHoldingChart` → `tradingView`, `protection` | Bars come from TrendPilot's candles for the exact Bitunix contract, at the mapped TradingView chart's interval. The panel names the TradingView source (`EXCHANGE:SYMBOL · 15m`). Lines show the actual average entry and, when Bitunix lists a stop for this leg (pending TP/SL in the last sync, matched by positionId) and the position is PROTECTED, **Exchange stop (confirmed)** at Bitunix's trigger. Otherwise the line is **Planned stop (not confirmed)** with a red notice (`MISSING` / `UNCONFIRMED`). |
+| P&L and fees | existing exits/fills + `groupByOrder` | Per-trade and daily P&L use the reconciled Bitunix fills: entry fills, and exits keyed `bitunix:<orderId>` with `realizedPNL` (docs: *excludes funding and transaction fee*, so it is gross) and `fee` (positive = paid, as in every example; **sign to confirm in the pilot**). Fills are booked at the trade's `ctime`, so the investor's reporting timezone decides the day. Each trade counts once: `readHistoryTrades` and `groupByOrder` drop a repeated `tradeId`, because offset paging repeats a row when a new trade arrives mid-read, and exits are unique per fill key. |
+| Funding | dashboard `daily.funding` | Bitunix has **no** account bill or funding-settlement endpoint (full API navigation checked 2026-11-16). Funding exists only as a running total per position (`funding`, *total funding fee during the position*, sign undocumented, example −0.2). Bitunix Live daily funding is therefore `UNAVAILABLE`, the amount is `null` (shown as *Unknown for the day*), and net daily P&L excludes it. The per-position total is shown as reported. Public funding rates (`market/get_funding_rate_history`) are not used for paid or received amounts. |
+| TP/SL resize | `bitunixVenue.resizeProtection`, capability `BITUNIX_TPSL_RESIZE` | Documented `POST /api/v1/futures/tpsl/modify_order` targets one TP/SL by `orderId` with `slQty`. TrendPilot modifies **its own** fixed-quantity stop to the remaining size at the **same** trigger and stop type, then re-reads the pending TP/SL to confirm. A timeout is resolved by that re-read, never resent. The resize is refused (existing recovery: UNPROTECTED → protection-failure policy) while the capability is unverified (default), when the TP/SL also carries a take profit, or when the re-read does not show the new size. A whole-position stop (no `slQty`) follows the leg: nothing is sent. |
+| Evidence rule | `recordCapabilityEvidence` | A `BITUNIX_*` capability can be recorded **VERIFIED** only with a pilot evidence reference `bitunix-pilot:<sha256>`. `PILOT_ACCEPTED` and `PENDING` are unchanged. |
+| Pilot | `bitunixPilot.ts`, `npm run ops:bitunix-pilot` | See [BITUNIX_PILOT_RUNBOOK.md](BITUNIX_PILOT_RUNBOOK.md). The dry run (default) checks every precondition and prints the four exact payloads. `--execute` needs the production order-transport gate. |
+
+### Step 5 verification status
+
+| Check | How | Result |
+| --- | --- | --- |
+| Bitunix Live position only in Bitunix Live scope; not MEXC Live, not Paper, not investor B; API `exchange` param (422 on unknown) | DB e2e, mocked exchange | Pass |
+| Liquidation and funding total as Bitunix reports them; replaced, not summed, across syncs | e2e | Pass |
+| Both Hedge legs: TrendPilot long + Bitunix-opened short listed separately; the long untouched | e2e | Pass |
+| Chart: TradingView source, entry, confirmed exchange stop; missing stop → *not confirmed*; B gets 404 | e2e | Pass |
+| Partial close on Bitunix booked once with its fee, at the fill time; Dhaka vs UTC day boundary | e2e | Pass |
+| Remainder closed on Bitunix: once, settled funding total, closed lists per exchange | e2e | Pass |
+| Daily funding `UNAVAILABLE`/`null` for Bitunix; MEXC dashboard unchanged | e2e | Pass |
+| Same trade on two pages / repeated syncs: fee and quantity once (fails without the dedupe) | e2e + unit | Pass |
+| Resize: unverified refused; verified modify by orderId at same trigger; timeout confirmed by re-read; ignored modify not trusted; TP+SL not modified | unit (mock) | Pass |
+| Pilot: plan (smallest qty, exposure cap), four paths, stops, clientId lookups, other leg untouched, stop at first failure, sanitized evidence | unit (mock) | Pass |
+| VERIFIED needs `bitunix-pilot:` evidence | e2e | Pass |
+| Investor screens (fixture data, local dev DB) | local app | Pass |
+| Signed REST, private WebSocket, real orders, fee/funding signs, resize on Bitunix | live | **Pending**: no read-only key configured; orders mocked by design |
+
 ## Remaining work
 
 | Area | What remains |
 | --- | --- |
-| Live verification | Signed REST snapshot and private WebSocket with a read-only key; a supervised smallest-size pilot to record the two Bitunix capabilities. The pilot must confirm close long = `BUY`+`CLOSE`, how the attached TP/SL is listed, fill visibility delay, `clientId` limits and the private-login success frame. |
-| TP/SL resize | A fixed-quantity Bitunix TP/SL cannot be modified (no order-changing TP/SL path); after a partial close such a position is UNPROTECTED (existing recovery policy). |
-| Reporting | Holdings, trades and reconciliation views read the MEXC account; the Bitunix Live account needs its own views (liquidation price, fees and funding from Bitunix records). |
-| Funding | Bitunix funding history is not read yet; Paper/MEXC funding is unchanged. |
+| Read-only live check | `ops:bitunix-check` with a read-only key: signed REST snapshot and private WebSocket session (the success frame of the private login is still unconfirmed). |
+| Supervised pilot | Run `ops:bitunix-pilot` (runbook). It confirms close long = `BUY`+`CLOSE`, how the attached stop is listed (position vs fixed-quantity TP/SL), fill visibility delay, `clientId` lookups, and the sign of `fee` and `funding`. Then record the capabilities with the evidence reference. |
+| TP/SL resize | Implemented behind `BITUNIX_TPSL_RESIZE` (unverified). It needs pilot evidence that modify keeps the order and applies atomically. Until then a fixed-quantity stop after a partial close follows the existing recovery. |
+| Funding | Daily Bitunix funding stays unknown unless Bitunix publishes settlement records. |
 
 Docs: [sign](https://www.bitunix.com/api-docs/futures/common/sign.html) ·
 [position mode](https://www.bitunix.com/api-docs/futures/account/get_position_mode.html) ·
