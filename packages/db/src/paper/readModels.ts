@@ -26,8 +26,8 @@ export interface PaperAccountDto {
 }
 
 /** The investor's account for one mode. Paper and Live balances are always separate. */
-export async function getMyPaperAccount(db: Executor, ownerId: string, mode: 'PAPER' | 'LIVE' = 'PAPER'): Promise<PaperAccountDto | null> {
-  const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode)));
+export async function getMyPaperAccount(db: Executor, ownerId: string, mode: 'PAPER' | 'LIVE' = 'PAPER', exchange: 'MEXC' | 'BITUNIX' = 'MEXC'): Promise<PaperAccountDto | null> {
+  const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)));
   if (!a) return null;
   return {
     mode,

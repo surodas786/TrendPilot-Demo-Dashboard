@@ -28,6 +28,8 @@ import type { ExecutionVenue } from '../venue/types';
 import type { CapabilityId, CapabilityState } from './capabilities';
 import { MexcHttpTransport, MexcPrivateError, MEXC_PRIVATE_DEFAULT_BASE_URL, normalizeAssets, normalizePositions, normalizeStops, type MexcCredentials, type MexcRequester } from './mexcPrivate';
 import { mexcVenue, POSITION_MODE_MISMATCH, positionModeOf, UncertainSubmissionError } from './mexcVenue';
+import { bitunixCredentialsOf } from './bitunixConnection';
+import { BitunixOrderTransport, bitunixVenue, type BitunixOrderRequester } from './bitunixOrders';
 
 /**
  * Live mode (OPS-01/02/03): exchange connections, the platform switch, the contract allowlist,
@@ -49,6 +51,8 @@ const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 
  */
 export interface LiveTestSeam {
   requesterFor: (conn: ConnectionRow, purpose: 'READ_ONLY' | 'ORDERS') => MexcRequester;
+  /** Bitunix order + read access for a Bitunix connection (tests only). */
+  bitunixRequesterFor?: (conn: ConnectionRow) => BitunixOrderRequester;
   transportEnabled?: boolean;
   confirm?: { attempts: number; delayMs: number };
 }
@@ -113,7 +117,7 @@ export async function connectionFor(db: Executor, ownerId: string, exchange: Exc
   return c ?? null;
 }
 
-/** Live trading exists only for MEXC in this build; other exchanges are read-only connections. */
+/** Default exchange of every pre-Bitunix caller (MEXC). Bitunix Live paths pass their exchange explicitly. */
 export const LIVE_EXCHANGE: ExchangeId = 'MEXC';
 
 export interface LiveEligibility {
@@ -132,8 +136,9 @@ export async function liveEntryEligibility(
   r: { ownerId: string; instrumentId: string; contracts: string; price: string; leverage: number; openContracts: string }
 ): Promise<LiveEligibility> {
   const control = await getLiveControl(tx);
-  const conn = await connectionFor(tx, r.ownerId);
-  const [inst] = await tx.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier }).from(instruments).where(eq(instruments.id, r.instrumentId));
+  const [inst] = await tx.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier, exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, r.instrumentId));
+  // The connection of the exchange the contract trades on (MEXC, or the investor's Bitunix key).
+  const conn = await connectionFor(tx, r.ownerId, inst?.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
   const state = controlState(control);
   const cs = conn ? connectionState(conn) : null;
   const verdict = checkLiveEntry(state, cs, {
@@ -199,10 +204,27 @@ export async function resolveAccountVenue(
   if (!acct || acct.mode !== 'LIVE') throw new LiveVenueUnavailable('the order does not belong to a Live account');
   // IAM-02 in the worker: the order's owner must own the account (and so the connection).
   if (scope.ownerId && acct.ownerId !== scope.ownerId) throw new LiveVenueUnavailable('ownership mismatch');
-  const conn = await connectionFor(db, acct.ownerId);
+  const exchange: ExchangeId = acct.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+  const conn = await connectionFor(db, acct.ownerId, exchange);
   if (!conn || conn.status === 'REVOKED' || !conn.apiKeySealed) throw new LiveVenueUnavailable('no exchange connection');
   if (!conn.positionMode) throw new LiveVenueUnavailable('position mode not verified');
   const control = await getLiveControl(db);
+  if (exchange === 'BITUNIX') {
+    // Bitunix: the order transport is opened with THIS connection's key; it refuses unless
+    // LIVE_ORDER_TRANSPORT=enabled in production (same deployment gate as MEXC).
+    const requester = seam?.bitunixRequesterFor ? seam.bitunixRequesterFor(conn) : new BitunixOrderTransport({ credentials: bitunixCredentialsOf(conn), baseUrl: env.BITUNIX_PRIVATE_BASE_URL || undefined, env });
+    const inner = bitunixVenue({
+      requester,
+      contractFor: async (instrumentId) => {
+        const [i] = await db.select().from(instruments).where(eq(instruments.id, instrumentId));
+        if (!i || i.exchange !== 'BITUNIX' || !i.exchangeSymbol) throw new LiveVenueUnavailable(`instrument ${instrumentId} is not a Bitunix contract`);
+        return { symbol: i.exchangeSymbol, qtyStep: i.qtyStep, minQty: i.minQty, maxQty: i.maxQty, priceTick: i.priceTick, takerFeeRate: i.takerFeeRate };
+      },
+      capabilities: capabilityStateOf(control),
+      ...(seam?.confirm ? { confirm: seam.confirm, sleep: async () => {} } : {})
+    });
+    return liveGuardedVenue(db, inner, { paperAccountId: acct.id, ownerId: acct.ownerId, env, exchange });
+  }
   const inner = mexcVenue({
     requester: requesterFor(conn, 'ORDERS', env), // refuses unless LIVE_ORDER_TRANSPORT=enabled in production
     symbolFor: async (instrumentId) => {
@@ -220,11 +242,11 @@ export async function resolveAccountVenue(
 /* ───────────────────────── Live guard ───────────────────────── */
 
 /** Halts new Live entries for one connection (operator, investor or the system). Closes keep working. */
-export async function haltConnectionEntries(db: Executor, ownerId: string, reason: string, actorUserId: string | null, correlationId = 'live'): Promise<void> {
+export async function haltConnectionEntries(db: Executor, ownerId: string, reason: string, actorUserId: string | null, correlationId = 'live', exchange: ExchangeId = LIVE_EXCHANGE): Promise<void> {
   const rows = await db
     .update(exchangeConnections)
     .set({ entriesHalted: true, haltReason: reason.slice(0, 200), haltedAt: new Date(), revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
-    .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, LIVE_EXCHANGE), eq(exchangeConnections.entriesHalted, false)))
+    .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, exchange), eq(exchangeConnections.entriesHalted, false)))
     .returning({ id: exchangeConnections.id });
   if (rows[0]) await recordAudit(db, { actorUserId, action: 'LIVE_ENTRIES_HALT', targetType: 'exchange_connection', targetId: rows[0].id, result: 'SUCCESS', metadata: { reason }, correlationId });
 }
@@ -237,19 +259,22 @@ export async function haltConnectionEntries(db: Executor, ownerId: string, reaso
  * protection and closing are never blocked. An uncertain submission or an unverified stop halts
  * new entries on the account automatically.
  */
-export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccountId: string; ownerId: string; env?: Record<string, string | undefined> }): ExecutionVenue {
-  const halt = (reason: string) => haltConnectionEntries(db, o.ownerId, reason, null, 'live-guard');
+export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccountId: string; ownerId: string; env?: Record<string, string | undefined>; exchange?: ExchangeId }): ExecutionVenue {
+  const exchange = o.exchange ?? LIVE_EXCHANGE;
+  const halt = (reason: string) => haltConnectionEntries(db, o.ownerId, reason, null, 'live-guard', exchange);
   return {
     ...inner,
     async placeOpeningOrderWithStop(r) {
       const reject = (reason: string) => ({ status: 'REJECTED' as const, orderId: '', clientOrderId: r.clientOrderId, reason });
       if (r.paperAccountId !== o.paperAccountId) return reject('LIVE_REFUSED:LIVE_OWNERSHIP_MISMATCH');
       const control = await getLiveControl(db);
-      const conn = await connectionFor(db, o.ownerId);
-      const [inst] = await db.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier }).from(instruments).where(eq(instruments.id, r.instrumentId));
+      const conn = await connectionFor(db, o.ownerId, exchange);
+      const [inst] = await db.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier, exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, r.instrumentId));
+      if ((inst?.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC') !== exchange) return reject('LIVE_REFUSED:LIVE_EXCHANGE_MISMATCH');
       const gate = liveAccountGate(controlState(control, o.env), conn ? connectionState(conn) : null, o.ownerId, !!inst?.liveAllowed);
       if (!gate.ok) return reject(`LIVE_REFUSED:${gate.reason}`);
-      const held = await inner.position(r.paperAccountId, r.instrumentId);
+      // Hedge legs on Bitunix are separate positions: the limits count the leg being opened.
+      const held = await inner.position(r.paperAccountId, r.instrumentId, undefined, inner.kind === 'BITUNIX_PRIVATE' ? r.side : undefined);
       const verdict = checkLiveEntry(controlState(control, o.env), connectionState(conn!), {
         ownerId: o.ownerId,
         contractLiveAllowed: !!inst?.liveAllowed,
@@ -274,8 +299,8 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
         await db
           .update(exchangeConnections)
           .set({ positionMode: now === 'ONE_WAY' || now === 'HEDGE' ? now : null, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
-          .where(and(eq(exchangeConnections.ownerId, o.ownerId), eq(exchangeConnections.exchange, LIVE_EXCHANGE)));
-        await halt(`POSITION_MODE ${r.clientOrderId}: MEXC reports ${now ?? 'an unknown mode'}, TrendPilot verified another`);
+          .where(and(eq(exchangeConnections.ownerId, o.ownerId), eq(exchangeConnections.exchange, exchange)));
+        await halt(`POSITION_MODE ${r.clientOrderId}: ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} reports ${now ?? 'an unknown mode'}, TrendPilot ${exchange === 'BITUNIX' ? 'requires HEDGE' : 'verified another'}`);
         return { ...result, reason: `LIVE_REFUSED:LIVE_POSITION_MODE` };
       }
       if (result.status === 'FILLED') {
@@ -294,12 +319,19 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
  * wallet follows MEXC's cash balance (equity − unrealized) through an EXCHANGE_BALANCE_SYNC ledger
  * row, and equity / available-to-open are stored for display and the entry margin check.
  */
-export async function applyExchangeBalance(db: Db, ownerId: string, usdt: { equity: string; availableOpen: string; unrealized: string }, refId: string, now: Date): Promise<{ accountId: string; walletAdjustment: string }> {
+export async function applyExchangeBalance(
+  db: Db,
+  ownerId: string,
+  usdt: { equity: string; availableOpen: string; unrealized: string },
+  refId: string,
+  now: Date,
+  exchange: ExchangeId = LIVE_EXCHANGE
+): Promise<{ accountId: string; walletAdjustment: string }> {
   return db.transaction(async (tx) => {
-    const a = await lockPaperAccount(tx, ownerId, 'LIVE');
+    const a = await lockPaperAccount(tx, ownerId, 'LIVE', exchange);
     const delta = new Decimal(usdt.equity).minus(usdt.unrealized).minus(a.walletBalance);
     if (!delta.isZero()) {
-      await book(tx, a, [{ kind: 'EXCHANGE_BALANCE_SYNC', bucket: 'WALLET', amount: delta.toFixed(), refType: 'exchange_sync', refId, memo: 'Wallet matched to the MEXC balance (fees, funding and P&L as booked by MEXC)' }]);
+      await book(tx, a, [{ kind: 'EXCHANGE_BALANCE_SYNC', bucket: 'WALLET', amount: delta.toFixed(), refType: 'exchange_sync', refId, memo: `Wallet matched to the ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} balance (fees, funding and P&L as booked by the exchange)` }]);
     }
     await tx.update(paperAccounts).set({ exchangeEquity: usdt.equity, exchangeAvailable: usdt.availableOpen, exchangeSyncedAt: now, updatedAt: sql`now()` }).where(eq(paperAccounts.id, a.id));
     return { accountId: a.id, walletAdjustment: delta.toFixed() };
@@ -356,8 +388,8 @@ export const connectionDto = (c: ConnectionRow): ConnectionDto => ({
   revision: c.revision
 });
 
-async function liveExposure(db: Executor, ownerId: string): Promise<{ openPositions: number; unresolved: number }> {
-  const accts = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, 'LIVE')));
+async function liveExposure(db: Executor, ownerId: string, exchange: ExchangeId = LIVE_EXCHANGE): Promise<{ openPositions: number; unresolved: number }> {
+  const accts = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, 'LIVE'), eq(paperAccounts.exchange, exchange)));
   if (!accts.length) return { openPositions: 0, unresolved: 0 };
   const ids = accts.map((a) => a.id);
   const open = await db.select({ id: positions.id }).from(positions).where(and(inArray(positions.paperAccountId, ids), eq(positions.status, 'OPEN')));
@@ -477,7 +509,7 @@ export async function saveConnection(
 export async function revokeConnection(db: Db, ownerId: string, correlationId = 'live', exchange: ExchangeId = LIVE_EXCHANGE): Promise<ConnectionRow> {
   const conn = await connectionFor(db, ownerId, exchange);
   if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'No exchange connection is set up.');
-  const exposure = exchange === LIVE_EXCHANGE ? await liveExposure(db, ownerId) : { openPositions: 0, unresolved: 0 };
+  const exposure = await liveExposure(db, ownerId, exchange);
   if (exposure.openPositions || exposure.unresolved) throw new DomainError(409, ErrorCode.CONFLICT, 'Close your Live positions and wait for open Live orders to finish before removing the API key.');
   const [u] = await db
     .update(exchangeConnections)
@@ -489,17 +521,18 @@ export async function revokeConnection(db: Db, ownerId: string, correlationId = 
 }
 
 /** The investor switches Live trading on or off for their own account. Off by default. */
-export async function setLiveActivation(db: Db, ownerId: string, enabled: boolean, correlationId = 'live'): Promise<ConnectionRow> {
+export async function setLiveActivation(db: Db, ownerId: string, enabled: boolean, correlationId = 'live', exchange: ExchangeId = LIVE_EXCHANGE): Promise<ConnectionRow> {
   return db.transaction(async (tx) => {
     const [conn] = await tx
       .select()
       .from(exchangeConnections)
-      .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, LIVE_EXCHANGE)))
+      .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, exchange)))
       .for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'No exchange connection is set up.');
     if (enabled) {
       if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Verify the exchange connection first.');
-      if (!conn.approvedAt) throw new DomainError(409, ErrorCode.CONFLICT, 'An administrator must approve this MEXC account and set its limits first.');
+      if (!conn.approvedAt) throw new DomainError(409, ErrorCode.CONFLICT, `An administrator must approve this ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account and set its limits first.`);
+      if (exchange === 'BITUNIX' && conn.positionMode !== 'HEDGE') throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix Live trading needs the account in Hedge mode (Bitunix reports another mode). Change it in Bitunix, then check the connection again.');
     }
     const [u] = await tx
       .update(exchangeConnections)
@@ -530,7 +563,6 @@ export async function approveConnection(db: Db, adminId: string, connectionId: s
   return db.transaction(async (tx) => {
     const [conn] = await tx.select().from(exchangeConnections).where(eq(exchangeConnections.id, connectionId)).for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
-    if (conn.exchange !== LIVE_EXCHANGE) throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix connections are read-only in this release; they cannot be approved for Live trading.');
     if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Only a verified connection can be approved.');
     const before = limitsOf(conn);
     const [u] = await tx
@@ -570,7 +602,7 @@ export async function resumeConnectionEntries(db: Db, adminId: string, connectio
   return db.transaction(async (tx) => {
     const [conn] = await tx.select().from(exchangeConnections).where(eq(exchangeConnections.id, connectionId)).for('update');
     if (!conn) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
-    const accts = await tx.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, conn.ownerId), eq(paperAccounts.mode, 'LIVE')));
+    const accts = await tx.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, conn.ownerId), eq(paperAccounts.mode, 'LIVE'), eq(paperAccounts.exchange, conn.exchange)));
     if (accts.length) {
       const ids = accts.map((a) => a.id);
       const busy = await tx.select({ id: orderIntents.id }).from(orderIntents).where(and(inArray(orderIntents.paperAccountId, ids), inArray(orderIntents.state, [...UNRESOLVED])));

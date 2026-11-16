@@ -40,7 +40,15 @@ export interface SimFill {
 }
 
 export type SimResult =
-  | { status: 'FILLED'; orderId: string; clientOrderId: string; fill: SimFill; stop: { orderId: string; clientOrderId: string; triggerPrice: string; basis: string; contracts: string; reduceOnly: boolean } }
+  | {
+      status: 'FILLED';
+      orderId: string;
+      clientOrderId: string;
+      fill: SimFill;
+      stop: { orderId: string; clientOrderId: string; triggerPrice: string; basis: string; contracts: string; reduceOnly: boolean };
+      /** Venue position the fill belongs to, when the venue reports it (Bitunix positionId). */
+      positionRef?: string | null;
+    }
   | { status: 'REJECTED'; orderId: string; clientOrderId: string; reason: string };
 
 const stopClientId = (clientOrderId: string) => `${clientOrderId}:sl`;

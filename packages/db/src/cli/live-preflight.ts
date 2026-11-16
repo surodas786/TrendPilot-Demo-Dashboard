@@ -94,7 +94,7 @@ try {
       for (const f of screen.failed) blockers.push(`routing: ${f}`);
 
       // The Live account as the worker would lock it (read here without a lock; never created).
-      const [account] = await tx.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, u.id), eq(paperAccounts.mode, 'LIVE')));
+      const [account] = await tx.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, u.id), eq(paperAccounts.mode, 'LIVE'), eq(paperAccounts.exchange, 'MEXC')));
       const control = await getLiveControl(tx);
       const conn = await connectionFor(tx, u.id);
       connRow = conn ?? null;

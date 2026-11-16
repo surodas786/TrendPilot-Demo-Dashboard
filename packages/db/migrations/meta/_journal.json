@@ -204,6 +204,13 @@
       "when": 1794824160998,
       "tag": "0028_m18_bitunix_account_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1794826922034,
+      "tag": "0029_m19_live_account_per_exchange",
+      "breakpoints": true
     }
   ]
 }

@@ -19,7 +19,7 @@ import {
 import type { Db, Executor } from '../client';
 import { enqueueJob, completeJob, type JobRow } from '../jobs';
 import { fills, instruments, orderBlocks, orderIntents, positions, positionTargets, signalDecisions, signalEvents, strategyVersions } from '../schema';
-import { availableOf, book, lockPaperAccount, type PaperAccountRow } from './accounts';
+import { accountExchangeFor, availableOf, book, lockPaperAccount, type PaperAccountRow } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
 import type { SimResult } from './simulator';
 import { liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
@@ -172,8 +172,10 @@ export async function evaluateAndReserveEntry(
     .where(and(eq(signalDecisions.eventId, event.id), eq(signalDecisions.orderBlockId, block.id), eq(signalDecisions.step, ENTRY_STEP)));
   if (existing) return { status: existing.status as EntryOutcome['status'], reason: existing.reason as EntryReason | null };
 
-  // ARC-02: the account lock serialises reservations and scope checks for this investor.
-  const account = await lockPaperAccount(tx, block.ownerId, block.mode);
+  // ARC-02: the account lock serialises reservations and scope checks for this investor. Live
+  // trades on the instrument's exchange (MEXC or Bitunix), each with its own account.
+  const [instEx] = await tx.select({ exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, block.instrumentId));
+  const account = await lockPaperAccount(tx, block.ownerId, block.mode, accountExchangeFor(block.mode, instEx?.exchange));
   const { result, live } = await assessEntry(tx, { event, block, version, side, now, account });
 
   const base = { eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId };
@@ -384,6 +386,8 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
         stopPrice: sim.stop.triggerPrice,
         stopBasis: sim.stop.basis,
         stopOrderRef: sim.stop.clientOrderId,
+        // The venue's own position reference when it reports one at fill time (Bitunix positionId).
+        exchangePositionRef: sim.positionRef ?? null,
         stopContracts: prot?.contracts ?? null,
         protectionStatus: covers ? 'PROTECTED' : 'UNPROTECTED',
         protectionVerifiedAt: covers ? now : null,

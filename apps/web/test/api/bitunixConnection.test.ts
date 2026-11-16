@@ -115,12 +115,15 @@ describe('Bitunix connection setup (read-only)', () => {
     expect((await rows(A)).find((x) => x.exchange === 'MEXC')).toMatchObject({ status: 'VERIFIED' });
   });
 
-  it('a Bitunix connection cannot be approved for Live or synced through the MEXC path', async () => {
+  it('a Bitunix connection is approved on its own row and never synced through the MEXC path', async () => {
     const admin = await signIn(USERS.admin.email);
     const bx = (await rows(B)).find((x) => x.exchange === 'BITUNIX')!;
+    // Step 3: a Bitunix account can be approved with its own limits (orders still need Hedge mode,
+    // the Bitunix capabilities, the platform switch and the investor's activation).
     const ap = await call(approve.POST, { method: 'POST', cookie: admin, params: { id: bx.id }, body: { maxOrderContracts: '1', maxOrderNotionalUsdt: '100', maxLeverage: 5, maxExposureUsdt: '100' } });
-    expect(ap.status).toBe(409);
-    expect(ap.body.message ?? JSON.stringify(ap.body)).toMatch(/Bitunix/);
+    expect(ap.status).toBe(200);
+    expect(ap.body.connection).toMatchObject({ exchange: 'BITUNIX', approved: true, liveEnabled: false });
+    expect((await rows(B)).filter((x) => x.exchange !== 'BITUNIX').every((x) => !x.approvedAt)).toBe(true);
     // Step 2: the admin sync runs Bitunix's own READ-ONLY reconciliation, never the MEXC sync.
     // This file's seam answers only the two Step 1 endpoints, so the snapshot is reported failed.
     const sy = await call(adminSync.POST, { method: 'POST', cookie: admin, params: { id: bx.id } });
