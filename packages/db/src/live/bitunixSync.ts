@@ -15,7 +15,7 @@ import {
 } from './bitunixAccount';
 import { BitunixPrivateError, type BitunixRequester } from './bitunixPrivate';
 import type { BitunixPrivateEvent } from './bitunixPrivateWs';
-import type { ConnectionRow } from './liveMode';
+import { applyExchangeBalance, type ConnectionRow } from './liveMode';
 
 /**
  * Bitunix account reconciliation (Step 2, read-only). Mirrors the investor's Bitunix MAIN account
@@ -598,6 +598,20 @@ export async function syncBitunixConnection(db: Db, connectionId: string, r: Bit
     const snap = await takeBitunixSnapshot(r, () => now().getTime());
     out.excludedSubAccountRows = snap.excludedSubAccountRows;
     await applyBitunixSnapshot(db, conn, snap, out);
+    if (snap.usdt) {
+      // The Bitunix Live account follows Bitunix's balance (its own account, never the MEXC one).
+      // Available to open = available + cross unrealized P&L when that is negative (Bitunix docs).
+      const u = snap.usdt;
+      const unrealized = D(u.crossUnrealizedPNL).plus(u.isolationUnrealizedPNL);
+      await applyExchangeBalance(
+        db,
+        conn.ownerId,
+        { equity: D(u.available).plus(u.frozen).plus(u.margin).plus(unrealized).toFixed(), availableOpen: Decimal.max(0, D(u.available).plus(Decimal.min(0, u.crossUnrealizedPNL))).toFixed(), unrealized: unrealized.toFixed() },
+        `bitunix-sync:${conn.id}:${snap.takenAt}`,
+        now(),
+        'BITUNIX'
+      );
+    }
     const pending = await db.select().from(exchangePositions).where(and(eq(exchangePositions.connectionId, conn.id), eq(exchangePositions.status, 'OPEN'), eq(exchangePositions.closeCheck, 'PENDING')));
     for (const p of pending) {
       const c = await confirmPendingClose(db, conn, r, p);

@@ -561,6 +561,11 @@ export const paperAccounts = pgTable(
       .notNull()
       .references(() => users.id),
     mode: tradingMode('mode').notNull().default('PAPER'),
+    /**
+     * The exchange a LIVE account trades on (MEXC or BITUNIX); every row from before Bitunix is
+     * MEXC. PAPER accounts are MEXC (the simulator prices on MEXC public data).
+     */
+    exchange: text('exchange').notNull().default('MEXC'),
     currency: text('currency').notNull().default('USDT'),
     /** LIVE only: last synced MEXC equity and available-to-open balance (USDT). */
     exchangeEquity: numeric('exchange_equity', { precision: 28, scale: 8 }),
@@ -574,7 +579,8 @@ export const paperAccounts = pgTable(
     updatedAt: updatedAt()
   },
   (t) => [
-    uniqueIndex('paper_accounts_owner_mode_key').on(t.ownerId, t.mode),
+    uniqueIndex('paper_accounts_owner_mode_exchange_key').on(t.ownerId, t.mode, t.exchange),
+    check('paper_accounts_exchange_valid', sql`${t.exchange} IN ('MEXC', 'BITUNIX') AND (${t.mode} = 'LIVE' OR ${t.exchange} = 'MEXC')`),
     check('paper_accounts_nonnegative', sql`${t.walletBalance} >= 0 AND ${t.positionMargin} >= 0 AND ${t.orderReserve} >= 0`)
   ]
 );

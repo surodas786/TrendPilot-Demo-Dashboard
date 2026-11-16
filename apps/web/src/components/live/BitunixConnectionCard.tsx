@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { ArrowDownUpIcon, KeyRoundIcon, PlugZapIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react';
+import { ArrowDownUpIcon, KeyRoundIcon, OctagonPauseIcon, PlugZapIcon, PowerIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react';
 import { request } from '@/lib/api';
 import { Button } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -19,6 +19,10 @@ export interface BitunixConnectionView {
   positionMode: string | null;
   verification: Record<string, unknown>;
   verifiedAt: string | null;
+  approved?: boolean;
+  liveEnabled?: boolean;
+  entriesHalted?: boolean;
+  haltReason?: string | null;
 }
 
 export interface BitunixAccountView {
@@ -56,6 +60,7 @@ export function BitunixConnectionCard({ initial, account: initialAccount }: { in
   const [editing, setEditing] = useState(!initial);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [confirmActivate, setConfirmActivate] = useState(false);
 
   const act = async (key: string, method: string, path: string, body?: unknown, ok?: string) => {
     setBusy(key);
@@ -87,13 +92,16 @@ export function BitunixConnectionCard({ initial, account: initialAccount }: { in
     <section className="rounded-xl border border-line bg-surface p-5" data-testid="bitunix-connection">
       <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
         <PlugZapIcon className="h-4 w-4 text-subtle" aria-hidden />
-        Bitunix Futures connection <StatusPill tone="neutral">Read-only</StatusPill>
+        Bitunix Futures connection <StatusPill tone={c?.liveEnabled ? 'warn' : 'neutral'}>{c?.liveEnabled ? 'Live on' : 'Live off'}</StatusPill>
       </h3>
       {c && !editing ? (
         <div className="mt-3">
           <Row label="Status">
             <StatusPill tone={connectionStatusLabel(c.status).tone}>{connectionStatusLabel(c.status).text}</StatusPill>
           </Row>
+          <Row label="Approved by administrator">{c.approved ? 'Approved' : 'Not yet'}</Row>
+          <Row label="Your Bitunix Live activation">{c.liveEnabled ? 'On' : 'Off'}</Row>
+          {c.entriesHalted && <Row label="Bitunix Live entries">{`Halted${c.haltReason ? ` (${c.haltReason})` : ''}`}</Row>}
           <Row label="Account reference">{c.accountRef}</Row>
           <Row label="API key">
             <span className="font-mono">{c.keyFingerprint}</span>
@@ -152,7 +160,7 @@ export function BitunixConnectionCard({ initial, account: initialAccount }: { in
             </div>
           )}
           {v.error && <p className="mt-2 text-xs text-loss">Check failed: {v.error}</p>}
-          <p className="mt-3 text-xs text-subtle">{v.liveTrading ?? 'Bitunix Live trading is not available yet; this connection is read-only.'} TrendPilot never changes your position mode.</p>
+          <p className="mt-3 text-xs text-subtle">Bitunix Live orders need Hedge mode, an administrator&apos;s approval and your activation. Every entry carries its stop loss; TrendPilot never changes your position mode, leverage or margin mode — set them in Bitunix to match your Live settings.</p>
           <div className="mt-4 flex flex-wrap gap-2">
             <Button
               icon={RefreshCwIcon}
@@ -171,6 +179,18 @@ export function BitunixConnectionCard({ initial, account: initialAccount }: { in
               onClick={() => act('sync', 'POST', '/v1/me/exchange-connection/sync?exchange=BITUNIX', undefined, 'Bitunix account synced (read-only).')}
             >
               Sync
+            </Button>
+            {c.liveEnabled ? (
+              <Button variant="warn" icon={PowerIcon} loading={busy === 'deactivate'} onClick={async () => { const u = await act('deactivate', 'POST', '/v1/me/live/deactivate?exchange=BITUNIX', undefined, 'Bitunix Live trading turned off.'); if (u) setC(u); }}>
+                Turn Bitunix Live off
+              </Button>
+            ) : (
+              <Button variant="primary" icon={PowerIcon} disabled={c.status !== 'VERIFIED' || !c.approved || c.positionMode !== 'HEDGE'} onClick={() => setConfirmActivate(true)}>
+                Activate Bitunix Live
+              </Button>
+            )}
+            <Button variant="danger" icon={OctagonPauseIcon} disabled={!!c.entriesHalted} loading={busy === 'halt'} onClick={async () => { const u = await act('halt', 'POST', '/v1/me/live/halt?exchange=BITUNIX', { reason: 'investor request' }, 'New Bitunix Live entries halted.'); if (u) setC(u); }}>
+              Halt new entries
             </Button>
             <Button icon={KeyRoundIcon} onClick={() => setEditing(true)}>
               Replace key
@@ -200,6 +220,18 @@ export function BitunixConnectionCard({ initial, account: initialAccount }: { in
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={confirmActivate}
+        title="Activate Bitunix Live trading?"
+        description="Your Active Live settings on Bitunix contracts will place real market orders on your Bitunix Futures account (Hedge mode), each with its stop loss attached, within your approved limits. You can turn it off or halt new entries at any time; open positions stay protected and can be closed."
+        confirmLabel="Activate Bitunix Live"
+        onCancel={() => setConfirmActivate(false)}
+        onConfirm={async () => {
+          setConfirmActivate(false);
+          const u = await act('activate', 'POST', '/v1/me/live/activate?exchange=BITUNIX', undefined, 'Bitunix Live trading activated.');
+          if (u) setC(u);
+        }}
+      />
       <ConfirmDialog
         open={confirmRemove}
         title="Remove the Bitunix key?"

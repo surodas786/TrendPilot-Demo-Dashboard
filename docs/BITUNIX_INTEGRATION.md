@@ -1,12 +1,18 @@
 # Bitunix USDT-M Futures integration
 
 Bitunix is a second exchange next to MEXC. Feature parity with MEXC is the goal across the steps
-below. **Steps 1 and 2 are read-only at the exchange:** no Bitunix order is placed, cancelled or
-changed, no position mode or leverage is changed, and no signal is routed to Bitunix.
+below.
+- Steps 1 and 2 are read-only at the exchange.
+- Step 3 adds the Hedge-mode order path behind every existing Live gate. It has been verified with
+  fixtures only.
+- In every step so far, TrendPilot never changes position mode, leverage or margin mode, and no
+  TradingView signal is routed to Bitunix yet (Step 4).
 
 - Step 1: connectivity: connection check, contract discovery, public prices.
 - Step 2: read-only account sync: REST reconciliation, the authenticated private WebSocket, and an
   exchange account mirror. See "Step 2" below.
+- Step 3: Live account per exchange, Bitunix instruments and quotes, Hedge-mode market orders with
+  the stop loss at entry, closes by positionId, and outcome reconciliation. See "Step 3" below.
 
 No TrendPilot Bitunix starter was available on the build workstation. Signing, WebSocket messages
 and fixtures come from the official docs (links below, read 2026-11-16) and from frames and
@@ -118,15 +124,53 @@ responses captured from the live public API on the same day.
 | Signed REST snapshot, private login + subscribe with a real key | live Bitunix | **Pending**: no read-only key configured |
 | Live position events (open / partial / close / TP-SL pushes) | live Bitunix | **Pending**: needs an account with activity |
 
-## MEXC dependencies, by later step
+## Step 3: Hedge-mode execution
 
-| Step | What depends on MEXC today and must change |
+**Status:** implemented and verified against a mocked Bitunix exchange. **No real Bitunix order has been sent.** It needs the same gates as MEXC:
+- `LIVE_ORDER_TRANSPORT=enabled` in production;
+- the platform Live switch;
+- the Bitunix capabilities recorded as `VERIFIED` or `PILOT_ACCEPTED`;
+- an approved Bitunix connection in Hedge mode;
+- the investor's own Bitunix activation;
+- the contract on the Live allowlist.
+
+| Area | Code | Notes |
+| --- | --- | --- |
+| Live account per exchange | `paper_accounts.exchange` (migration `0029`), `lockPaperAccount(…, exchange)`, `accountExchangeFor` | One account per (investor, mode, exchange). Existing rows read as MEXC with unchanged ids and values (tested on a scratch database upgraded from 0028). Paper stays MEXC-only. A Live order uses the account of its instrument's exchange. Bitunix sync applies the Bitunix balance to the Bitunix Live account (available-to-open = available + negative cross unrealized P&L). |
+| Resolution | `resolveAccountVenue`, `liveEntryEligibility`, `liveGuardedVenue` | Order → account → exchange → that investor's connection for that exchange → venue. The Live guard re-checks gates, limits (counting the leg being opened), halts and the position mode per exchange. A Bitunix intent can never reach the MEXC venue (`LIVE_EXCHANGE_MISMATCH`). |
+| Instruments and prices | `bitunixInstruments.ts`, `POST /v1/admin/instruments/bitunix`, `bitunixQuotes.ts`, feed process | Bitunix contracts become separate instruments (exchange `BITUNIX`, contract multiplier 1, base-coin step 10^-basePrecision, minimum opening quantity, maximum market quantity, price tick, leverage choices). They start DISABLED and not allowed for Live. Fresh joined Bitunix quotes (book + mark) are stored as `BITUNIX_PUBLIC` (channel WS), at most once per second, and only for Bitunix instruments. **`BITUNIX_PUBLIC_WS=on` is required in the feed process**; without it Bitunix entries expire as `FEED_STALE` and the feed logs a warning. |
+| Sizing | existing `evaluatePaperEntry` | Unchanged cost-based sizing on the instrument row: quantity = cost × leverage / executable price, floored to the base-coin step, checked against min/max. The venue rounds down again, then re-checks min/max and **available margin from Bitunix** before sending. |
+| Settings | `checkTradingSettings` (`GET account/trading_settings`) | Margin mode (ISOLATION/CROSS) and the leg's leverage (`longLeverage` / `shortLeverage`) must equal the order's. A mismatch is refused (`BITUNIX_SETTINGS_MISMATCH:…`). TrendPilot never calls change-leverage, change-margin-mode or change-position-mode. |
+| Order transport | `BitunixOrderTransport` | Exactly one order path (`trade/place_order`) plus the read allowlist. It is gated by `openLiveOrderTransport` at construction and on every POST. A POST is never retried. Cancel, flash-close, close-all, TP/SL modify and every account-setting change are refused before signing. The read-only check and sync keep using the read-only transport. |
+| Payloads | `buildBitunixOpenOrder`, `buildBitunixCloseOrder` | Open long `BUY`+`OPEN`; open short `SELL`+`OPEN`; close long `BUY`+`CLOSE`+long positionId; close short `SELL`+`CLOSE`+short positionId. All are `MARKET` with `clientId` = the intent's stored client order ID. Entries carry `slPrice` (rounded to the tick without widening, and checked against the side), `slStopType` (MARK → MARK_PRICE, LAST → LAST_PRICE; INDEX is refused) and `slOrderType=MARKET`. |
+| Hedge mode | `bitunixVenue` | `position_mode` is read before every open and close. Anything but HEDGE is refused (`POSITION_MODE_MISMATCH:<mode>`), recorded on the connection, and halts entries. |
+| Closes | `placeReduceOnlyClose` | Before sending, the leg is re-read: it must be the stored positionId (a stale or closed ID sends nothing, and a newer leg is never closed in its place) and the right side. The quantity is capped at what the leg holds now. One unresolved order per (account, contract) (existing unique index) serializes a manual close against a stop or target exit. A close is recorded only when the venue confirms the leg flat (existing `recordExitFill`). |
+| Outcome | `getOrder` by clientId, `fillOf`, `attachedStop` | Fills come from trade history for the order (`bitunix:<orderId>`), so a partial fill opens exactly the filled quantity. Protection is the leg's pending TP/SL, polled because it may appear late; one without `slQty` covers the whole leg. Missing protection leaves the position UNPROTECTED, queues the emergency close and halts entries (existing policy). On a timeout, network error, 5xx or duplicate clientId (30042), the order is looked up by clientId: if found it is reconciled; if not it stays SUBMITTING with its reservation (`UncertainSubmissionError`), and entries halt. After the 30 s grace period, an order still absent is refused by the halted guard and the reservation is released (outcome: never accepted). |
+
+### Step 3 verification status
+
+| Check | How | Result |
+| --- | --- | --- |
+| Four exact payloads, both legs on one symbol, close of one leg leaves the other untouched | venue tests + flow test (mocked exchange) | Pass |
+| Stale or wrong positionId, close capped at the leg, competing closes serialized | venue + flow | Pass |
+| One-Way refusal, leverage / margin mismatch (never changed), missing settings | venue + flow | Pass |
+| Quantity rounding and min/max, stop rounding and side check, INDEX basis refused, margin check | venue | Pass |
+| Stop loss in the entry request; protection verified; late protection found; missing → UNPROTECTED + emergency close + halt | venue + flow | Pass |
+| Partial fill, duplicate clientId, timeout before / after acceptance, reservation kept until the outcome is known | venue + flow | Pass |
+| Investor and exchange isolation (B's key, MEXC Live account, Paper untouched) | flow | Pass |
+| Migration 0029 on existing MEXC Paper/Live accounts, ledger and connection | scratch database | Pass |
+| Order transport gate and allowlist; signed body bytes | unit | Pass |
+| Order submission on live Bitunix | — | Not attempted (fixtures only, as required) |
+| Signed REST snapshot and private WebSocket with a real key | live | **Pending**: no read-only key configured |
+
+## Remaining work, by later step
+
+| Step | What remains |
 | --- | --- |
-| 3. Instruments and market data | `instruments.exchange` is always `MEXC`. Pair validation (`contractCatalog.ts`, `normalizePairInput` → `BTC_USDT`) and `mexcFixtures.ts` are MEXC-only. **Bitunix quantities are in base coin**, with no contract multiplier: model as `contractMultiplier = 1`, `qtyStep = 10^-basePrecision`, `minQty = minTradeVolume`, `maxQty = maxMarketOrderVolume` (market orders). `MarketFeed` writes `market_quotes` / candles / funding with `source = 'MEXC_PUBLIC'`. A Bitunix feed needs its own source label, REST klines (5m/15m closed bars for EMA 200) and funding history. Its stream must persist through `ingestStreamTicker`'s rules once a Bitunix quote is a joined book + mark. `MARKET_SOURCES`, admin market-data and pairs pages. |
-| 4. Account model and routing | `paper_accounts` is unique on (owner, mode): one LIVE account per investor, implicitly MEXC. A Bitunix Live account needs its own balance, ledger and positions (add `exchange` to the account key, or a per-connection account). `order_blocks` / signal routes pick an instrument, and the venue comes from the account. Per-investor routing to Bitunix needs instrument → exchange → that investor's connection. `resolveAccountVenue`, `liveGuardedVenue`, `liveAccountGate`, capability evidence (`live_control` is MEXC capabilities), `LIVE_EXCHANGE` in `liveMode.ts`. |
-| 5. Orders | A `bitunixVenue` implementing `ExecutionVenue`: place with attached stop (Bitunix TP/SL fields), market close, reduce-only, `clientId` idempotency (30042 duplicate), position-mode-aware sides for One-way vs Hedge, leverage and margin mode set per symbol, rate limits (10005 / 10006 / 10009). An ORDERS transport gated by `openLiveOrderTransport`, as on MEXC. Position-mode change only as an explicit account action (20009 when positions exist). |
-| 6. Exits, sync, reverse | `liveSync.ts` (MEXC positions, stops, deals, funding `holdFee`, drift), `closeRejection.ts` (MEXC codes), `SyncWithMexcButton`, close-and-reverse sequencing, trailing TP and target close against Bitunix closes, exchange-side close detection. |
-| 7. Reporting | Holdings chart, liquidation price, fees and funding from Bitunix records. Labels that say "MEXC" across investor pages. |
+| 4. Signal routing and strategy | Route the shared TradingView webhook to Bitunix blocks per investor. Today signal routes map a source symbol to one instrument (MEXC); a Bitunix block on its own instrument receives no alert. EMA 200 needs closed 5m/15m Bitunix candles (REST kline backfill, `BITUNIX_PUBLIC` source) because EMA never mixes sources. Weekday, 24-hour and window settings already apply unchanged at entry and submission. |
+| 5. Exits, sync, reverse | Exit rules already run on Bitunix quotes and close through the Bitunix venue. Still needed: (a) reconcile TrendPilot `positions` with the Step 2 exchange mirror, so a close made on Bitunix (manual, the stop, a TP/SL child) closes the TrendPilot position, like MEXC `liveSync`; (b) close-and-reverse sequencing; (c) TP/SL resize after a partial close. This step treats a whole-leg TP/SL as following the leg. A quantity-bound one cannot be modified (order-changing path not allowlisted) and leaves the position UNPROTECTED, the existing recovery policy. |
+| 6. Reporting | Investor reporting, holdings chart and reconciliation read the MEXC account (`exchange = 'MEXC'`). The Bitunix Live account needs its own views: liquidation price, fees and funding from Bitunix records. Labels that say "MEXC" across investor pages. |
+| Pilot | Record the two Bitunix capabilities from a supervised smallest-size pilot. Confirm that close long is `BUY`+`CLOSE` as documented (the page's "order direction" wording contradicts it), how the attached TP/SL is listed, fill visibility delay, `clientId` limits, and the success shape of the private-WS login. |
 
 Docs: [sign](https://www.bitunix.com/api-docs/futures/common/sign.html) ·
 [position mode](https://www.bitunix.com/api-docs/futures/account/get_position_mode.html) ·

@@ -3,6 +3,7 @@ import { hostname } from 'node:os';
 import type pg from 'pg';
 import {
   BitunixPriceStream,
+  BitunixQuoteWriter,
   BITUNIX_WS_PUBLIC_URL,
   createDb,
   ExchangePriceCache,
@@ -281,6 +282,9 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
 
   // Bitunix public prices (opt-in): own socket, own exchange-keyed cache entries; MEXC is untouched.
   const prices = new ExchangePriceCache();
+  // Bitunix instruments (published, or with an open position) get BITUNIX_PUBLIC quotes from this stream.
+  const bitunixQuotes = new BitunixQuoteWriter(handle.db, prices, { log });
+  const bitunixSymbols = async () => [...new Set([...cfg.bitunix.symbols, ...(await bitunixQuotes.refresh())])];
   let bitunix: BitunixPriceStream | null = null;
   if (cfg.bitunix.enabled) {
     bitunix = new BitunixPriceStream({
@@ -288,13 +292,22 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
       factory: o.wsFactory,
       log: (m) => log(`bitunix ${m}`),
       logTicks: cfg.logTicks,
-      onTicker: (t) => prices.putBook('BITUNIX', t.exchangeSymbol, t),
-      onPrice: (p) => prices.putMark('BITUNIX', p.exchangeSymbol, p),
+      onTicker: (t) => {
+        prices.putBook('BITUNIX', t.exchangeSymbol, t);
+        void bitunixQuotes.onUpdate(t.exchangeSymbol);
+      },
+      onPrice: (p) => {
+        prices.putMark('BITUNIX', p.exchangeSymbol, p);
+        void bitunixQuotes.onUpdate(p.exchangeSymbol);
+      },
       onUnsupported: (sym) => prices.forget('BITUNIX', sym)
     });
-    bitunix.setSymbols(cfg.bitunix.symbols);
+    const syms = await bitunixSymbols();
+    bitunix.setSymbols(syms);
     bitunix.start();
-    log(`Bitunix public prices: WebSocket ${cfg.bitunix.wsUrl} for ${cfg.bitunix.symbols.join(', ')} (cache and heartbeat only; no quotes stored, no orders)`);
+    log(`Bitunix public prices: WebSocket ${cfg.bitunix.wsUrl} for ${syms.join(', ')} (quotes stored for Bitunix instruments: ${bitunixQuotes.symbols().join(', ') || 'none yet'})`);
+  } else if ((await bitunixQuotes.refresh()).length) {
+    log(`WARNING: Bitunix instruments exist (${bitunixQuotes.symbols().join(', ')}) but BITUNIX_PUBLIC_WS is off: they get no quotes, so Bitunix entries expire as FEED_STALE.`);
   }
   const bitunixDetail = () => {
     if (!bitunix) return null;
@@ -317,6 +330,7 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
     try {
       // Subscribe newly published contracts first, so their tickers do not wait for REST backfill.
       if (stream) stream.setSymbols(await feed.refreshCoverage());
+      if (bitunix) bitunix.setSymbols(await bitunixSymbols());
       const s = await feed.cycle();
       stream?.setSymbols(feed.coveredExchangeSymbols);
       if (Date.now() - lastBeat >= 15_000) {

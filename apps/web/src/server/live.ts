@@ -1,5 +1,5 @@
 import { asc, eq } from 'drizzle-orm';
-import { bitunixAccountView, connectionDto, connectionFor, connectionState, controlState, getDb, getLiveControl, listConnections, liveControlDto, MEXC_CAPABILITIES, schema } from '@trendpilot/db';
+import { bitunixAccountView, connectionDto, connectionFor, connectionState, controlState, getDb, getLiveControl, listConnections, liveControlDto, BITUNIX_CAPABILITIES, MEXC_CAPABILITIES, schema } from '@trendpilot/db';
 import { liveAccountBlockers, LIVE_REFUSAL_TEXT } from '@trendpilot/domain';
 
 /** The signed-in investor's Live status (owner-scoped; never the key or secret). */
@@ -38,7 +38,7 @@ export async function adminLiveData() {
     .orderBy(asc(schema.instruments.symbol));
   return {
     control: liveControlDto(await getLiveControl(db)),
-    capabilities: MEXC_CAPABILITIES.map((c) => ({ id: c.id, summary: c.summary, documented: c.documented, mock: c.mock, readOnly: c.readOnly, gaps: c.gaps, docs: c.docs })),
+    capabilities: [...MEXC_CAPABILITIES, ...BITUNIX_CAPABILITIES].map((c) => ({ id: c.id, summary: c.summary, documented: c.documented, mock: c.mock, readOnly: c.readOnly, gaps: c.gaps, docs: c.docs })),
     connections: await listConnections(db),
     contracts
   };

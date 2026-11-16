@@ -37,7 +37,9 @@ export type CapabilityId =
   | 'STOP_RESIZE_AFTER_PARTIAL_CLOSE'
   | 'CANCEL_STOP'
   | 'CLIENT_ORDER_ID_IDEMPOTENCY'
-  | 'ACCOUNT_ELIGIBILITY';
+  | 'ACCOUNT_ELIGIBILITY'
+  | 'BITUNIX_OPEN_WITH_ATTACHED_STOP'
+  | 'BITUNIX_HEDGE_CLOSE_BY_POSITION';
 
 const DOC = 'https://www.mexc.com/api-docs/futures/account-and-trading-endpoints/';
 
@@ -168,6 +170,40 @@ export const MEXC_CAPABILITIES: Capability[] = [
   }
 ];
 
+/**
+ * Bitunix order capabilities (Step 3). Documented and exercised against a mocked exchange only; an
+ * operator records live-pilot evidence (Admin → Live Trading) before any Bitunix order is sent.
+ */
+export const BITUNIX_CAPABILITIES: Capability[] = [
+  {
+    id: 'BITUNIX_OPEN_WITH_ATTACHED_STOP',
+    summary: 'POST /api/v1/futures/trade/place_order, Hedge mode: BUY+OPEN (long) / SELL+OPEN (short), MARKET, clientId, slPrice + slStopType + slOrderType MARKET',
+    docs: 'https://www.bitunix.com/api-docs/futures/trade/place_order.html',
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: [
+      'Whether the attached stop appears in the pending TP/SL list for the leg, with or without slQty',
+      'Fill visibility delay in trade history after a market order',
+      'clientId length/charset limits and the exact answer for an unknown clientId (adapter treats 20007 / empty data as absent)'
+    ]
+  },
+  {
+    id: 'BITUNIX_HEDGE_CLOSE_BY_POSITION',
+    summary: 'POST /api/v1/futures/trade/place_order, Hedge mode: BUY+CLOSE+positionId (close long) / SELL+CLOSE+positionId (close short), MARKET',
+    docs: 'https://www.bitunix.com/api-docs/futures/trade/place_order.html',
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: [
+      'The page also calls `side` the order direction; its CLOSE rows (close long = BUY) contradict that reading. Confirm on the smallest size before relying on it',
+      'Whether the position TP/SL shrinks with a partial close'
+    ]
+  }
+];
+
 export class CapabilityNotVerified extends Error {
   constructor(readonly capability: CapabilityId) {
     super(`MEXC capability ${capability} is not verified on a live pilot account`);
@@ -179,6 +215,6 @@ export class CapabilityNotVerified extends Error {
 export type CapabilityState = Partial<Record<CapabilityId, Evidence>>;
 
 export function livePilotVerified(id: CapabilityId, override?: CapabilityState): boolean {
-  const v = override?.[id] ?? MEXC_CAPABILITIES.find((c) => c.id === id)?.livePilot;
+  const v = override?.[id] ?? [...MEXC_CAPABILITIES, ...BITUNIX_CAPABILITIES].find((c) => c.id === id)?.livePilot;
   return v === 'VERIFIED';
 }

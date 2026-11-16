@@ -45,22 +45,31 @@ export async function book(tx: Executor, account: Pick<PaperAccountRow, 'id' | '
 }
 
 export type AccountMode = 'PAPER' | 'LIVE';
+export type AccountExchange = 'MEXC' | 'BITUNIX';
+
+/** The account an order uses: Live trades on the instrument's exchange; Paper is always MEXC. */
+export const accountExchangeFor = (mode: string, instrumentExchange: string | null | undefined): AccountExchange => (mode === 'LIVE' && instrumentExchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
 
 /**
- * Locks (creating on first use) the investor's account for a mode. All reservations go through
+ * Locks (creating on first use) the investor's account for a mode and exchange. All reservations go through
  * this lock. A PAPER account starts with the fixture balance; a LIVE account starts at zero and
  * follows the synced MEXC balance (`syncLiveBalance`).
  */
-export async function lockPaperAccount(tx: Executor, ownerId: string, mode: AccountMode = 'PAPER'): Promise<PaperAccountRow> {
+export async function lockPaperAccount(tx: Executor, ownerId: string, mode: AccountMode = 'PAPER', exchange: AccountExchange = 'MEXC'): Promise<PaperAccountRow> {
+  if (mode === 'PAPER' && exchange !== 'MEXC') throw new Error('Paper accounts are MEXC accounts.');
   const inserted = await tx
     .insert(paperAccounts)
-    .values({ ownerId, mode, walletBalance: '0' })
-    .onConflictDoNothing({ target: [paperAccounts.ownerId, paperAccounts.mode] })
+    .values({ ownerId, mode, exchange, walletBalance: '0' })
+    .onConflictDoNothing({ target: [paperAccounts.ownerId, paperAccounts.mode, paperAccounts.exchange] })
     .returning();
   if (inserted[0] && mode === 'PAPER') {
     await book(tx, inserted[0], [{ kind: 'OPENING_BALANCE', bucket: 'WALLET', amount: PAPER_POLICY.startingBalanceUsdt, refType: 'paper_account', refId: inserted[0].id, memo: 'Fixture paper balance' }]);
   }
-  const [row] = await tx.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode))).for('update');
+  const [row] = await tx
+    .select()
+    .from(paperAccounts)
+    .where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)))
+    .for('update');
   return row!;
 }
 

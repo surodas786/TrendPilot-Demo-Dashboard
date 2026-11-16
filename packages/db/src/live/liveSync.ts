@@ -659,7 +659,7 @@ export async function liveAccountsToSync(db: Db): Promise<string[]> {
       out.push(c.ownerId);
       continue;
     }
-    const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, c.ownerId), eq(paperAccounts.mode, 'LIVE')));
+    const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, c.ownerId), eq(paperAccounts.mode, 'LIVE'), eq(paperAccounts.exchange, 'MEXC')));
     if (!acct) continue;
     const [pos] = await db.select({ id: positions.id }).from(positions).where(and(eq(positions.paperAccountId, acct.id), eq(positions.status, 'OPEN')));
     if (pos) out.push(c.ownerId);

@@ -13,8 +13,7 @@ export const POST = route<{ id: string }>(async (req, { correlationId, params })
   const b = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
   const [c] = await db.select().from(schema.exchangeConnections).where(eq(schema.exchangeConnections.id, params.id));
   if (!c) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
-  if (c.exchange !== 'MEXC') throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix connections are read-only in this release: there are no Live entries to halt or positions to sync.');
-  await haltConnectionEntries(db, c.ownerId, `OPERATOR ${String(b.reason || 'halt').slice(0, 150)}`, user.id, correlationId);
+  await haltConnectionEntries(db, c.ownerId, `OPERATOR ${String(b.reason || 'halt').slice(0, 150)}`, user.id, correlationId, c.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
   const [u] = await db.select().from(schema.exchangeConnections).where(eq(schema.exchangeConnections.id, params.id));
   return json(correlationId, { connection: connectionDto(u!) });
 });

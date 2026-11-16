@@ -163,8 +163,8 @@ export interface Reconciliation {
  * Lifetime identity checks for one account (Paper or Live): account columns vs ledger, and ledger
  * vs fills, exits and funding. Live wallet adjustments to the MEXC balance appear as "other".
  */
-export async function reconcileMyAccount(db: Executor, ownerId: string, mode: ReportMode = 'PAPER'): Promise<Reconciliation | null> {
-  const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode)));
+export async function reconcileMyAccount(db: Executor, ownerId: string, mode: ReportMode = 'PAPER', exchange: 'MEXC' | 'BITUNIX' = 'MEXC'): Promise<Reconciliation | null> {
+  const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)));
   if (!a) return null;
   const kinds = await db
     .select({ kind: ledgerEntries.kind, bucket: ledgerEntries.bucket, total: sql<string>`sum(${ledgerEntries.amount})` })
@@ -232,7 +232,8 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
   const w = reportingDayWindow(o.date ?? today, tz);
   const ownerId = user.id;
   const mode: ReportMode = o.mode ?? 'PAPER';
-  const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode)));
+  // Reporting covers the MEXC account (Paper, and MEXC Live); Bitunix Live reporting is a later step.
+  const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, 'MEXC')));
   // No account for this mode yet: every figure below is zero (an impossible ID matches nothing).
   const acctId = acct?.id ?? '00000000-0000-0000-0000-000000000000';
 
