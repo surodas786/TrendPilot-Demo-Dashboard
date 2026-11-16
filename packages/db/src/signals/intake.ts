@@ -12,6 +12,7 @@ import {
 import type { Db } from '../client';
 import { enqueueJob } from '../jobs';
 import { signalEvents, signalRejections, signalRoutes } from '../schema';
+import { enabledTargetInstrumentIds } from './routeTargets';
 import { verifyIngressToken, type IngressRow } from './ingress';
 
 /**
@@ -146,6 +147,8 @@ export async function ingestTradingViewSignal(db: Db, input: { token: string | u
   const { times } = timing;
   const stream = streamKey(exchange, symbol, p.interval);
   const disposition = route.kind === 'INFO_ONLY' ? 'INFO_ONLY' : 'DISPATCH';
+  // Step 4: explicit Bitunix target of this route (same contract on Bitunix), fixed for this event.
+  const targetInstrumentIds = disposition === 'DISPATCH' ? await enabledTargetInstrumentIds(db, route.id) : [];
 
   type TxOutcome = { kind: 'accepted'; eventId: string } | { kind: 'duplicate'; eventId: string } | { kind: 'reject'; reason: SignalRejectReason; message: string };
   let outcome: TxOutcome;
@@ -206,6 +209,7 @@ export async function ingestTradingViewSignal(db: Db, input: { token: string | u
           sourceSymbol: symbol,
           interval: p.interval,
           instrumentId: route.instrumentId,
+          targetInstrumentIds,
           packageId: route.packageId,
           barOpenAt: times.barOpenAt,
           barCloseAt: times.barCloseAt,

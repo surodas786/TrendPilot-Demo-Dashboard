@@ -8,6 +8,8 @@ import { StatusPill } from '../ui/StatusPill';
 import { DIRECTION_LABELS } from './draft';
 
 interface Props {
+  /** Exchange and execution symbol, e.g. "Bitunix · BTCUSDT". */
+  contract?: string;
   block: OrderBlockDto;
   pairLabel: string;
   strategyName: string;
@@ -17,7 +19,7 @@ interface Props {
 }
 
 /** Adapted from the MagicPatterns TokenBlockRow. Status is always shown as text as well as colour (UI-06). */
-export function OrderBlockRow({ block, pairLabel, strategyName, busy, onEdit, onToggle }: Props) {
+export function OrderBlockRow({ block, pairLabel, contract, strategyName, busy, onEdit, onToggle }: Props) {
   const active = block.status === 'ACTIVE';
   const noDays = block.weekdays.length === 0;
   return (
@@ -26,6 +28,11 @@ export function OrderBlockRow({ block, pairLabel, strategyName, busy, onEdit, on
         <p className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-ink">{pairLabel}</span>
           {block.mode === 'LIVE' ? <StatusPill tone="warn">Live</StatusPill> : <StatusPill tone="accent">Paper</StatusPill>}
+          {contract && (
+            <span className="text-xs text-subtle" data-testid="block-contract">
+              {contract}
+            </span>
+          )}
         </p>
         <p className="mt-0.5 truncate text-sm text-muted">
           {strategyName} · {DIRECTION_LABELS[block.direction]}

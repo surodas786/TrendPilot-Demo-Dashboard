@@ -2,7 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { Decimal, DECISION_REASON_TEXT, evaluateBlockForSignal, REVERSAL_REASON_TEXT, type ReversalWithheldReason, type SignalAction, type SignalInterval, type Weekday } from '@trendpilot/domain';
 import type { Db } from '../client';
 import { completeJob, type JobRow } from '../jobs';
-import { orderBlocks, orderIntents, positionExits, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
+import { orderBlocks, orderIntents, paperAccounts, positionExits, positions, signalDecisions, signalEvents, simOrders, strategyVersions, users } from '../schema';
 import { ENTRY_STEP, evaluateAndReserveEntry, windowOf } from './entry';
 import { resolveAccountVenue } from '../live/liveMode';
 import { refreshLiveBalance } from '../live/liveSync';
@@ -38,12 +38,17 @@ export interface ReverseSummary {
 export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks: { venue?: ExecutionVenue } = {}): Promise<ReverseSummary> {
   const { closeIntentId } = job.payload as { closeIntentId: string };
   // Live: current MEXC available-to-open, read before the transaction (a network call).
-  const [peek] = await db.select({ mode: orderIntents.mode, ownerId: orderIntents.ownerId, state: orderIntents.state }).from(orderIntents).where(eq(orderIntents.id, closeIntentId));
+  const [peek] = await db
+    .select({ mode: orderIntents.mode, ownerId: orderIntents.ownerId, state: orderIntents.state, exchange: paperAccounts.exchange })
+    .from(orderIntents)
+    .innerJoin(paperAccounts, eq(paperAccounts.id, orderIntents.paperAccountId))
+    .where(eq(orderIntents.id, closeIntentId));
   let liveBalance: { equityUsdt: string; availableUsdt: string; refreshedAt: string } | null = null;
   let balanceError: string | null = null;
   if (peek?.mode === 'LIVE' && !(UNRESOLVED as readonly string[]).includes(peek.state)) {
     try {
-      const b = await refreshLiveBalance(db, peek.ownerId, now);
+      // The balance of the exchange the closed leg traded on (MEXC or Bitunix).
+      const b = await refreshLiveBalance(db, peek.ownerId, now, process.env, peek.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
       liveBalance = { equityUsdt: b.equity, availableUsdt: b.available, refreshedAt: now.toISOString() };
     } catch (e) {
       balanceError = (e as Error).message.slice(0, 200);

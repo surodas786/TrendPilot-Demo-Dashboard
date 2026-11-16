@@ -4,6 +4,8 @@ import { Decimal, realizedPnl, type ExitReason } from '@trendpilot/domain';
 type PositionRow = typeof positions.$inferSelect;
 import type { Db } from '../client';
 import { exchangeConnections, fills, instruments, orderBlocks, orderIntents, paperAccounts, positionExits, positions, positionTargets } from '../schema';
+import { bitunixRequesterFor } from './bitunixConnection';
+import { parseBitunixAccount } from './bitunixPrivate';
 
 import { book, lockPaperAccount } from '../paper/accounts';
 import { recordExitFill } from '../paper/exits';
@@ -75,13 +77,27 @@ export interface DriftItem {
 }
 
 /** Reads the USDT balance from MEXC (read-only) and applies it to the Live account now. */
-export async function refreshLiveBalance(db: Db, ownerId: string, now: Date, env: Record<string, string | undefined> = process.env): Promise<{ equity: string; available: string }> {
+export async function refreshLiveBalance(db: Db, ownerId: string, now: Date, env: Record<string, string | undefined> = process.env, exchange: 'MEXC' | 'BITUNIX' = 'MEXC'): Promise<{ equity: string; available: string }> {
+  if (exchange === 'BITUNIX') return refreshBitunixBalance(db, ownerId, now, env);
   const conn = await connectionFor(db, ownerId);
   if (!conn || conn.status === 'REVOKED' || !conn.apiKeySealed) throw new Error('no exchange connection');
   const usdt = normalizeAssets(await readRequester(conn, env).request('GET', '/api/v1/private/account/assets')).find((a) => a.currency === 'USDT');
   if (!usdt) throw new Error('MEXC returned no USDT balance');
   await applyExchangeBalance(db, ownerId, usdt, `refresh:${conn.id}:${now.toISOString()}`, now);
   return { equity: usdt.equity, available: usdt.availableOpen };
+}
+
+/** Bitunix: reads the USDT futures account with the investor's own key and applies it to the Bitunix Live account. */
+async function refreshBitunixBalance(db: Db, ownerId: string, now: Date, env: Record<string, string | undefined>): Promise<{ equity: string; available: string }> {
+  const conn = await connectionFor(db, ownerId, 'BITUNIX');
+  if (!conn || conn.status === 'REVOKED' || !conn.apiKeySealed) throw new Error('no Bitunix connection');
+  const u = parseBitunixAccount(await bitunixRequesterFor(conn, env).get('/api/v1/futures/account', { marginCoin: 'USDT' }), 'USDT');
+  if (!u) throw new Error('Bitunix returned no USDT futures account');
+  const unrealized = new Decimal(u.crossUnrealizedPNL).plus(u.isolationUnrealizedPNL);
+  const equity = new Decimal(u.available).plus(u.frozen).plus(u.margin).plus(unrealized).toFixed();
+  const available = Decimal.max(0, new Decimal(u.available).plus(Decimal.min(0, u.crossUnrealizedPNL))).toFixed();
+  await applyExchangeBalance(db, ownerId, { equity, availableOpen: available, unrealized: unrealized.toFixed() }, `refresh:${conn.id}:${now.toISOString()}`, now, 'BITUNIX');
+  return { equity, available };
 }
 
 /** What a run did to one position after a close made on MEXC. */

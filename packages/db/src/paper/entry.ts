@@ -18,7 +18,7 @@ import {
 } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { enqueueJob, completeJob, type JobRow } from '../jobs';
-import { fills, instruments, orderBlocks, orderIntents, positions, positionTargets, signalDecisions, signalEvents, strategyVersions } from '../schema';
+import { fills, instruments, marketQuotes, orderBlocks, orderIntents, positions, positionTargets, signalDecisions, signalEvents, strategyVersions } from '../schema';
 import { accountExchangeFor, availableOf, book, lockPaperAccount, type PaperAccountRow } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
 import type { SimResult } from './simulator';
@@ -150,6 +150,23 @@ export async function assessEntry(
     trailingConversionRequired: block.trailingConversionRequired,
     now
   });
+  // Signal logs: which exchange, contract and price source the decision used, and for feed problems
+  // whether a price never arrived (feed off / not covering this contract) or is only stale.
+  if (!result.ok && (result.reason === 'FEED_STALE' || result.reason === 'PRICE_DEVIATION')) {
+    const venueLabel = inst!.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
+    const ctx: Record<string, unknown> = { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, priceSource: quote?.source ?? null };
+    if (result.reason === 'FEED_STALE') {
+      const [any] = quote ? [{ n: 1 }] : await tx.select({ n: count() }).from(marketQuotes).where(eq(marketQuotes.instrumentId, block.instrumentId));
+      const never = !quote && Number(any?.n ?? 0) === 0;
+      ctx.feed = never ? 'NO_PRICE_EVER' : quote ? 'STALE' : 'NO_RECENT_PRICE';
+      ctx.reasonText = never
+        ? `No ${venueLabel} price has ever been received for ${inst!.exchangeSymbol}: the ${venueLabel} price feed is off or does not cover this contract${inst!.exchange === 'BITUNIX' ? ' (BITUNIX_PUBLIC_WS=on in the feed process)' : ''}.`
+        : `The latest ${venueLabel} price for ${inst!.exchangeSymbol} is too old (the feed is stale).`;
+    } else {
+      ctx.reasonText = `The ${venueLabel} price for ${inst!.exchangeSymbol} is too far from the TradingView reference price.`;
+    }
+    Object.assign(result.detail as Record<string, unknown>, ctx);
+  }
   // Live: the same strategy result must also pass the Live gates (switches, approved account,
   // activation, allowlist, limits). The worker checks them again right before sending.
   const live =

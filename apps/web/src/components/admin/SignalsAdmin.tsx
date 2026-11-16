@@ -101,7 +101,7 @@ function RouteFields({ form, setForm, errors, instruments, packages }: { form: R
       </div>
       <div className="grid gap-3 sm:grid-cols-4">
         <div>
-          <FilterSelect label="Execution contract" value={form.instrumentId} onChange={(v) => setForm({ ...form, instrumentId: v })} options={instruments.map((i) => ({ value: i.id, label: `${i.symbol} (MEXC ${i.exchangeSymbol})` }))} />
+          <FilterSelect label="Execution contract" value={form.instrumentId} onChange={(v) => setForm({ ...form, instrumentId: v })} options={instruments.filter((i) => i.exchange !== 'BITUNIX').map((i) => ({ value: i.id, label: `${i.symbol} (${i.exchange} ${i.exchangeSymbol})` }))} />
           {errors.instrumentId && <p className="mt-1 text-xs text-loss">{errors.instrumentId}</p>}
         </div>
         <div>
@@ -130,6 +130,31 @@ const bodyOf = (f: RouteForm) => ({ ...f, maxSignalAgeSeconds: Number(f.maxSigna
 const formErrors = (r: { issues: { path: string; message: string }[]; message: string }) => (r.issues.length ? issueMap(r.issues) : { form: r.message });
 
 /** UI-05 TradingView Webhook and Signal Routes, with operations views (counts only, no investor data). */
+/** Link, pause or remove the same contract on Bitunix as an explicit target of a route. */
+function BitunixTargetControl({ route, instruments, onSet }: { route: SignalRouteDto; instruments: InstrumentDto[]; onSet: (instrumentId: string | null, enabled: boolean) => void }) {
+  const current = route.targets.find((t) => t.exchange === 'BITUNIX');
+  const candidates = instruments.filter((i) => i.exchange === 'BITUNIX' && i.symbol === route.instrument.symbol);
+  if (!current && !candidates.length) return <div className="mt-1 text-[11px] text-subtle">No published Bitunix {route.instrument.symbol} contract to route to.</div>;
+  return (
+    <div className="mt-1 flex flex-wrap gap-1.5" data-testid={`route-bitunix-${route.sourceSymbol}-${route.interval}-${route.action}`}>
+      {!current ? (
+        <Button size="sm" variant="ghost" onClick={() => onSet(candidates[0]!.id, true)}>
+          Also route to Bitunix {candidates[0]!.exchangeSymbol}
+        </Button>
+      ) : (
+        <>
+          <Button size="sm" variant="ghost" onClick={() => onSet(current.instrumentId, !current.enabled)}>
+            {current.enabled ? 'Pause Bitunix routing' : 'Resume Bitunix routing'}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => onSet(null, false)}>
+            Remove Bitunix
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function SignalsAdmin({ ingress, routes, instruments, packages, events, rejections, timezone }: Props) {
   const router = useRouter();
   const [revealed, setRevealed] = useState<string | null>(null);
@@ -182,6 +207,14 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     }
     toast.success('Route updated');
     setEditing(null);
+    router.refresh();
+  };
+
+  /** Step 4: the route's explicit Bitunix target (same contract on Bitunix), or none. */
+  const setBitunixTarget = async (route: SignalRouteDto, instrumentId: string | null, enabled = true) => {
+    const r = await request('PUT', `/v1/admin/signal-routes/${route.id}/bitunix-target`, { body: { instrumentId, enabled } });
+    if (!r.ok) toast.error(r.message, { duration: 10_000 });
+    else toast.success(instrumentId ? (enabled ? 'Bitunix routing on for this route' : 'Bitunix routing paused for this route') : 'Bitunix routing removed from this route');
     router.refresh();
   };
 
@@ -289,6 +322,16 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
                     <div>
                       {r.instrument.symbol} · {r.package.name}
                     </div>
+                    <div className="mt-1 text-[11px] text-subtle" data-testid="route-exchange-targets">
+                      {r.instrument.exchange} <span className="font-mono">{r.instrument.exchangeSymbol}</span>
+                      {r.targets.map((t) => (
+                        <span key={t.id} className={t.enabled ? 'text-ink' : 'line-through'}>
+                          {' '}+ {t.exchange === 'BITUNIX' ? 'Bitunix' : t.exchange} <span className="font-mono">{t.exchangeSymbol}</span>
+                          {!t.enabled && ' (paused)'}
+                        </span>
+                      ))}
+                    </div>
+                    <BitunixTargetControl route={r} instruments={instruments} onSet={(id, enabled) => setBitunixTarget(r, id, enabled)} />
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <TimeframeTag latest={r.package.latest} interval={r.interval} />
                       {r.openPositions > 0 && <span className="text-[11px] text-subtle">{r.openPositions} open position(s)</span>}

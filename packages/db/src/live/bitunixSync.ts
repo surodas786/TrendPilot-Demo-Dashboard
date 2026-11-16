@@ -16,6 +16,7 @@ import {
 import { BitunixPrivateError, type BitunixRequester } from './bitunixPrivate';
 import type { BitunixPrivateEvent } from './bitunixPrivateWs';
 import { applyExchangeBalance, type ConnectionRow } from './liveMode';
+import { linkBitunixPositions, type BitunixPositionLink } from './bitunixPositionSync';
 
 /**
  * Bitunix account reconciliation (Step 2, read-only). Mirrors the investor's Bitunix MAIN account
@@ -76,6 +77,8 @@ export interface BitunixSyncResult {
   events: number;
   tpslConfirmed: number;
   excludedSubAccountRows: number;
+  /** TrendPilot Live positions reconciled against the mirror (Step 4). */
+  links?: BitunixPositionLink[];
 }
 
 /* ───────────────────────── Event log ───────────────────────── */
@@ -619,6 +622,9 @@ export async function syncBitunixConnection(db: Db, connectionId: string, r: Bit
     }
     await syncHistory(db, conn, r, snap.takenAt, out);
     await confirmTriggeredTpsl(db, conn, r, out);
+    // Exchange-side closes (manual, partial, stop, liquidation) → TrendPilot positions, exactly once.
+    const [fresh] = await db.select().from(exchangeConnections).where(eq(exchangeConnections.id, conn.id));
+    out.links = await linkBitunixPositions(db, fresh ?? conn, r, at);
     const open = await db.select({ id: exchangePositions.id, closeCheck: exchangePositions.closeCheck }).from(exchangePositions).where(and(eq(exchangePositions.connectionId, conn.id), eq(exchangePositions.status, 'OPEN')));
     out.positionsOpen = open.length;
     out.closePending = open.filter((p) => p.closeCheck === 'PENDING').length;

@@ -6,13 +6,15 @@ below.
 - Step 3 adds the Hedge-mode order path behind every existing Live gate. It has been verified with
   fixtures only.
 - In every step so far, TrendPilot never changes position mode, leverage or margin mode, and no
-  TradingView signal is routed to Bitunix yet (Step 4).
+  TradingView signal reaches a Bitunix block unless an administrator routes it explicitly (Step 4).
 
 - Step 1: connectivity: connection check, contract discovery, public prices.
 - Step 2: read-only account sync: REST reconciliation, the authenticated private WebSocket, and an
   exchange account mirror. See "Step 2" below.
 - Step 3: Live account per exchange, Bitunix instruments and quotes, Hedge-mode market orders with
   the stop loss at entry, closes by positionId, and outcome reconciliation. See "Step 3" below.
+- Step 4: TradingView routing to Bitunix blocks, Bitunix EMA 200 candles, exits and exchange-side
+  closes on Bitunix positions. See "Step 4" below.
 
 No TrendPilot Bitunix starter was available on the build workstation. Signing, WebSocket messages
 and fixtures come from the official docs (links below, read 2026-11-16) and from frames and
@@ -163,14 +165,39 @@ responses captured from the live public API on the same day.
 | Order submission on live Bitunix | — | Not attempted (fixtures only, as required) |
 | Signed REST snapshot and private WebSocket with a real key | live | **Pending**: no read-only key configured |
 
-## Remaining work, by later step
+## Step 4: signals, EMA 200 and exits on Bitunix
 
-| Step | What remains |
+| Area | Code | Notes |
+| --- | --- | --- |
+| Routing | `signal_route_targets`, `signal_events.target_instrument_ids` (migration `0030`), `routeTargets.ts`, `PUT /v1/admin/signal-routes/[id]/bitunix-target` | The webhook and alert format are unchanged. A route keeps its MEXC instrument and can name **one** explicit Bitunix target: the same contract (same platform symbol), and Bitunix instruments only. Intake snapshots the enabled targets on the event, so a re-run dispatch reaches the same blocks. Dispatch serves the primary instrument plus the targets; a block belongs to one instrument (one exchange) and decisions are unique per (event, block, step), so each block is evaluated once. Without a target nothing changes. Admin → Signals shows each route's exchange and execution symbol, with *Also route to Bitunix* / *Pause* / *Remove*. |
+| Signal logs | `assessEntry` | Same reason codes as MEXC, with context added: `exchange`, `executionSymbol`, `priceSource`, and for `FEED_STALE` either `feed: NO_PRICE_EVER` (feed off or not covering the contract) or `STALE` / `NO_RECENT_PRICE`. `PRICE_DEVIATION` keeps the 0.5 % tolerance against the block's own exchange price. A timeframe mismatch is `STRATEGY_MISMATCH` (screen) and is also refused when a route is configured. Missing routing: an alert without a route is `ROUTE_NOT_FOUND` (intake log), and the investor's editor warns *No TradingView route delivers signals to this contract*. |
+| EMA 200 | `bitunixKlines.ts`, `MarketFeed({ exchange: 'BITUNIX' }).candleCycle()`, feed process | `GET /api/v1/futures/market/kline` (open time in ms, sent as a string; exclusive `endTime`; ≤ 200 per page; closed candles only; newest first on the live API), checked against the docs and the live API. The shared candle sync (backfill, gaps, late revisions) writes `BITUNIX_PUBLIC` candles on the Bitunix instrument. The EMA algorithm is unchanged and never mixes sources or instruments. A missing, stale or short history skips the entry with `EMA_UNAVAILABLE`; a block with EMA off is unaffected. |
+| Exits | existing exit rules + Step 3 venue | Bitunix quotes create `market.tick` jobs, so per-side take profit, target close inside Trailing Take Profit, trailing, close-on-signal and close-and-reverse run unchanged and close via `BUY`/`SELL` + `CLOSE` on the current positionId and remaining size. The entry stop stays attached. Reversal refreshes the **Bitunix** balance and opens the new leg only after the closed leg is confirmed flat; a partial or uncertain close keeps it withheld (`REVERSAL_CLOSE_INCOMPLETE`). |
+| Exchange-side closes | `bitunixPositionSync.ts` (run by every Bitunix sync) | Links the Step 2 mirror to TrendPilot positions by (connection, positionId). Each closing Bitunix order is booked once as `bitunix:<orderId>`, the same key TrendPilot's own closes use: manual (`EXTERNAL_CLOSE`), the exchange stop (`STOP_LOSS`, when a TP/SL trigger preceded it) and liquidation. A full close needs the history-confirmed mirror, so a TP/SL trigger alone closes nothing. Fills not yet listed leave the difference pending. After a partial close it reports protection as `WHOLE_LEG` (follows the leg) or `FIXED_QTY` (cannot be resized in this release: UNPROTECTED, existing recovery). |
+| Investor UI | Trade Settings, Live Trading | The pair list labels Bitunix pairs; the editor shows exchange, execution symbol and TradingView sources; block rows show `Bitunix · BTCUSDT`. Live mode on a Bitunix pair needs the Bitunix connection (server and editor). |
+
+### Step 4 verification status
+
+| Check | How | Result |
+| --- | --- | --- |
+| Shared webhook → MEXC route only; then with an explicit Bitunix target, both; each block once; duplicate alert | DB e2e through the real webhook, mocked orders | Pass |
+| Price gap and stale Bitunix price with exchange context | e2e | Pass |
+| EMA on: missing Bitunix candles skip; after Bitunix backfill the filter passes; MEXC candles untouched. EMA off unaffected | e2e | Pass |
+| Long and short: target close then trailing take profit through the Bitunix close path | e2e | Pass |
+| Close-and-reverse: partial close withholds; full close then the new leg | e2e | Pass |
+| Manual partial close on Bitunix (once, whole-leg protection, other leg untouched); TP/SL trigger alone closes nothing; stop execution closes once | e2e | Pass |
+| Kline parsing and paging against live captures | unit | Pass |
+| Public Bitunix prices and candles in the local feed (`BITUNIX_PUBLIC_WS=on`) | **live Bitunix**, local dev DB | Pass |
+| Signed REST, private WebSocket, real orders | live | **Pending**: no read-only key; orders mocked by design |
+
+## Remaining work
+
+| Area | What remains |
 | --- | --- |
-| 4. Signal routing and strategy | Route the shared TradingView webhook to Bitunix blocks per investor. Today signal routes map a source symbol to one instrument (MEXC); a Bitunix block on its own instrument receives no alert. EMA 200 needs closed 5m/15m Bitunix candles (REST kline backfill, `BITUNIX_PUBLIC` source) because EMA never mixes sources. Weekday, 24-hour and window settings already apply unchanged at entry and submission. |
-| 5. Exits, sync, reverse | Exit rules already run on Bitunix quotes and close through the Bitunix venue. Still needed: (a) reconcile TrendPilot `positions` with the Step 2 exchange mirror, so a close made on Bitunix (manual, the stop, a TP/SL child) closes the TrendPilot position, like MEXC `liveSync`; (b) close-and-reverse sequencing; (c) TP/SL resize after a partial close. This step treats a whole-leg TP/SL as following the leg. A quantity-bound one cannot be modified (order-changing path not allowlisted) and leaves the position UNPROTECTED, the existing recovery policy. |
-| 6. Reporting | Investor reporting, holdings chart and reconciliation read the MEXC account (`exchange = 'MEXC'`). The Bitunix Live account needs its own views: liquidation price, fees and funding from Bitunix records. Labels that say "MEXC" across investor pages. |
-| Pilot | Record the two Bitunix capabilities from a supervised smallest-size pilot. Confirm that close long is `BUY`+`CLOSE` as documented (the page's "order direction" wording contradicts it), how the attached TP/SL is listed, fill visibility delay, `clientId` limits, and the success shape of the private-WS login. |
+| Live verification | Signed REST snapshot and private WebSocket with a read-only key; a supervised smallest-size pilot to record the two Bitunix capabilities. The pilot must confirm close long = `BUY`+`CLOSE`, how the attached TP/SL is listed, fill visibility delay, `clientId` limits and the private-login success frame. |
+| TP/SL resize | A fixed-quantity Bitunix TP/SL cannot be modified (no order-changing TP/SL path); after a partial close such a position is UNPROTECTED (existing recovery policy). |
+| Reporting | Holdings, trades and reconciliation views read the MEXC account; the Bitunix Live account needs its own views (liquidation price, fees and funding from Bitunix records). |
+| Funding | Bitunix funding history is not read yet; Paper/MEXC funding is unchanged. |
 
 Docs: [sign](https://www.bitunix.com/api-docs/futures/common/sign.html) ·
 [position mode](https://www.bitunix.com/api-docs/futures/account/get_position_mode.html) ·

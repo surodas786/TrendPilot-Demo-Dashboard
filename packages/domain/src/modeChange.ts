@@ -11,16 +11,17 @@ export const MODE_LABELS: Record<BlockMode, string> = { PAPER: 'Paper', LIVE: 'L
  * The New Entry rule for Live settings: the investor's own MEXC connection is verified.
  * Returns why Live is unavailable, or null when it is available.
  */
-export function liveUnavailableReason(connectionStatus: string | null | undefined): string | null {
+export function liveUnavailableReason(connectionStatus: string | null | undefined, exchange: string = 'MEXC'): string | null {
+  const name = exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
   switch (connectionStatus) {
     case 'VERIFIED':
       return null;
     case 'FAILED':
-      return 'Your MEXC connection failed its read-only check. Fix it on the Live Trading page (Save and check) to use Live.';
+      return `Your ${name} connection failed its read-only check. Fix it on the Live Trading page (Save and check) to use Live.`;
     case 'PENDING':
-      return 'Your MEXC connection has not been checked yet. Finish Save and check on the Live Trading page to use Live.';
+      return `Your ${name} connection has not been checked yet. Finish Save and check on the Live Trading page to use Live.`;
     default:
-      return 'Connect and verify your MEXC account on the Live Trading page to use Live.';
+      return `Connect and verify your ${name} account on the Live Trading page to use Live.`;
   }
 }
 
@@ -37,6 +38,8 @@ export interface ModeChangeFacts {
   to: BlockMode;
   pair: string;
   liveConnectionStatus: string | null | undefined;
+  /** Exchange of the block's contract (whose connection Live needs). Default MEXC. */
+  exchange?: string;
   /** The investor's block for the same pair in the destination mode, if any. */
   destinationBlockId: string | null;
   /** Open positions and unfinished orders (intents not yet filled, rejected or cancelled) of this block. */
@@ -54,7 +57,7 @@ export function modeChangeBlocker(f: ModeChangeFacts): ModeChangeBlocker | null 
   const to = MODE_LABELS[f.to];
   const from = MODE_LABELS[f.from];
   if (f.to === 'LIVE') {
-    const reason = liveUnavailableReason(f.liveConnectionStatus);
+    const reason = liveUnavailableReason(f.liveConnectionStatus, f.exchange);
     if (reason) return { code: 'LIVE_UNAVAILABLE', message: reason };
   }
   if (f.destinationBlockId) {

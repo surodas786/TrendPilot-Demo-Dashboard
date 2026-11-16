@@ -78,6 +78,7 @@ interface Props {
   takenByMode: { PAPER: string[]; LIVE: string[] };
   /** Status of the investor's MEXC connection (null = none). Live needs VERIFIED (liveUnavailableReason). */
   liveConnectionStatus: string | null;
+  bitunixConnectionStatus?: string | null;
   /** New entry prefilled from a saved block's settings, in `mode` (same pair). */
   copyFrom?: { block: OrderBlockDto; mode: BlockMode };
   timezone: string;
@@ -89,10 +90,11 @@ interface Props {
 }
 
 /** Adapted from the MagicPatterns TokenBlockEditor; persists through /v1/me/order-blocks. */
-export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
-  /** The same rule as the server: Live needs a verified MEXC connection. */
-  const liveReason = liveUnavailableReason(liveConnectionStatus);
-  const liveConnected = liveReason === null;
+export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, bitunixConnectionStatus = null, copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
+  /** The same rule as the server: Live needs a verified connection to the pair's exchange. */
+  const anyLive = liveUnavailableReason(liveConnectionStatus) === null || liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') === null;
+  let liveReason = liveUnavailableReason(liveConnectionStatus);
+  const liveConnected = anyLive;
   const savedMode = existing ? (existing.mode as BlockMode) : undefined;
   const [mode, setMode] = useState<BlockMode>(() => savedMode ?? copyFrom?.mode ?? (takenByMode.PAPER.length >= instruments.length && liveConnected ? 'LIVE' : 'PAPER'));
   const availableFor = (m: BlockMode) => instruments.filter((i) => i.status === 'PUBLISHED' && !takenByMode[m].includes(i.id));
@@ -128,6 +130,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
   const [confirmRestore, setConfirmRestore] = useState(false);
 
   const instrument = instruments.find((i) => i.id === draft.instrumentId);
+  // Once a pair is chosen, Live follows THAT exchange's connection.
+  if (instrument) liveReason = instrument.exchange === 'BITUNIX' ? liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') : liveUnavailableReason(liveConnectionStatus);
   const version = versions.find((v) => v.id === draft.strategyVersionId);
   const issues = useMemo(() => validateDraft(draft, instrument, version), [draft, instrument, version]);
   const errors = { ...errorMap(issues), ...serverIssues };
@@ -179,7 +183,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
   const fixedPair = existing ?? copyFrom?.block;
   const pairOptions = fixedPair
     ? [{ value: fixedPair.instrumentId, label: instrument ? pairLabel(instrument) : fixedPair.symbol }]
-    : available.map((i) => ({ value: i.id, label: pairLabel(i) }));
+    : available.map((i) => ({ value: i.id, label: i.exchange === 'BITUNIX' ? `${pairLabel(i)} · Bitunix` : pairLabel(i) }));
 
   const cost = isDecimalString(draft.orderCostUsdt.trim()) ? new Decimal(draft.orderCostUsdt.trim()) : null;
   const notional = cost && cost.gt(0) && draft.leverage ? cost.times(draft.leverage) : null;
@@ -266,7 +270,17 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           {err('instrumentId') && <p className="-mt-2 text-xs text-loss">{err('instrumentId')}</p>}
           {instrument && (
             <p className="-mt-2 text-xs text-subtle">
-              Exchange: {instrument.exchange} Futures (derived from the pair){instrument.isFixture ? ' · fixture metadata, not verified exchange limits' : ''}
+              Exchange: {instrument.exchange === 'BITUNIX' ? 'Bitunix' : instrument.exchange} Futures (derived from the pair) · execution symbol{' '}
+              <span className="font-mono" data-testid="execution-symbol">
+                {instrument.exchangeSymbol}
+              </span>
+              {instrument.exchange === 'BITUNIX' ? ' · quantity in the base coin' : ''}
+              {instrument.isFixture ? ' · fixture metadata, not verified exchange limits' : ''}
+            </p>
+          )}
+          {instrument && instrument.signalSources !== undefined && (
+            <p className={`-mt-2 text-xs ${instrument.signalSources.length ? 'text-subtle' : 'text-warn'}`} data-testid="signal-sources">
+              {instrument.signalSources.length ? `TradingView signals: ${instrument.signalSources.join(', ')}` : 'No TradingView route delivers signals to this contract yet: entries will not open until an administrator routes one.'}
             </p>
           )}
           <FilterSelect
@@ -311,12 +325,13 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
                   ? [{ value: copyFrom.mode, label: MODE_LABELS[copyFrom.mode] }]
                   : [
                       { value: 'PAPER' as const, label: 'Paper' },
-                      { value: 'LIVE' as const, label: liveConnected ? 'Live (MEXC)' : 'Live — connect MEXC first', disabled: !liveConnected }
+                      { value: 'LIVE' as const, label: liveConnected ? (bitunixConnectionStatus === 'VERIFIED' ? (liveConnectionStatus === 'VERIFIED' ? 'Live (MEXC / Bitunix)' : 'Live (Bitunix)') : 'Live (MEXC)') : 'Live — connect MEXC first', disabled: !liveConnected }
                     ]
             }
             hint={
               mode === 'LIVE'
-                ? 'Live sends real orders to your own MEXC Futures account with the stop loss in the same request. Entries also need the platform switch, administrator approval of your account and limits, your own activation (Live Trading page) and a contract on the Live allowlist. Same strategy rules and prices as Paper; separate balance, orders and positions.'
+                ? `Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'} Futures account with the stop loss in the same request.`
+                  + ' Entries also need the platform switch, administrator approval of your account and limits, your own activation (Live Trading page) and a contract on the Live allowlist. Same strategy rules and prices as Paper; separate balance, orders and positions.'
                 : 'Paper uses the simulator with an isolated paper balance. Same strategy rules and public prices as Live.'
             }
           />
