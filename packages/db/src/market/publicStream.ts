@@ -150,6 +150,10 @@ export abstract class PublicStreamSocket implements TickerStreamView {
   protected abstract pingMessage(nowMs: number): object;
   /** One parsed JSON frame. Call `confirm`, `notePong`, `noteAck` as the protocol requires. */
   protected abstract onFrame(msg: Record<string, unknown>, at: Date): void;
+  /** A socket just opened (after resubscription and the first ping). Private streams log in here. */
+  protected onOpened(): void {}
+  /** The current socket is gone (network, silence, forced). Not called by stop(). */
+  protected onClosed(): void {}
 
   /* ─── helpers for subclasses ─── */
 
@@ -320,6 +324,7 @@ export abstract class PublicStreamSocket implements TickerStreamView {
       if (this.wanted.size) this.subscribe([...this.wanted]);
       this.ping();
       this.pingTimer = setInterval(() => this.keepalive(), this.pingMs);
+      this.onOpened();
     };
     ws.onmessage = (ev) => {
       if (this.ws === ws) this.onMessage(ev.data);
@@ -349,6 +354,7 @@ export abstract class PublicStreamSocket implements TickerStreamView {
     const wasOpen = this.state === 'OPEN';
     this.confirmed.clear();
     this.subscribedAt.clear();
+    this.onClosed();
     if (this.state === 'STOPPED') return;
     this.state = 'CLOSED';
     this.openedAt = null;

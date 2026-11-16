@@ -46,6 +46,7 @@ function transport(reply: (url: string, init: RequestInit) => Response | Promise
     baseUrl: 'https://fapi.example.test',
     now: () => TS,
     nonce: () => NONCE,
+    sleep: async () => {},
     fetch: (async (u: URL | string, init: RequestInit) => {
       seen.push({ url: String(u), headers: init.headers as Record<string, string> });
       return reply(String(u), init);

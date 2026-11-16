@@ -18,7 +18,7 @@ export default async function LiveTradingPage() {
     >
       <LiveTradingClient initial={status} />
       <div className="mt-4">
-        <BitunixConnectionCard initial={status.bitunix} />
+        <BitunixConnectionCard initial={status.bitunix} account={status.bitunixAccount} />
       </div>
     </PageContainer>
   );

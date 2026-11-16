@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { codeRevision, createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { BitunixAccountSupervisor, codeRevision, createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
 import { assertLiveTransportAllowed } from '@trendpilot/domain';
 
 /**
@@ -156,6 +156,24 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
     }
   };
   const syncTimer = opts.processJobs === false ? null : setInterval(() => (syncBusy = syncBusy.then(syncLive)), Number(env.LIVE_SYNC_MS ?? 30_000));
+  // Bitunix (read-only): one authenticated private WebSocket per verified Bitunix connection plus
+  // REST reconciliation into the exchange account mirror. Queries only; no order path exists.
+  const bitunixMode = bitunixPrivateSyncMode(env);
+  const bitunix = opts.processJobs === false || bitunixMode === 'off' ? null : new BitunixAccountSupervisor(handle.db, { env, log, syncEveryMs: Number(env.BITUNIX_SYNC_MS ?? 60_000) });
+  let bitunixBusy: Promise<void> = Promise.resolve();
+  const bitunixTick = async () => {
+    if (stopping || !bitunix) return;
+    try {
+      await bitunix.tick();
+    } catch (e) {
+      log(`bitunix account sync failed: ${(e as Error).message}`);
+    }
+  };
+  const bitunixTimer = bitunix ? setInterval(() => (bitunixBusy = bitunixBusy.then(bitunixTick)), Number(env.BITUNIX_SUPERVISOR_MS ?? 15_000)) : null;
+  if (bitunix) {
+    log('Bitunix account sync: on (read-only; private WebSocket + REST reconciliation per verified connection)');
+    bitunixBusy = bitunixBusy.then(bitunixTick);
+  }
   const pruneStart = opts.processJobs === false ? null : setTimeout(() => void prune(), 60_000);
   const pruneTimer = opts.processJobs === false ? null : setInterval(() => void prune(), 3_600_000);
 
@@ -166,17 +184,27 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       if (pollTimer) clearInterval(pollTimer);
       if (mailTimer) clearInterval(mailTimer);
       if (syncTimer) clearInterval(syncTimer);
+      if (bitunixTimer) clearInterval(bitunixTimer);
       clearInterval(beatTimer);
       if (pruneStart) clearTimeout(pruneStart);
       if (pruneTimer) clearInterval(pruneTimer);
       await busy;
       await mailBusy;
       await syncBusy;
+      await bitunixBusy;
+      await bitunix?.stop();
       await markStopped(handle.db, 'worker', workerId).catch(() => undefined);
       await handle.close();
       log('stopped');
     }
   };
+}
+
+/** BITUNIX_PRIVATE_SYNC: "on" (default) or "off". Anything else is a configuration error. */
+export function bitunixPrivateSyncMode(env: Record<string, string | undefined>): 'on' | 'off' {
+  const v = (env.BITUNIX_PRIVATE_SYNC || 'on').trim().toLowerCase();
+  if (v !== 'on' && v !== 'off') throw new Error(`BITUNIX_PRIVATE_SYNC must be "on" or "off" (got "${v}").`);
+  return v;
 }
 
 /** Processes every runnable job once, then returns (used by `npm run worker -- --once`). */

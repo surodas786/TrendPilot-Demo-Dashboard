@@ -1,5 +1,5 @@
 import { asc, eq } from 'drizzle-orm';
-import { connectionDto, connectionFor, connectionState, controlState, getDb, getLiveControl, listConnections, liveControlDto, MEXC_CAPABILITIES, schema } from '@trendpilot/db';
+import { bitunixAccountView, connectionDto, connectionFor, connectionState, controlState, getDb, getLiveControl, listConnections, liveControlDto, MEXC_CAPABILITIES, schema } from '@trendpilot/db';
 import { liveAccountBlockers, LIVE_REFUSAL_TEXT } from '@trendpilot/domain';
 
 /** The signed-in investor's Live status (owner-scoped; never the key or secret). */
@@ -23,6 +23,7 @@ export async function liveStatusFor(ownerId: string) {
     platform: { transportEnabled: state.transportEnabled, liveEnabled: state.platformEnabled, entriesHalted: state.platformEntriesHalted, haltReason: state.platformHaltReason ?? null },
     connection: active ? connectionDto(active) : null,
     bitunix: bx && bx.status !== 'REVOKED' ? connectionDto(bx) : null,
+    bitunixAccount: bx && bx.status !== 'REVOKED' ? await bitunixAccountView(db, bx) : null,
     liveContracts: contracts,
     entries: { allowed: !first, reason: first?.reason ?? null, reasonText: first?.text ?? null, blockers }
   };

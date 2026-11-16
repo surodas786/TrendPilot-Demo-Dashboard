@@ -121,8 +121,11 @@ describe('Bitunix connection setup (read-only)', () => {
     const ap = await call(approve.POST, { method: 'POST', cookie: admin, params: { id: bx.id }, body: { maxOrderContracts: '1', maxOrderNotionalUsdt: '100', maxLeverage: 5, maxExposureUsdt: '100' } });
     expect(ap.status).toBe(409);
     expect(ap.body.message ?? JSON.stringify(ap.body)).toMatch(/Bitunix/);
+    // Step 2: the admin sync runs Bitunix's own READ-ONLY reconciliation, never the MEXC sync.
+    // This file's seam answers only the two Step 1 endpoints, so the snapshot is reported failed.
     const sy = await call(adminSync.POST, { method: 'POST', cookie: admin, params: { id: bx.id } });
-    expect(sy.status).toBe(409);
+    expect(sy.status).toBe(200);
+    expect(sy.body.sync).toMatchObject({ ok: false, connectionId: bx.id });
     const list = (await call(adminLive.GET, { cookie: admin })).body;
     expect(JSON.stringify(list)).not.toMatch(/sealed/i);
     expect(list.connections.filter((c: { exchange: string }) => c.exchange === 'BITUNIX')).toHaveLength(2);

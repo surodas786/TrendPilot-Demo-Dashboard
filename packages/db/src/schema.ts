@@ -1177,6 +1177,14 @@ export const exchangeConnections = pgTable(
     syncLeaseUntil: timestamp('sync_lease_until', { withTimezone: true }),
     /** Differences between MEXC and TrendPilot found by the private sync (OPS-03). */
     drift: jsonb('drift').notNull().default([]),
+    /**
+     * Bitunix (read-only sync): the account as last reconciled — USDT balance (REST snapshot or a
+     * newer balance push), position mode, pending orders, pending TP/SL, history watermark. `{}`
+     * for MEXC rows, whose account lives in paper_accounts (mode LIVE).
+     */
+    accountState: jsonb('account_state').notNull().default({}),
+    /** Bitunix private WebSocket health (auth, connected, last message, reconnects). Separate from the public feed. */
+    streamState: jsonb('stream_state').notNull().default({}),
     revision: integer('revision').notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt()
@@ -1216,4 +1224,116 @@ export const liveControl = pgTable(
     updatedAt: updatedAt()
   },
   (t) => [check('live_control_singleton', sql`${t.id} = 1`)]
+);
+
+/* ───────────────────────── Bitunix Step 2: read-only account mirror ───────────────────────── */
+
+/**
+ * An exchange position as the exchange reports it, per exchange connection (investor + exchange).
+ * Keyed by the exchange's own position ID, so a symbol's LONG and SHORT legs are separate rows.
+ * Not a TrendPilot position (that is `positions`, tied to an account and mode): Paper and the MEXC
+ * Live account never read this table. Quantities and prices are unscaled numerics (exact
+ * decimals as reported); IDs are text.
+ *
+ * status: OPEN; CLOSED only once the exchange's position history confirms the close; DETACHED when
+ * the investor replaced the API key (the old account is no longer read, so nothing is claimed).
+ * close_check PENDING: the exchange no longer lists it (or pushed a close) and history has not
+ * confirmed it yet; the row stays OPEN.
+ */
+export const exchangePositions = pgTable(
+  'exchange_positions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => exchangeConnections.id),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    exchange: text('exchange').notNull(),
+    exchangePositionId: text('exchange_position_id').notNull(),
+    symbol: text('symbol').notNull(),
+    side: text('side').notNull(),
+    positionMode: text('position_mode'),
+    marginMode: text('margin_mode'),
+    leverage: integer('leverage'),
+    qty: numeric('qty').notNull(),
+    maxQty: numeric('max_qty'),
+    avgOpenPrice: numeric('avg_open_price'),
+    liqPrice: numeric('liq_price'),
+    margin: numeric('margin'),
+    unrealizedPnl: numeric('unrealized_pnl'),
+    realizedPnl: numeric('realized_pnl'),
+    /** Cumulative fee / funding the exchange shows on the OPEN position (not a settlement). */
+    reportedFee: numeric('reported_fee'),
+    reportedFunding: numeric('reported_funding'),
+    status: text('status').notNull().default('OPEN'),
+    closeCheck: text('close_check').notNull().default('NONE'),
+    closeCheckSince: timestamp('close_check_since', { withTimezone: true }),
+    closeCheckReason: text('close_check_reason'),
+    closePrice: numeric('close_price'),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    /** Settlement as the exchange's position history reports it; null = not reported (unknown). */
+    settledFee: numeric('settled_fee'),
+    settledFunding: numeric('settled_funding'),
+    settledRealizedPnl: numeric('settled_realized_pnl'),
+    /** TRENDPILOT when opened by a TrendPilot order; EXCHANGE otherwise (all Bitunix positions in Step 2). */
+    origin: text('origin').notNull().default('EXCHANGE'),
+    openedAt: timestamp('opened_at', { withTimezone: true }),
+    /** Exchange time of the state this row holds; older reports never overwrite it. */
+    exchangeUpdatedAt: timestamp('exchange_updated_at', { withTimezone: true }),
+    lastSource: text('last_source'),
+    revision: integer('revision').notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('exchange_positions_connection_position_key').on(t.connectionId, t.exchangePositionId),
+    index('exchange_positions_owner_idx').on(t.ownerId, t.status),
+    check('exchange_positions_side_valid', sql`${t.side} IN ('LONG', 'SHORT')`),
+    check('exchange_positions_status_valid', sql`${t.status} IN ('OPEN', 'CLOSED', 'DETACHED')`),
+    check('exchange_positions_close_check_valid', sql`${t.closeCheck} IN ('NONE', 'PENDING')`),
+    check('exchange_positions_origin_valid', sql`${t.origin} IN ('EXCHANGE', 'TRENDPILOT')`),
+    check('exchange_positions_qty_nonneg', sql`${t.qty} >= 0`)
+  ]
+);
+
+/**
+ * Exchange-reported account activity per connection, append-only and deduplicated on
+ * (connection, dedup_key): position opened / increased / reduced / close suspected / closed,
+ * orders, fills, TP/SL lifecycle (a TPSL_TRIGGERED row carries detail.execution until fills confirm
+ * it). `origin` separates exchange-originated activity from TrendPilot's; `source` says how it was
+ * learned (REST snapshot, WS push, HISTORY read).
+ */
+export const exchangeAccountEvents = pgTable(
+  'exchange_account_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => exchangeConnections.id),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    exchange: text('exchange').notNull(),
+    kind: text('kind').notNull(),
+    dedupKey: text('dedup_key').notNull(),
+    origin: text('origin').notNull(),
+    source: text('source').notNull(),
+    exchangePositionId: text('exchange_position_id'),
+    exchangeOrderId: text('exchange_order_id'),
+    symbol: text('symbol'),
+    side: text('side'),
+    qtyBefore: numeric('qty_before'),
+    qtyAfter: numeric('qty_after'),
+    businessTime: timestamp('business_time', { withTimezone: true }),
+    detail: jsonb('detail').notNull().default({}),
+    createdAt: createdAt()
+  },
+  (t) => [
+    uniqueIndex('exchange_account_events_dedup_key').on(t.connectionId, t.dedupKey),
+    index('exchange_account_events_connection_idx').on(t.connectionId, t.createdAt),
+    check('exchange_account_events_origin_valid', sql`${t.origin} IN ('EXCHANGE', 'TRENDPILOT')`),
+    check('exchange_account_events_source_valid', sql`${t.source} IN ('REST', 'WS', 'HISTORY')`)
+  ]
 );

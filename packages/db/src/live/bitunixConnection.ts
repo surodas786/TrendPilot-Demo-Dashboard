@@ -1,10 +1,10 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { DomainError, ErrorCode, keyFingerprint, validateAccountRef } from '@trendpilot/domain';
 import type { Db } from '../client';
 import { recordAudit } from '../repos/audit';
-import { exchangeConnections, users } from '../schema';
+import { exchangeConnections, exchangePositions, users } from '../schema';
 import { open as unseal, seal } from '../security/secretBox';
-import { BITUNIX_PRIVATE_DEFAULT_BASE_URL, bitunixReadOnlyCheck, BitunixPrivateError, BitunixReadOnlyTransport, type BitunixRequester } from './bitunixPrivate';
+import { BITUNIX_PRIVATE_DEFAULT_BASE_URL, bitunixReadOnlyCheck, BitunixPrivateError, BitunixReadOnlyTransport, type BitunixCredentials, type BitunixRequester } from './bitunixPrivate';
 import { connectionFor, type ConnectionRow } from './liveMode';
 
 /**
@@ -31,10 +31,18 @@ export function installBitunixTestSeam(s: BitunixTestSeam | null, env: Record<st
   seam = s;
 }
 
-function requesterFor(c: ConnectionRow, env: Record<string, string | undefined>): BitunixRequester {
-  if (seam) return seam.requesterFor(c);
-  return new BitunixReadOnlyTransport({ credentials: { apiKey: unseal(c.apiKeySealed), secretKey: unseal(c.secretSealed) }, baseUrl: env.BITUNIX_PRIVATE_BASE_URL || BITUNIX_PRIVATE_DEFAULT_BASE_URL });
+/** The connection's own key, unsealed server-side. Never logged, never returned by an API. */
+export function bitunixCredentialsOf(c: ConnectionRow): BitunixCredentials {
+  if (c.exchange !== 'BITUNIX' || !c.apiKeySealed || !c.secretSealed) throw new Error('not an active Bitunix connection');
+  return { apiKey: unseal(c.apiKeySealed), secretKey: unseal(c.secretSealed) };
 }
+
+/** Read-only REST access with THIS connection's key (the test seam replaces it outside production). */
+export function bitunixRequesterFor(c: ConnectionRow, env: Record<string, string | undefined> = process.env): BitunixRequester {
+  if (seam) return seam.requesterFor(c);
+  return new BitunixReadOnlyTransport({ credentials: bitunixCredentialsOf(c), baseUrl: env.BITUNIX_PRIVATE_BASE_URL || BITUNIX_PRIVATE_DEFAULT_BASE_URL });
+}
+const requesterFor = bitunixRequesterFor;
 
 const describeError = (e: unknown): string =>
   e instanceof BitunixPrivateError ? `${e.kind}${e.code !== undefined ? ` ${e.code}` : ''}: ${e.message}`.slice(0, 300) : 'Verification failed.';
@@ -86,6 +94,17 @@ export async function saveBitunixConnection(
   if (issues.length) throw new DomainError(400, ErrorCode.VALIDATION_FAILED, issues.join(' '));
   const [u] = await db.select({ role: users.role, status: users.status }).from(users).where(eq(users.id, ownerId));
   if (!u || u.role !== 'INVESTOR' || u.status !== 'ACTIVE') throw new DomainError(403, ErrorCode.FORBIDDEN, 'Only an active investor can connect an exchange account.');
+  // A replaced key may belong to another Bitunix account: positions mirrored under the old key are
+  // DETACHED (no longer read; never reported as closed) and the account state starts over.
+  const [prior] = await db.select({ id: exchangeConnections.id }).from(exchangeConnections).where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, 'BITUNIX')));
+  if (prior) {
+    const detached = await db
+      .update(exchangePositions)
+      .set({ status: 'DETACHED', closeCheck: 'NONE', closeCheckSince: null, closeCheckReason: 'API key replaced', updatedAt: sql`now()`, revision: sql`${exchangePositions.revision} + 1` })
+      .where(and(eq(exchangePositions.connectionId, prior.id), eq(exchangePositions.status, 'OPEN')))
+      .returning({ id: exchangePositions.id });
+    if (detached.length) await recordAudit(db, { actorUserId: ownerId, action: 'LIVE_CONNECTION_POSITIONS_DETACHED', targetType: 'exchange_connection', targetId: prior.id, result: 'SUCCESS', metadata: { exchange: 'BITUNIX', positions: detached.length }, correlationId });
+  }
   const values = {
     accountRef: input.accountRef.trim(),
     apiKeySealed: seal(apiKey),
@@ -103,7 +122,12 @@ export async function saveBitunixConnection(
     maxExposureUsdt: null,
     liveEnabled: false,
     activatedAt: null,
-    drift: []
+    drift: [],
+    accountState: {},
+    streamState: {},
+    lastSyncAt: null,
+    lastSyncOkAt: null,
+    lastSyncError: null
   };
   const [row] = await db
     .insert(exchangeConnections)
