@@ -53,7 +53,7 @@ export interface OperationsDto {
     platformEnabled: boolean;
     entriesHalted: boolean;
     haltReason: string | null;
-    connections: { ownerEmail: string; status: string; approved: boolean; liveEnabled: boolean; entriesHalted: boolean; haltReason: string | null; lastSyncAt: string | null; lastSyncError: string | null; drift: number }[];
+    connections: { ownerEmail: string; exchange: string; status: string; approved: boolean; liveEnabled: boolean; entriesHalted: boolean; haltReason: string | null; lastSyncAt: string | null; lastSyncError: string | null; drift: number }[];
     openPositions: number;
     unprotectedPositions: number;
     unresolvedOrders: number;
@@ -106,6 +106,7 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
     haltReason: control.haltReason,
     connections: conns.map(({ c, email }) => ({
       ownerEmail: email,
+      exchange: c.exchange,
       status: c.status,
       approved: !!c.approvedAt,
       liveEnabled: c.liveEnabled,

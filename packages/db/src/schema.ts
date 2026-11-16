@@ -1144,6 +1144,7 @@ export const exchangeConnections = pgTable(
     ownerId: uuid('owner_id')
       .notNull()
       .references(() => users.id),
+    /** MEXC or BITUNIX. Rows from before Bitunix keep the default MEXC. */
     exchange: text('exchange').notNull().default('MEXC'),
     /** Non-secret account reference (e.g. UID suffix). */
     accountRef: text('account_ref').notNull(),
@@ -1181,7 +1182,9 @@ export const exchangeConnections = pgTable(
     updatedAt: updatedAt()
   },
   (t) => [
-    uniqueIndex('exchange_connections_owner_key').on(t.ownerId),
+    // One connection per investor AND exchange: a Bitunix key sits next to the MEXC key.
+    uniqueIndex('exchange_connections_owner_exchange_key').on(t.ownerId, t.exchange),
+    check('exchange_connections_exchange_valid', sql`${t.exchange} IN ('MEXC', 'BITUNIX')`),
     check('exchange_connections_status_valid', sql`${t.status} IN ('PENDING', 'VERIFIED', 'FAILED', 'REVOKED')`),
     check('exchange_connections_position_mode_valid', sql`${t.positionMode} IS NULL OR ${t.positionMode} IN ('ONE_WAY', 'HEDGE')`),
     check(

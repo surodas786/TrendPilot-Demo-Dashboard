@@ -2,7 +2,10 @@ import { sql } from 'drizzle-orm';
 import { hostname } from 'node:os';
 import type pg from 'pg';
 import {
+  BitunixPriceStream,
+  BITUNIX_WS_PUBLIC_URL,
   createDb,
+  ExchangePriceCache,
   heartbeat,
   markStopped,
   MarketFeed,
@@ -17,7 +20,7 @@ import {
   type StreamTicker,
   type WsFactory
 } from '@trendpilot/db';
-import { assertLiveTransportDisabled, FEED_POLICY } from '@trendpilot/domain';
+import { assertLiveTransportDisabled, bitunixSymbolFor, FEED_POLICY } from '@trendpilot/domain';
 
 /**
  * MKT-01/02 public price feed process (Paper mode). MEXC Futures PUBLIC data only: no credentials,
@@ -53,6 +56,12 @@ export interface FeedConfig {
   restFallback: { enabled: boolean; minIntervalMs: number };
   logTicks: boolean;
   drillDisconnectAfterS: number | null;
+  /**
+   * Bitunix public prices (Step 1): off unless BITUNIX_PUBLIC_WS=on. Prices go to the in-memory,
+   * exchange-keyed cache and the heartbeat only; they are not stored as quotes and drive no orders
+   * until Bitunix contracts exist as platform instruments.
+   */
+  bitunix: { enabled: boolean; wsUrl: string; symbols: string[] };
 }
 
 export function feedConfig(env: Record<string, string | undefined>): FeedConfig {
@@ -64,7 +73,21 @@ export function feedConfig(env: Record<string, string | undefined>): FeedConfig 
   if (fb !== 'on' && fb !== 'off') throw new Error(`MARKET_FEED_REST_FALLBACK must be "on" or "off" (got "${fb}").`);
   const minIntervalMs = Math.max(5_000, Number(env.MARKET_FEED_REST_FALLBACK_MIN_MS || FEED_POLICY.restFallbackMinIntervalMs));
   const drill = Number(env.MARKET_FEED_WS_DRILL_DISCONNECT_AFTER_S || '');
-  return { tickerSource, wsUrl, restFallback: { enabled: fb === 'on', minIntervalMs }, logTicks: env.MARKET_FEED_LOG_TICKS === '1', drillDisconnectAfterS: Number.isFinite(drill) && drill > 0 ? drill : null };
+  const bx = (env.BITUNIX_PUBLIC_WS || 'off').trim().toLowerCase();
+  if (bx !== 'on' && bx !== 'off') throw new Error(`BITUNIX_PUBLIC_WS must be "on" or "off" (got "${bx}").`);
+  const bxUrl = env.BITUNIX_PUBLIC_WS_URL || BITUNIX_WS_PUBLIC_URL;
+  if (!/^wss:\/\//.test(bxUrl) && !(env.NODE_ENV !== 'production' && /^ws:\/\/(127\.0\.0\.1|localhost)[:/]/.test(bxUrl))) throw new Error(`BITUNIX_PUBLIC_WS_URL must be a wss:// URL (got "${bxUrl}").`);
+  const bxSymbols = (env.BITUNIX_WS_SYMBOLS || 'BTCUSDT,XAUUSDT').split(',').map((x) => x.trim());
+  const badSymbol = bxSymbols.find((x) => !bitunixSymbolFor(x));
+  if (badSymbol !== undefined) throw new Error(`BITUNIX_WS_SYMBOLS has an invalid symbol "${badSymbol}" (use e.g. BTCUSDT,XAUUSDT).`);
+  return {
+    tickerSource,
+    wsUrl,
+    restFallback: { enabled: fb === 'on', minIntervalMs },
+    logTicks: env.MARKET_FEED_LOG_TICKS === '1',
+    drillDisconnectAfterS: Number.isFinite(drill) && drill > 0 ? drill : null,
+    bitunix: { enabled: bx === 'on', wsUrl: bxUrl, symbols: [...new Set(bxSymbols.map((x) => bitunixSymbolFor(x)!))] }
+  };
 }
 
 const summarize = (s: CycleSummary) =>
@@ -256,6 +279,35 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
     log(`public MEXC feed started: REST ticker polling (${baseUrl}) every ${pollMs} ms [MARKET_FEED_TICKER_SOURCE=rest]; live order transport disabled`);
   }
 
+  // Bitunix public prices (opt-in): own socket, own exchange-keyed cache entries; MEXC is untouched.
+  const prices = new ExchangePriceCache();
+  let bitunix: BitunixPriceStream | null = null;
+  if (cfg.bitunix.enabled) {
+    bitunix = new BitunixPriceStream({
+      url: cfg.bitunix.wsUrl,
+      factory: o.wsFactory,
+      log: (m) => log(`bitunix ${m}`),
+      logTicks: cfg.logTicks,
+      onTicker: (t) => prices.putBook('BITUNIX', t.exchangeSymbol, t),
+      onPrice: (p) => prices.putMark('BITUNIX', p.exchangeSymbol, p),
+      onUnsupported: (sym) => prices.forget('BITUNIX', sym)
+    });
+    bitunix.setSymbols(cfg.bitunix.symbols);
+    bitunix.start();
+    log(`Bitunix public prices: WebSocket ${cfg.bitunix.wsUrl} for ${cfg.bitunix.symbols.join(', ')} (cache and heartbeat only; no quotes stored, no orders)`);
+  }
+  const bitunixDetail = () => {
+    if (!bitunix) return null;
+    const at = new Date();
+    return {
+      stream: bitunix.status(),
+      quotes: cfg.bitunix.symbols.map((sym) => {
+        const q = prices.quote('BITUNIX', sym, at);
+        return { symbol: sym, state: q.state, problem: q.problem, bid: q.bid, ask: q.ask, last: q.last, mark: q.mark, asOf: q.asOf?.toISOString() ?? null };
+      })
+    };
+  };
+
   let busy: Promise<void> = Promise.resolve();
   let lastLine = '';
   let lastBeat = 0;
@@ -279,7 +331,8 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
           stream: stream?.status() ?? null,
           restCalls: { ...(source.requestCounts ?? {}) },
           restPausedUntil: paused ? new Date(paused).toISOString() : null,
-          contracts: s.instruments.map((r) => ({ symbol: r.symbol, state: r.state, error: r.error ?? null }))
+          contracts: s.instruments.map((r) => ({ symbol: r.symbol, state: r.state, error: r.error ?? null })),
+          ...(bitunix ? { bitunix: bitunixDetail() } : {})
         };
         await heartbeat(handle.db, { service: 'market-feed', instance, startedAt, detail }).catch((e) => log(`heartbeat failed: ${(e as Error).message}`));
       }
@@ -314,6 +367,7 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
       clearInterval(timer);
       if (drillTimer) clearTimeout(drillTimer);
       stream?.stop();
+      bitunix?.stop();
       await busy;
       await queue?.settled();
       await markStopped(handle.db, 'market-feed', instance).catch(() => undefined);

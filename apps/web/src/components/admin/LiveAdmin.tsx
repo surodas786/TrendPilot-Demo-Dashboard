@@ -15,6 +15,7 @@ export interface LiveAdminData {
   capabilities: { id: string; summary: string; documented: string; mock: string; readOnly: string; gaps: string[] }[];
   connections: {
     id: string;
+    exchange: string;
     owner: { email: string; name: string };
     accountRef: string;
     keyFingerprint: string;
@@ -163,6 +164,7 @@ export function LiveAdmin({ initial }: { initial: LiveAdminData }) {
                   <div className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="font-semibold text-ink">{x.owner.name}</span>
                     <span className="text-subtle">{x.owner.email}</span>
+                    <StatusPill tone="neutral">{x.exchange === 'BITUNIX' ? 'Bitunix · read-only' : 'MEXC'}</StatusPill>
                     <span className="text-subtle">· {x.accountRef} · key {x.keyFingerprint} · {x.positionMode ?? 'mode unknown'}</span>
                     <StatusPill tone={x.status === 'VERIFIED' ? 'gain' : x.status === 'FAILED' ? 'loss' : 'neutral'}>{x.status}</StatusPill>
                     <StatusPill tone={x.approved ? 'gain' : 'neutral'}>{x.approved ? 'Approved' : 'Not approved'}</StatusPill>
@@ -182,12 +184,20 @@ export function LiveAdmin({ initial }: { initial: LiveAdminData }) {
                     Last sync {x.lastSyncAt ? new Date(x.lastSyncAt).toLocaleString() : 'never'}
                     {x.lastSyncError ? ` — error: ${x.lastSyncError}` : ''}
                   </p>
+                  {x.exchange !== 'MEXC' && (
+                    <p className="mt-2 text-xs text-subtle" data-testid="read-only-connection">
+                      Read-only connection (position mode and balance check). Bitunix Live trading is not available in this release, so there is nothing to approve, halt or sync.
+                    </p>
+                  )}
+                  {x.exchange === 'MEXC' && (
                   <div className="mt-3 grid gap-3 sm:grid-cols-4">
                     <TextField label="Max contracts / order" value={l.maxOrderContracts} onChange={(v) => setL({ maxOrderContracts: v })} />
                     <TextField label="Max notional / order (USDT)" value={l.maxOrderNotionalUsdt} onChange={(v) => setL({ maxOrderNotionalUsdt: v })} />
                     <TextField label="Max leverage" value={String(l.maxLeverage)} onChange={(v) => setL({ maxLeverage: Number(v) || 0 })} />
                     <TextField label="Max exposure (USDT)" value={l.maxExposureUsdt} onChange={(v) => setL({ maxExposureUsdt: v })} />
                   </div>
+                  )}
+                  {x.exchange === 'MEXC' && (
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Button size="sm" variant="primary" icon={CheckCircle2Icon} disabled={x.status !== 'VERIFIED'} loading={busy === `ap-${x.id}`} onClick={() => post(`ap-${x.id}`, `/v1/admin/live/connections/${x.id}/approve`, l, x.approved ? 'Limits updated.' : 'Account approved for Live.')}>
                       {x.approved ? 'Update limits' : 'Approve with these limits'}
@@ -215,6 +225,7 @@ export function LiveAdmin({ initial }: { initial: LiveAdminData }) {
                       Sync now
                     </Button>
                   </div>
+                  )}
                 </div>
               );
             })}

@@ -1,0 +1,11 @@
+{
+  "_source": "Captured from wss://fapi.bitunix.com/public/ on 2026-11-16 (subscribe tickers/ticker/price for BTCUSDT and XAUUSDT, ping, unsubscribe, unknown symbol).",
+  "connect": {"op":"connect","ts":1794820330397,"data":{"result":true}},
+  "tickerBTC": {"ch":"ticker","symbol":"BTCUSDT","ts":1794820330587,"data":{"s":"BTCUSDT","o":"65988.3","la":"64277.6","h":"66092.3","l":"64201.4","b":"23509.9491","q":"1527380994.36799","r":"-2.592429264"}},
+  "priceBTC": {"ch":"price","symbol":"BTCUSDT","ts":1794820330587,"data":{"ip":"64316.6","mp":"64282.1","fr":"0.000383","ft":"2026-11-16T08:00:00Z","nft":"2026-11-16T16:00:00Z"}},
+  "priceXAU": {"ch":"price","symbol":"XAUUSDT","ts":1794820330588,"data":{"ip":"3868.12","mp":"3868.16","fr":"0.003608","ft":"2026-11-16T08:00:00Z","nft":"2026-11-16T12:00:00Z"}},
+  "tickersBTC": {"ch":"tickers","ts":1794820330588,"data":[{"s":"BTCUSDT","o":"65988.3","la":"64277.6","h":"66092.3","l":"64201.4","b":"23509.9491","q":"1527380994.36799","r":"-2.592429264","bd":"64271.8","ak":"64271.9","bv":"3.7335","av":"2.0129"}]},
+  "pong": {"op":"ping","ts":1794820330591,"pong":1794820330,"ping":1794820330},
+  "unsubscribeAck": {"op":"unsubscribe","ts":1794820336600,"data":"success"},
+  "unknownSymbol": {"ch":"ticker","symbol":"NOPEUSDT","ts":1794820337600,"data":{}}
+}

@@ -13,6 +13,7 @@ export const POST = route<{ id: string }>(async (req, { correlationId, params })
   const db = getDb();
   const [c] = await db.select().from(schema.exchangeConnections).where(eq(schema.exchangeConnections.id, params.id));
   if (!c) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
+  if (c.exchange !== 'MEXC') throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix connections are read-only in this release: there are no Live entries to halt or positions to sync.');
   const r = await syncLiveAccount(db, c.ownerId, now());
   await recordAudit(db, { actorUserId: user.id, action: 'ADMIN_LIVE_SYNC', targetType: 'exchange_connection', targetId: c.id, result: r.ok ? 'SUCCESS' : 'FAILED', metadata: { exitsRecorded: r.exitsRecorded, drift: r.drift.length, error: r.error ?? null }, correlationId });
   return json(correlationId, { sync: r });

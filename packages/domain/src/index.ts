@@ -1,6 +1,7 @@
 export * from './auth';
 export * from './decimal';
 export * from './errors';
+export * from './exchange';
 export * from './exits';
 export * from './live';
 export * from './liveTransport';

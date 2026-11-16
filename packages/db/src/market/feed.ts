@@ -190,7 +190,7 @@ export class MarketFeed {
     }
   }
 
-  /** Contracts the feed must cover: published ones plus any with an open position (MKT-01). */
+  /** MEXC contracts the feed must cover: published ones plus any with an open position (MKT-01). */
   async covered(): Promise<Covered[]> {
     const rows = await this.db
       .select({
@@ -206,6 +206,9 @@ export class MarketFeed {
         openPositions: sql<number>`(select count(*) from positions p where p.instrument_id = "instruments"."id" and p.status = 'OPEN')`.mapWith(Number)
       })
       .from(instruments)
+      // MEXC contracts only: quotes are keyed by instrument, and an instrument belongs to one
+      // exchange, so another exchange's contract never receives MEXC prices (or vice versa).
+      .where(eq(instruments.exchange, 'MEXC'))
       .orderBy(instruments.symbol);
     return rows.filter((r) => r.status === 'PUBLISHED' || r.openPositions > 0);
   }

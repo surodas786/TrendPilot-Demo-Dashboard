@@ -1,0 +1,50 @@
+{
+  "code": 0,
+  "data": [
+    {
+      "symbol": "BTCUSDT",
+      "base": "BTC",
+      "quote": "USDT",
+      "minTradeVolume": "0.0001",
+      "minBuyPriceOffset": "-0.5",
+      "maxSellPriceOffset": "100",
+      "maxLimitOrderVolume": "1200",
+      "maxMarketOrderVolume": "120",
+      "basePrecision": 4,
+      "quotePrecision": 1,
+      "maxLeverage": 200,
+      "minLeverage": 1,
+      "defaultLeverage": 10,
+      "defaultMarginMode": "2",
+      "priceProtectScope": "0.01",
+      "symbolStatus": "OPEN",
+      "isApiSupported": true,
+      "maxFundingRate": "0.3",
+      "minFundingRate": "-0.3",
+      "launchTime": "1719403200000"
+    },
+    {
+      "symbol": "XAUUSDT",
+      "base": "XAU",
+      "quote": "USDT",
+      "minTradeVolume": "0.002",
+      "minBuyPriceOffset": null,
+      "maxSellPriceOffset": null,
+      "maxLimitOrderVolume": "2000",
+      "maxMarketOrderVolume": "200",
+      "basePrecision": 3,
+      "quotePrecision": 2,
+      "maxLeverage": 200,
+      "minLeverage": 1,
+      "defaultLeverage": 10,
+      "defaultMarginMode": "2",
+      "priceProtectScope": "0.05",
+      "symbolStatus": "OPEN",
+      "isApiSupported": true,
+      "maxFundingRate": "0.5",
+      "minFundingRate": "-0.5",
+      "launchTime": "1770724800000"
+    }
+  ],
+  "msg": "Success"
+}

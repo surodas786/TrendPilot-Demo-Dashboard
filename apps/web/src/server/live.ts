@@ -8,6 +8,8 @@ export async function liveStatusFor(ownerId: string) {
   const control = await getLiveControl(db);
   const conn = await connectionFor(db, ownerId);
   const active = conn && conn.status !== 'REVOKED' ? conn : null;
+  // The investor's Bitunix connection (read-only in this release): shown, never part of the Live gates.
+  const bx = await connectionFor(db, ownerId, 'BITUNIX');
   const contracts = await db
     .select({ id: schema.instruments.id, symbol: schema.instruments.symbol, exchangeSymbol: schema.instruments.exchangeSymbol })
     .from(schema.instruments)
@@ -20,6 +22,7 @@ export async function liveStatusFor(ownerId: string) {
   return {
     platform: { transportEnabled: state.transportEnabled, liveEnabled: state.platformEnabled, entriesHalted: state.platformEntriesHalted, haltReason: state.platformHaltReason ?? null },
     connection: active ? connectionDto(active) : null,
+    bitunix: bx && bx.status !== 'REVOKED' ? connectionDto(bx) : null,
     liveContracts: contracts,
     entries: { allowed: !first, reason: first?.reason ?? null, reasonText: first?.text ?? null, blockers }
   };
