@@ -20,3 +20,12 @@ describe('Bitunix feed config', () => {
     expect(() => feedConfig({ BITUNIX_PUBLIC_WS_URL: 'http://fapi.bitunix.com/public/' })).toThrow(/wss/);
   });
 });
+
+describe('Bitunix private account sync switch (worker)', () => {
+  it('is on by default, can be turned off, and refuses anything else', async () => {
+    const { bitunixPrivateSyncMode } = await import('../src/worker');
+    expect(bitunixPrivateSyncMode({})).toBe('on');
+    expect(bitunixPrivateSyncMode({ BITUNIX_PRIVATE_SYNC: 'OFF' })).toBe('off');
+    expect(() => bitunixPrivateSyncMode({ BITUNIX_PRIVATE_SYNC: 'maybe' })).toThrow(/BITUNIX_PRIVATE_SYNC/);
+  });
+});

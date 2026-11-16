@@ -1,0 +1,6 @@
+{
+  "_source": "Captured from wss://fapi.bitunix.com/private/ on 2026-11-16 with a deliberately invalid API key (no account involved). Subscribes sent before login and after the failed login got no answer; the server did not close the socket after the failed login.",
+  "connect": {"op":"connect","data":{"result":true}},
+  "pong": {"op":"ping","pong":1794823540,"ping":1794823540},
+  "loginFailed": {"op":"login","data":{"msg":"invalid params，Authorize: Token invalid","nonce":"52f6ba308131ccbbf89a12ab16e4b9c6","result":false}}
+}

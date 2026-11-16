@@ -30,7 +30,8 @@ export interface BitunixCredentials {
   secretKey: string;
 }
 
-export type BitunixErrorKind = 'NETWORK' | 'TIMEOUT' | 'HTTP' | 'API' | 'PARSE' | 'REFUSED';
+/** INCOMPLETE: a list could not be read in full (page cap), so it must not be treated as the whole account. */
+export type BitunixErrorKind = 'NETWORK' | 'TIMEOUT' | 'HTTP' | 'API' | 'PARSE' | 'REFUSED' | 'INCOMPLETE';
 
 export class BitunixPrivateError extends Error {
   constructor(
@@ -45,6 +46,10 @@ export class BitunixPrivateError extends Error {
   /** Rate limited: Bitunix 10005 / 10006, or HTTP 429. */
   get rateLimited(): boolean {
     return (this.kind === 'API' && (this.code === 10005 || this.code === 10006)) || (this.kind === 'HTTP' && this.code === 429);
+  }
+  /** Worth retrying a READ: rate limit, network, timeout, HTTP 5xx, Bitunix 10001 (network error). */
+  get transient(): boolean {
+    return this.rateLimited || this.kind === 'NETWORK' || this.kind === 'TIMEOUT' || (this.kind === 'HTTP' && (this.code ?? 0) >= 500) || (this.kind === 'API' && this.code === 10001);
   }
 }
 
@@ -137,8 +142,25 @@ export const redactBitunixHeaders = (h: Record<string, string>) => Object.fromEn
 
 /* ───────────────────────── Paths ───────────────────────── */
 
-/** The only private paths reachable in this step (GET). Account queries; nothing changes state. */
-export const BITUNIX_READ_ONLY_PATHS: RegExp[] = [/^\/api\/v1\/futures\/account$/, /^\/api\/v1\/futures\/account\/position_mode$/];
+/**
+ * The only private paths reachable (GET): account, position, order, fill and TP/SL QUERIES. No
+ * order, cancel, TP/SL placement, position-mode or leverage path is here, so none can be sent.
+ */
+export const BITUNIX_READ_ONLY_PATHS: RegExp[] = [
+  /^\/api\/v1\/futures\/account$/,
+  /^\/api\/v1\/futures\/account\/position_mode$/,
+  /^\/api\/v1\/futures\/position\/get_pending_positions$/,
+  /^\/api\/v1\/futures\/position\/get_history_positions$/,
+  /^\/api\/v1\/futures\/trade\/get_pending_orders$/,
+  /^\/api\/v1\/futures\/trade\/get_history_orders$/,
+  /^\/api\/v1\/futures\/trade\/get_history_trades$/,
+  /^\/api\/v1\/futures\/trade\/get_order_detail$/,
+  /^\/api\/v1\/futures\/tpsl\/get_pending_orders$/,
+  /^\/api\/v1\/futures\/tpsl\/get_history_orders$/
+];
+
+/** Bitunix private REST: 10 requests per second per UID; requests are spaced a little wider. */
+export const BITUNIX_MIN_REQUEST_INTERVAL_MS = 110;
 
 /* ───────────────────────── Transport ───────────────────────── */
 
@@ -166,21 +188,55 @@ export interface BitunixHttpOptions {
   fetch?: typeof fetch;
   now?: () => number;
   nonce?: () => string;
+  /** Spacing between requests (rate limit 10/s per UID). */
+  minIntervalMs?: number;
+  /** Retries of a READ after a transient failure (rate limit, network, timeout, 5xx). */
+  retries?: number;
+  sleep?: (ms: number) => Promise<void>;
   /** Receives method, URL and REDACTED headers of every request (diagnostics). */
   onRequest?: (r: { method: string; url: string; headers: Record<string, string> }) => void;
 }
 
-/** Real HTTP transport, read-only: allowlisted GETs only. */
+/**
+ * Real HTTP transport, read-only: allowlisted GETs only. Requests are spaced under the rate limit,
+ * and a READ that fails transiently is retried with exponential backoff (safe: a query changes
+ * nothing). A Bitunix refusal (signature, permission, IP whitelist, parameter) is never retried.
+ */
 export class BitunixReadOnlyTransport implements BitunixRequester {
   private readonly o: Required<Omit<BitunixHttpOptions, 'onRequest'>> & Pick<BitunixHttpOptions, 'onRequest'>;
+  private nextAt = 0;
   constructor(o: BitunixHttpOptions) {
     if (!o.credentials?.apiKey || !o.credentials?.secretKey) throw new BitunixPrivateError('Bitunix credentials are not configured', 'REFUSED');
-    this.o = { baseUrl: BITUNIX_PRIVATE_DEFAULT_BASE_URL, timeoutMs: 8_000, fetch, now: Date.now, nonce: bitunixNonce, ...o };
+    this.o = {
+      baseUrl: BITUNIX_PRIVATE_DEFAULT_BASE_URL,
+      timeoutMs: 8_000,
+      fetch,
+      now: Date.now,
+      nonce: bitunixNonce,
+      minIntervalMs: BITUNIX_MIN_REQUEST_INTERVAL_MS,
+      retries: 2,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      ...o
+    };
   }
 
   /** The only method: there is no write path on this transport. */
   async get<T>(path: string, params: Record<string, QueryValue> = {}): Promise<T> {
     if (!BITUNIX_READ_ONLY_PATHS.some((r) => r.test(path))) throw new BitunixPrivateError(`Refusing GET ${path}: not an allowlisted read-only endpoint`, 'REFUSED');
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.once<T>(path, params);
+      } catch (e) {
+        if (!(e instanceof BitunixPrivateError) || !e.transient || attempt >= this.o.retries) throw e;
+        await this.o.sleep((e.rateLimited ? 1_000 : 500) * 2 ** attempt);
+      }
+    }
+  }
+
+  private async once<T>(path: string, params: Record<string, QueryValue>): Promise<T> {
+    const wait = this.nextAt - this.o.now();
+    if (wait > 0) await this.o.sleep(wait);
+    this.nextAt = this.o.now() + this.o.minIntervalMs;
     const req = buildBitunixSignedRequest(this.o.credentials, 'GET', path, params, { timestampMs: this.o.now(), nonce: this.o.nonce() });
     this.o.onRequest?.({ method: 'GET', url: req.url, headers: redactBitunixHeaders(req.headers) });
     let res: Response;

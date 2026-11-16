@@ -1,4 +1,4 @@
-import { connectionDto, connectionFor, getDb, revokeConnection, saveBitunixConnection, saveConnection } from '@trendpilot/db';
+import { bitunixAccountView, connectionDto, connectionFor, getDb, revokeConnection, saveBitunixConnection, saveConnection } from '@trendpilot/db';
 import { json, readJson, route } from '@/server/http';
 import { exchangeOf } from '@/server/exchange';
 import { requireInvestor } from '@/server/session';
@@ -12,8 +12,11 @@ export const dynamic = 'force-dynamic';
 export const GET = route(async (req, { correlationId }) => {
   const { user } = await requireInvestor(req);
   const exchange = exchangeOf(req);
-  const c = await connectionFor(getDb(), user.id, exchange);
-  return json(correlationId, { connection: c && c.status !== 'REVOKED' ? connectionDto(c) : null });
+  const db = getDb();
+  const c = await connectionFor(db, user.id, exchange);
+  const active = c && c.status !== 'REVOKED' ? c : null;
+  // Bitunix: the read-only account mirror (positions, balance, sync and private-stream health).
+  return json(correlationId, { connection: active ? connectionDto(active) : null, ...(exchange === 'BITUNIX' ? { account: active ? await bitunixAccountView(db, active) : null } : {}) });
 });
 
 /**

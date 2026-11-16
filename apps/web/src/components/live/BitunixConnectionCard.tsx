@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { KeyRoundIcon, PlugZapIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react';
+import { ArrowDownUpIcon, KeyRoundIcon, PlugZapIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react';
 import { request } from '@/lib/api';
 import { Button } from '../ui/Button';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -21,6 +21,23 @@ export interface BitunixConnectionView {
   verifiedAt: string | null;
 }
 
+export interface BitunixAccountView {
+  accountState: { balance?: { available: string | null; equity?: string | null; atMs: number; source: string }; pendingOrders?: unknown[]; tpsl?: unknown[]; excludedSubAccountRows?: number };
+  streamState: { state?: string; auth?: string | null; authError?: string | null; readyAt?: string | null; lastMessageAt?: string | null; reconnects?: number; lastError?: string | null; updatedAt?: string };
+  lastSyncAt: string | null;
+  lastSyncOkAt: string | null;
+  lastSyncError: string | null;
+  positions: { positionId: string; symbol: string; side: string; qty: string; avgOpenPrice: string | null; liqPrice: string | null; unrealizedPnl: string | null; status: string; closeCheck: string; closePrice: string | null; closedAt: string | null; origin: string }[];
+}
+
+const streamLabel = (s: BitunixAccountView['streamState'] | undefined): { text: string; tone: 'gain' | 'warn' | 'loss' | 'neutral' } => {
+  if (!s?.state) return { text: 'Not started', tone: 'neutral' };
+  if (s.auth === 'AUTH_FAILED') return { text: 'Login rejected', tone: 'loss' };
+  if (s.auth === 'AUTHENTICATED' && s.state === 'OPEN') return { text: 'Connected', tone: 'gain' };
+  if (s.state === 'STOPPED') return { text: 'Stopped', tone: 'neutral' };
+  return { text: 'Reconnecting', tone: 'warn' };
+};
+
 const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
   <div className="flex items-start justify-between gap-4 border-b border-line py-2 text-sm last:border-0">
     <span className="text-subtle">{label}</span>
@@ -31,9 +48,10 @@ const Row = ({ label, children }: { label: string; children: React.ReactNode }) 
 const BASE = '/v1/me/exchange-connection?exchange=BITUNIX';
 
 /** The investor's own Bitunix Futures key: read-only check only (position mode and USDT balance). */
-export function BitunixConnectionCard({ initial }: { initial: BitunixConnectionView | null }) {
+export function BitunixConnectionCard({ initial, account: initialAccount }: { initial: BitunixConnectionView | null; account?: BitunixAccountView | null }) {
   const router = useRouter();
   const [c, setC] = useState(initial);
+  const [account, setAccount] = useState(initialAccount ?? null);
   const [form, setForm] = useState({ accountRef: '', apiKey: '', secretKey: '' });
   const [editing, setEditing] = useState(!initial);
   const [busy, setBusy] = useState<string | null>(null);
@@ -41,13 +59,14 @@ export function BitunixConnectionCard({ initial }: { initial: BitunixConnectionV
 
   const act = async (key: string, method: string, path: string, body?: unknown, ok?: string) => {
     setBusy(key);
-    const r = await request<{ connection: BitunixConnectionView }>(method, path, body === undefined ? {} : { body });
+    const r = await request<{ connection: BitunixConnectionView; account?: BitunixAccountView | null }>(method, path, body === undefined ? {} : { body });
     setBusy(null);
     if (!r.ok) {
       toast.error('Not done', { description: r.message });
       return null;
     }
     if (ok) toast.success(ok);
+    if (r.data.account !== undefined) setAccount(r.data.account ?? null);
     router.refresh();
     return r.data.connection;
   };
@@ -84,8 +103,54 @@ export function BitunixConnectionCard({ initial }: { initial: BitunixConnectionV
               <StatusPill tone={positionModeLabel(c.positionMode).tone}>{positionModeLabel(c.positionMode).text}</StatusPill>
             </span>
           </Row>
-          <Row label="Balance (USDT, at check)">{v.usdt ? `${v.usdt.equity} equity · ${v.usdt.available} available` : '—'}</Row>
+          <Row label="Balance (USDT)">
+            {account?.accountState.balance
+              ? `${account.accountState.balance.equity ?? '—'} equity · ${account.accountState.balance.available ?? '—'} available (${account.accountState.balance.source === 'WS' ? 'live push' : 'last sync'})`
+              : v.usdt
+                ? `${v.usdt.equity} equity · ${v.usdt.available} available (at check)`
+                : '—'}
+          </Row>
           <Row label="Last check">{v.checkedAt ? new Date(v.checkedAt).toLocaleString() : '—'}</Row>
+          <Row label="Private account stream">
+            <span data-testid="bitunix-stream">
+              <StatusPill tone={streamLabel(account?.streamState).tone}>{streamLabel(account?.streamState).text}</StatusPill>
+            </span>
+          </Row>
+          <Row label="Account sync — last successful">
+            <span data-testid="bitunix-last-sync-ok">{account?.lastSyncOkAt ? new Date(account.lastSyncOkAt).toLocaleString() : 'never'}</span>
+          </Row>
+          {account?.lastSyncError && (!account.lastSyncOkAt || (account.lastSyncAt && account.lastSyncAt > account.lastSyncOkAt)) && <p className="mt-2 text-xs text-warn">Latest sync failed: {account.lastSyncError}. Positions keep their last confirmed state.</p>}
+          {account?.streamState.authError && <p className="mt-2 text-xs text-loss">Bitunix rejected the private login: {account.streamState.authError}. Replace the key to retry.</p>}
+          {account && account.positions.some((p) => p.status === 'OPEN') && (
+            <div className="mt-3 overflow-x-auto" data-testid="bitunix-positions">
+              <table className="w-full text-left text-xs">
+                <thead className="text-subtle">
+                  <tr>
+                    <th className="py-1 pr-2 font-normal">Contract</th>
+                    <th className="py-1 pr-2 font-normal">Side</th>
+                    <th className="py-1 pr-2 font-normal">Qty</th>
+                    <th className="py-1 pr-2 font-normal">Entry</th>
+                    <th className="py-1 pr-2 font-normal">Liq.</th>
+                    <th className="py-1 font-normal">Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {account.positions
+                    .filter((p) => p.status === 'OPEN')
+                    .map((p) => (
+                      <tr key={p.positionId} className="border-t border-line">
+                        <td className="py-1 pr-2 text-ink">{p.symbol}</td>
+                        <td className="py-1 pr-2">{p.side === 'LONG' ? 'Long' : 'Short'}</td>
+                        <td className="py-1 pr-2 font-mono">{p.qty}</td>
+                        <td className="py-1 pr-2 font-mono">{p.avgOpenPrice ?? '—'}</td>
+                        <td className="py-1 pr-2 font-mono">{p.liqPrice ?? '—'}</td>
+                        <td className="py-1 text-subtle">{p.closeCheck === 'PENDING' ? 'Close reported; confirming with Bitunix history' : p.origin === 'EXCHANGE' ? 'Opened on Bitunix' : 'TrendPilot'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           {v.error && <p className="mt-2 text-xs text-loss">Check failed: {v.error}</p>}
           <p className="mt-3 text-xs text-subtle">{v.liveTrading ?? 'Bitunix Live trading is not available yet; this connection is read-only.'} TrendPilot never changes your position mode.</p>
           <div className="mt-4 flex flex-wrap gap-2">
@@ -98,6 +163,14 @@ export function BitunixConnectionCard({ initial }: { initial: BitunixConnectionV
               }}
             >
               Check again
+            </Button>
+            <Button
+              icon={ArrowDownUpIcon}
+              loading={busy === 'sync'}
+              disabled={c.status !== 'VERIFIED'}
+              onClick={() => act('sync', 'POST', '/v1/me/exchange-connection/sync?exchange=BITUNIX', undefined, 'Bitunix account synced (read-only).')}
+            >
+              Sync
             </Button>
             <Button icon={KeyRoundIcon} onClick={() => setEditing(true)}>
               Replace key

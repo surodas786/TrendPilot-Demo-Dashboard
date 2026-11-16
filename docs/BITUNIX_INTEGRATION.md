@@ -1,8 +1,12 @@
 # Bitunix USDT-M Futures integration
 
 Bitunix is a second exchange next to MEXC. Feature parity with MEXC is the goal across the steps
-below. **Step 1 (this change) is read-only connectivity:** no Bitunix order is placed, no position
-mode or leverage is changed, and nothing is routed to Bitunix.
+below. **Steps 1 and 2 are read-only at the exchange:** no Bitunix order is placed, cancelled or
+changed, no position mode or leverage is changed, and no signal is routed to Bitunix.
+
+- Step 1: connectivity: connection check, contract discovery, public prices.
+- Step 2: read-only account sync: REST reconciliation, the authenticated private WebSocket, and an
+  exchange account mirror. See "Step 2" below.
 
 No TrendPilot Bitunix starter was available on the build workstation. Signing, WebSocket messages
 and fixtures come from the official docs (links below, read 2026-11-16) and from frames and
@@ -59,15 +63,70 @@ responses captured from the live public API on the same day.
 | Public WebSocket + reconnect drill | **live Bitunix** (`ops:bitunix-check --drill`) | Pass: both symbols FRESH; resubscribed after drop |
 | Authenticated read-only check | live Bitunix | **Pending**: no Bitunix key is configured on this workstation. Run `ops:bitunix-check` with a read-only key in the shell. |
 
+## Step 2: read-only account sync
+
+| Area | Code | Notes |
+| --- | --- | --- |
+| Read endpoints | `bitunixPrivate.ts` (`BITUNIX_READ_ONLY_PATHS`), `bitunixAccount.ts` | Pending/history positions, pending/history orders, history trades (fills), order detail, pending/history TP/SL, account and position mode. **Queries only:** order, cancel, TP/SL placement, position-mode and leverage paths are not on the allowlist and are refused before signing. Requests are spaced at 110 ms (limit 10/s per UID). A read that fails transiently (10005/10006/10001, 429, 5xx, network, timeout) is retried twice with backoff. A Bitunix refusal (signature, IP, permission, parameter) is never retried. |
+| Pagination, completeness | `readAllPages` | `skip` + `limit=100` until a short page or `skip >= total`. Beyond 100 pages the read raises **INCOMPLETE**. A missing list or a malformed row is a PARSE error. A snapshot is all-or-nothing (`takeBitunixSnapshot`). |
+| Main account only | `readPendingPositions`, `isSubAccountRow` | Pending positions without `subAccountId` also return sub-accounts the key can reach. TrendPilot sends `includeSubAccounts=false` and drops any row with a non-empty `subAccountId` (the count is stored as `excludedSubAccountRows`). History endpoints return the main account only by default. |
+| Schema (migration `0028`) | `exchange_positions`, `exchange_account_events`, `exchange_connections.account_state` / `stream_state` | Additive only. Positions are keyed by (connection, Bitunix positionId), so a symbol's LONG and SHORT legs coexist. Quantities and prices are unscaled `numeric` (exact). IDs are `text`. Events are deduplicated on (connection, dedup_key). Paper and the MEXC Live account never read these tables. |
+| Reconciliation | `bitunixSync.ts` | See "Rules" below. |
+| Private WebSocket | `bitunixPrivateWs.ts` | `wss://fapi.bitunix.com/private/`, one session per investor connection. Login `sign = sha256(sha256(nonce + unixSeconds + apiKey) + secret)`, separate from the REST signer (ms, sorted query + body). After login it sends one subscribe for `balance`, `order` and `position`; `tpsl` is pushed automatically. Ping every 15 s; a socket silent for 30 s is replaced; jittered backoff reconnect. A rejected login **stops** the session (no retry loop with a bad key). No login answer within 10 s means drop and retry. Pushes outside an authenticated session are ignored. Keys, signatures, nonces and login frames are never logged. |
+| Worker | `bitunixSupervisor.ts`, `apps/worker/src/worker.ts` | `BITUNIX_PRIVATE_SYNC=on` (default; `off` disables). One session per VERIFIED Bitunix connection. Every push and every REST reconciliation for a connection runs on one serialized queue. A replaced key (credential rotation) restarts the session. A rejected login waits for a new key or 15 min. Private health goes to `exchange_connections.stream_state`, separate from the public feed heartbeat. |
+| API and UI | `POST /v1/me/exchange-connection/sync?exchange=BITUNIX`, `GET /v1/me/exchange-connection?exchange=BITUNIX` (`account`), `GET /v1/me/live` (`bitunixAccount`), admin `…/connections/[id]/sync` | The Live Trading card shows private stream health, the exchange-reported position mode, the last successful sync, the last error, the balance and open positions (both legs). Its **Sync** button runs the read-only reconciliation for that connection only. |
+| Ops check | `npm run ops:bitunix-check` | With a read-only key in the shell, it also takes a complete REST snapshot plus 24 h of history, and holds a private WebSocket login for `--private-ws-seconds`. |
+
+### Rules
+
+- **Ordering.** Each position row keeps the exchange time of the state it holds: REST `mtime`, or the push `ts` for position pushes (which carry no modify time; `ts` is gateway time and is used only there). An older update is ignored. A REST snapshot never rolls back a newer push. The balance is replaced only by a newer snapshot or push.
+- **Pushes during a snapshot** wait on the connection's queue and are applied after it, with the same time check.
+- **Reconnect gap.** Every successful login, at startup and on each reconnect, triggers a full REST reconciliation.
+- **Closes.**
+  - None of these closes a position; each only sets `close_check = PENDING` and keeps the position OPEN:
+    - the position missing from a complete snapshot;
+    - a position `CLOSE` push;
+    - a quantity of 0.
+  - Only a row in **position history** confirms the close. It records the close price, the time, and the settled fee/funding/realized P&L exactly as reported.
+  - A failed or incomplete snapshot changes nothing.
+  - A smaller quantity is a partial close (`POSITION_REDUCED`, with the exact remaining size).
+- **TP/SL.** A `CLOSE`+`FILLED` push is recorded as `TPSL_TRIGGERED` with `execution: PENDING`: the child order was placed. Execution is confirmed only by fills on that position since the trigger (`TPSL_EXECUTED`, with trade IDs and the remaining size). Without fills, nothing about the position changes.
+- **Origin.** Client IDs `tp-…`/`tpx-…` are TRENDPILOT. Everything else, and every position change in this release, is EXCHANGE.
+- **Fees and funding.** The open position's cumulative values are stored as *reported*. Settlement amounts come only from history; when history omits them they stay null (unknown).
+- **Key replacement.** OPEN mirrored positions become DETACHED (no longer read, never reported closed). The account state starts over.
+
+### Observed on the live private endpoint (invalid key, 2026-11-16)
+
+- The server sends `{"op":"connect","data":{"result":true}}` on open.
+- The private pong carries no millisecond `ts`, so no clock sample is taken from it.
+- A failed login answers `{"op":"login","data":{"result":false,"msg":"invalid params，Authorize: Token invalid",…}}` and the server keeps the socket open.
+- Subscribes sent before login are ignored.
+- The success frame shape (`result:true`) is inferred and has not been observed: no key was available.
+
+### Step 2 verification status
+
+| Check | How | Result |
+| --- | --- | --- |
+| WS login signature vs reference vector (Python), seconds vs REST ms | unit | Pass |
+| Login failure (captured frame), login timeout, reconnect + re-login, silence | unit, fake socket | Pass |
+| Pagination, INCOMPLETE, malformed responses, sub-account exclusion, retries | unit | Pass |
+| Both legs, partial and manual closes, history confirmation, incomplete snapshot | DB integration, mocked Bitunix | Pass |
+| Duplicate / out-of-order pushes, pushes during snapshot, reconnect gap | DB integration, supervisor with fake stream | Pass |
+| Triggered TP/SL with unfilled child, then confirmed by fills | DB integration | Pass |
+| Auth failure, credential rotation, investor and exchange isolation | DB integration | Pass |
+| Private endpoint reachability + failure frame | live Bitunix, invalid key | Pass |
+| Signed REST snapshot, private login + subscribe with a real key | live Bitunix | **Pending**: no read-only key configured |
+| Live position events (open / partial / close / TP-SL pushes) | live Bitunix | **Pending**: needs an account with activity |
+
 ## MEXC dependencies, by later step
 
 | Step | What depends on MEXC today and must change |
 | --- | --- |
-| 2. Instruments and market data | `instruments.exchange` is always `MEXC`. Pair validation (`contractCatalog.ts`, `normalizePairInput` → `BTC_USDT`) and `mexcFixtures.ts` are MEXC-only. **Bitunix quantities are in base coin**, with no contract multiplier: model as `contractMultiplier = 1`, `qtyStep = 10^-basePrecision`, `minQty = minTradeVolume`, `maxQty = maxMarketOrderVolume` (market orders). `MarketFeed` writes `market_quotes` / candles / funding with `source = 'MEXC_PUBLIC'`. A Bitunix feed needs its own source label, REST klines (5m/15m closed bars for EMA 200) and funding history. Its stream must persist through `ingestStreamTicker`'s rules once a Bitunix quote is a joined book + mark. `MARKET_SOURCES`, admin market-data and pairs pages. |
-| 3. Account model and routing | `paper_accounts` is unique on (owner, mode): one LIVE account per investor, implicitly MEXC. A Bitunix Live account needs its own balance, ledger and positions (add `exchange` to the account key, or a per-connection account). `order_blocks` / signal routes pick an instrument, and the venue comes from the account. Per-investor routing to Bitunix needs instrument → exchange → that investor's connection. `resolveAccountVenue`, `liveGuardedVenue`, `liveAccountGate`, capability evidence (`live_control` is MEXC capabilities), `LIVE_EXCHANGE` in `liveMode.ts`. |
-| 4. Orders | A `bitunixVenue` implementing `ExecutionVenue`: place with attached stop (Bitunix TP/SL fields), market close, reduce-only, `clientId` idempotency (30042 duplicate), position-mode-aware sides for One-way vs Hedge, leverage and margin mode set per symbol, rate limits (10005 / 10006 / 10009). An ORDERS transport gated by `openLiveOrderTransport`, as on MEXC. Position-mode change only as an explicit account action (20009 when positions exist). |
-| 5. Exits, sync, reverse | `liveSync.ts` (MEXC positions, stops, deals, funding `holdFee`, drift), `closeRejection.ts` (MEXC codes), `SyncWithMexcButton`, close-and-reverse sequencing, trailing TP and target close against Bitunix closes, exchange-side close detection. |
-| 6. Reporting | Holdings chart, liquidation price, fees and funding from Bitunix records. Labels that say "MEXC" across investor pages. |
+| 3. Instruments and market data | `instruments.exchange` is always `MEXC`. Pair validation (`contractCatalog.ts`, `normalizePairInput` → `BTC_USDT`) and `mexcFixtures.ts` are MEXC-only. **Bitunix quantities are in base coin**, with no contract multiplier: model as `contractMultiplier = 1`, `qtyStep = 10^-basePrecision`, `minQty = minTradeVolume`, `maxQty = maxMarketOrderVolume` (market orders). `MarketFeed` writes `market_quotes` / candles / funding with `source = 'MEXC_PUBLIC'`. A Bitunix feed needs its own source label, REST klines (5m/15m closed bars for EMA 200) and funding history. Its stream must persist through `ingestStreamTicker`'s rules once a Bitunix quote is a joined book + mark. `MARKET_SOURCES`, admin market-data and pairs pages. |
+| 4. Account model and routing | `paper_accounts` is unique on (owner, mode): one LIVE account per investor, implicitly MEXC. A Bitunix Live account needs its own balance, ledger and positions (add `exchange` to the account key, or a per-connection account). `order_blocks` / signal routes pick an instrument, and the venue comes from the account. Per-investor routing to Bitunix needs instrument → exchange → that investor's connection. `resolveAccountVenue`, `liveGuardedVenue`, `liveAccountGate`, capability evidence (`live_control` is MEXC capabilities), `LIVE_EXCHANGE` in `liveMode.ts`. |
+| 5. Orders | A `bitunixVenue` implementing `ExecutionVenue`: place with attached stop (Bitunix TP/SL fields), market close, reduce-only, `clientId` idempotency (30042 duplicate), position-mode-aware sides for One-way vs Hedge, leverage and margin mode set per symbol, rate limits (10005 / 10006 / 10009). An ORDERS transport gated by `openLiveOrderTransport`, as on MEXC. Position-mode change only as an explicit account action (20009 when positions exist). |
+| 6. Exits, sync, reverse | `liveSync.ts` (MEXC positions, stops, deals, funding `holdFee`, drift), `closeRejection.ts` (MEXC codes), `SyncWithMexcButton`, close-and-reverse sequencing, trailing TP and target close against Bitunix closes, exchange-side close detection. |
+| 7. Reporting | Holdings chart, liquidation price, fees and funding from Bitunix records. Labels that say "MEXC" across investor pages. |
 
 Docs: [sign](https://www.bitunix.com/api-docs/futures/common/sign.html) ·
 [position mode](https://www.bitunix.com/api-docs/futures/account/get_position_mode.html) ·
