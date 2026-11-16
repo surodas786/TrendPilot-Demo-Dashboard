@@ -652,7 +652,7 @@ export async function syncLiveAccount(db: Db, ownerId: string, now: Date, opts: 
 
 /** Owners whose Live accounts need syncing: verified connections that are active or still hold Live exposure. */
 export async function liveAccountsToSync(db: Db): Promise<string[]> {
-  const conns = await db.select({ ownerId: exchangeConnections.ownerId, liveEnabled: exchangeConnections.liveEnabled }).from(exchangeConnections).where(eq(exchangeConnections.status, 'VERIFIED'));
+  const conns = await db.select({ ownerId: exchangeConnections.ownerId, liveEnabled: exchangeConnections.liveEnabled }).from(exchangeConnections).where(and(eq(exchangeConnections.status, 'VERIFIED'), eq(exchangeConnections.exchange, 'MEXC')));
   const out: string[] = [];
   for (const c of conns) {
     if (c.liveEnabled) {

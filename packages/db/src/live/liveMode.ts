@@ -15,7 +15,8 @@ import {
   type LiveConnectionState,
   type LiveControlState,
   type LiveLimits,
-  type LiveVerdict
+  type LiveVerdict,
+  type ExchangeId
 } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { recordAudit } from '../repos/audit';
@@ -100,10 +101,20 @@ export const controlState = (c: LiveControlRow, env: Record<string, string | und
   platformHaltReason: c.haltReason
 });
 
-export async function connectionFor(db: Executor, ownerId: string): Promise<ConnectionRow | null> {
-  const [c] = await db.select().from(exchangeConnections).where(eq(exchangeConnections.ownerId, ownerId));
+/**
+ * The investor's connection to one exchange. Defaults to MEXC: every Live order, sync, halt and
+ * activation path is MEXC's, and a Bitunix row (Step 1, read-only) must never be picked up by it.
+ */
+export async function connectionFor(db: Executor, ownerId: string, exchange: ExchangeId = 'MEXC'): Promise<ConnectionRow | null> {
+  const [c] = await db
+    .select()
+    .from(exchangeConnections)
+    .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, exchange)));
   return c ?? null;
 }
+
+/** Live trading exists only for MEXC in this build; other exchanges are read-only connections. */
+export const LIVE_EXCHANGE: ExchangeId = 'MEXC';
 
 export interface LiveEligibility {
   verdict: LiveVerdict;
@@ -213,7 +224,7 @@ export async function haltConnectionEntries(db: Executor, ownerId: string, reaso
   const rows = await db
     .update(exchangeConnections)
     .set({ entriesHalted: true, haltReason: reason.slice(0, 200), haltedAt: new Date(), revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
-    .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.entriesHalted, false)))
+    .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, LIVE_EXCHANGE), eq(exchangeConnections.entriesHalted, false)))
     .returning({ id: exchangeConnections.id });
   if (rows[0]) await recordAudit(db, { actorUserId, action: 'LIVE_ENTRIES_HALT', targetType: 'exchange_connection', targetId: rows[0].id, result: 'SUCCESS', metadata: { reason }, correlationId });
 }
@@ -263,7 +274,7 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
         await db
           .update(exchangeConnections)
           .set({ positionMode: now === 'ONE_WAY' || now === 'HEDGE' ? now : null, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
-          .where(eq(exchangeConnections.ownerId, o.ownerId));
+          .where(and(eq(exchangeConnections.ownerId, o.ownerId), eq(exchangeConnections.exchange, LIVE_EXCHANGE)));
         await halt(`POSITION_MODE ${r.clientOrderId}: MEXC reports ${now ?? 'an unknown mode'}, TrendPilot verified another`);
         return { ...result, reason: `LIVE_REFUSED:LIVE_POSITION_MODE` };
       }
@@ -452,32 +463,39 @@ export async function saveConnection(
   };
   const [row] = await db
     .insert(exchangeConnections)
-    .values({ ownerId, ...values })
-    .onConflictDoUpdate({ target: exchangeConnections.ownerId, set: { ...values, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` } })
+    .values({ ownerId, exchange: LIVE_EXCHANGE, ...values })
+    .onConflictDoUpdate({ target: [exchangeConnections.ownerId, exchangeConnections.exchange], set: { ...values, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` } })
     .returning();
   await recordAudit(db, { actorUserId: ownerId, action: 'LIVE_CONNECTION_SAVE', targetType: 'exchange_connection', targetId: row!.id, result: 'SUCCESS', metadata: { accountRef: values.accountRef, keyFingerprint: values.keyFingerprint }, correlationId });
   return verifyConnection(db, ownerId, correlationId, env);
 }
 
-/** Removes the key. Refused while Live positions are open or Live orders are unresolved. */
-export async function revokeConnection(db: Db, ownerId: string, correlationId = 'live'): Promise<ConnectionRow> {
-  const conn = await connectionFor(db, ownerId);
+/**
+ * Removes the key for one exchange (MEXC by default). MEXC: refused while Live positions are open
+ * or Live orders are unresolved. A read-only exchange (Bitunix, Step 1) has no Live exposure.
+ */
+export async function revokeConnection(db: Db, ownerId: string, correlationId = 'live', exchange: ExchangeId = LIVE_EXCHANGE): Promise<ConnectionRow> {
+  const conn = await connectionFor(db, ownerId, exchange);
   if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'No exchange connection is set up.');
-  const exposure = await liveExposure(db, ownerId);
+  const exposure = exchange === LIVE_EXCHANGE ? await liveExposure(db, ownerId) : { openPositions: 0, unresolved: 0 };
   if (exposure.openPositions || exposure.unresolved) throw new DomainError(409, ErrorCode.CONFLICT, 'Close your Live positions and wait for open Live orders to finish before removing the API key.');
   const [u] = await db
     .update(exchangeConnections)
     .set({ status: 'REVOKED', apiKeySealed: '', secretSealed: '', liveEnabled: false, activatedAt: null, approvedAt: null, approvedBy: null, revision: sql`${exchangeConnections.revision} + 1`, updatedAt: sql`now()` })
     .where(eq(exchangeConnections.id, conn.id))
     .returning();
-  await recordAudit(db, { actorUserId: ownerId, action: 'LIVE_CONNECTION_REVOKE', targetType: 'exchange_connection', targetId: conn.id, result: 'SUCCESS', correlationId });
+  await recordAudit(db, { actorUserId: ownerId, action: 'LIVE_CONNECTION_REVOKE', targetType: 'exchange_connection', targetId: conn.id, result: 'SUCCESS', metadata: { exchange }, correlationId });
   return u!;
 }
 
 /** The investor switches Live trading on or off for their own account. Off by default. */
 export async function setLiveActivation(db: Db, ownerId: string, enabled: boolean, correlationId = 'live'): Promise<ConnectionRow> {
   return db.transaction(async (tx) => {
-    const [conn] = await tx.select().from(exchangeConnections).where(eq(exchangeConnections.ownerId, ownerId)).for('update');
+    const [conn] = await tx
+      .select()
+      .from(exchangeConnections)
+      .where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, LIVE_EXCHANGE)))
+      .for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'No exchange connection is set up.');
     if (enabled) {
       if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Verify the exchange connection first.');
@@ -512,6 +530,7 @@ export async function approveConnection(db: Db, adminId: string, connectionId: s
   return db.transaction(async (tx) => {
     const [conn] = await tx.select().from(exchangeConnections).where(eq(exchangeConnections.id, connectionId)).for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
+    if (conn.exchange !== LIVE_EXCHANGE) throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix connections are read-only in this release; they cannot be approved for Live trading.');
     if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Only a verified connection can be approved.');
     const before = limitsOf(conn);
     const [u] = await tx
