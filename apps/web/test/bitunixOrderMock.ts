@@ -48,6 +48,8 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
     this.next = {};
     this.tpslReads = 0;
     this.hiddenTpsl = [];
+    this.modifies = [];
+    this.modifyOutcome = 'APPLY';
   }
 
   setSettings(symbol: string, s: { marginMode?: string; longLeverage?: number; shortLeverage?: number } = {}): void {
@@ -91,7 +93,21 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
     }
   }
 
+  /** tpsl/modify_order calls (Step 5 resize); `modifyOutcome` injects a fault for the next one. */
+  modifies: Record<string, unknown>[] = [];
+  modifyOutcome: 'APPLY' | 'IGNORE' | 'TIMEOUT_APPLIED' = 'APPLY';
+
   async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+    if (path === '/api/v1/futures/tpsl/modify_order') {
+      this.modifies.push(body);
+      const outcome = this.modifyOutcome;
+      this.modifyOutcome = 'APPLY';
+      const t = this.tpsl.find((x) => x.id === body.orderId);
+      if (!t) throw new BitunixPrivateError('POST tpsl/modify_order: order not exist (code 20007)', 'API', 20007);
+      if (outcome !== 'IGNORE') Object.assign(t, { slPrice: String(body.slPrice), slStopType: String(body.slStopType), slQty: String(body.slQty) });
+      if (outcome === 'TIMEOUT_APPLIED') throw new BitunixPrivateError('POST tpsl/modify_order: timed out', 'TIMEOUT');
+      return { orderId: t.id } as T;
+    }
     if (path !== '/api/v1/futures/trade/place_order') throw new BitunixPrivateError(`mock: unexpected POST ${path}`, 'REFUSED');
     this.posts.push(body);
     const n = this.next;

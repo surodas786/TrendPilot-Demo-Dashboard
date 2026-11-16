@@ -42,13 +42,16 @@ export function livePriceFor(instrumentId: string, rows: LiveQuoteRow[], fallbac
 export const unrealizedAt = (h: Pick<PositionDto, 'side' | 'avgEntryPrice' | 'contracts' | 'contractMultiplier'>, mark: string | null) =>
   mark ? unrealizedPnl(h.side as 'LONG' | 'SHORT', h.avgEntryPrice, mark, h.contracts, h.contractMultiplier) : null;
 
-/** MEXC confirms the position is gone, its closing fills are not listed yet (nothing booked). */
+/** Display name of the position's exchange (Live positions trade on their contract's exchange). */
+const venueName = (p: { exchange?: string }) => (p.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC');
+
+/** The exchange confirms the position is gone, its closing fills are not listed yet (nothing booked). */
 export const closedOnMexc = (h: Pick<PositionDto, 'venueSync'>) => h.venueSync?.closeState === 'FILLS_PENDING' && h.venueSync.contracts !== null && new Decimal(h.venueSync.contracts).isZero();
 
-export function ProtectionPill({ h }: { h: Pick<PositionDto, 'status' | 'contracts' | 'stop' | 'venueSync'> }) {
+export function ProtectionPill({ h }: { h: Pick<PositionDto, 'status' | 'contracts' | 'stop' | 'venueSync'> & { exchange?: string } }) {
   if (h.status !== 'OPEN') return <StatusPill tone="neutral">Closed</StatusPill>;
-  if (closedOnMexc(h)) return <StatusPill tone="warn">Closed on MEXC · fill details pending</StatusPill>;
-  if (h.venueSync?.closeState === 'FILLS_PENDING') return <StatusPill tone="warn">MEXC holds {h.venueSync.contracts} · fill details pending</StatusPill>;
+  if (closedOnMexc(h)) return <StatusPill tone="warn">Closed on {venueName(h)} · fill details pending</StatusPill>;
+  if (h.venueSync?.closeState === 'FILLS_PENDING') return <StatusPill tone="warn">{venueName(h)} holds {h.venueSync.contracts} · fill details pending</StatusPill>;
   const covered = h.stop.protection === 'PROTECTED' && h.stop.contracts !== null && new Decimal(h.stop.contracts).eq(h.contracts);
   if (covered) return <StatusPill tone="gain">Protected</StatusPill>;
   if (h.stop.protection === 'PENDING') return <StatusPill tone="warn">Verifying stop</StatusPill>;
@@ -107,7 +110,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
     () =>
       open.map((h) => {
         const price = livePriceFor(h.instrumentId, items, h.price, nowMs);
-        // Closed on MEXC (fills pending): no exposure left, so no unrealized P&L.
+        // Closed on the exchange (fills pending): no exposure left, so no unrealized P&L.
         const gone = closedOnMexc(h);
         return { h, price, gone, unrealized: gone ? null : unrealizedAt(h, price.mark) };
       }),
@@ -209,7 +212,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                     <td className="px-3 py-2.5 text-right text-ink">
                       {h.contracts}
                       <span className="block text-[11px] text-subtle">of {h.initialContracts} contracts</span>
-                      {h.venueSync?.closeState === 'FILLS_PENDING' && <span className="block text-[11px] text-warn">MEXC: {h.venueSync.contracts}</span>}
+                      {h.venueSync?.closeState === 'FILLS_PENDING' && <span className="block text-[11px] text-warn">{venueName(h)}: {h.venueSync.contracts}</span>}
                       {h.exitHalt && (
                         <span className="block text-[11px] text-loss" data-testid="exit-halt" title={h.exitHalt.text}>
                           Automatic exits paused · {h.exitHalt.reason.split(' ')[0]}
@@ -221,7 +224,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                       <PriceCell price={price} timezone={timezone} />
                     </td>
                     <td className={cn('px-3 py-2.5 text-right', pnlTone(unrealized))} data-testid="holding-unrealized">
-                      {gone ? <span className="text-subtle">Closed on MEXC</span> : unrealized === null ? 'Unavailable' : signedUsdt(unrealized)}
+                      {gone ? <span className="text-subtle">Closed on {venueName(h)}</span> : unrealized === null ? 'Unavailable' : signedUsdt(unrealized)}
                     </td>
                     <td className="px-3 py-2.5 text-right text-ink">
                       {priceOrUnavailable(h.stop.price)}
@@ -279,7 +282,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                     {p.closeReason ? (EXIT_LABEL[p.closeReason] ?? p.closeReason) : '—'}
                     {p.venueSync?.closeState === 'FILLS_PENDING' && (
                       <span className="block">
-                        <StatusPill tone="warn">Closed on MEXC · fill details pending</StatusPill>
+                        <StatusPill tone="warn">Closed on {venueName(p)} · fill details pending</StatusPill>
                         {p.venueSync.pendingReason && <span className="mt-0.5 block text-[11px] text-subtle">{p.venueSync.pendingReason}</span>}
                       </span>
                     )}

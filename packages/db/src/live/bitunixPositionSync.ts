@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { Decimal, type ExitReason } from '@trendpilot/domain';
 import type { Db } from '../client';
 import { recordExitFill } from '../paper/exits';
@@ -56,6 +56,25 @@ function readOnlyVenue(db: Db, r: BitunixRequester) {
   });
 }
 
+/**
+ * Closed Bitunix positions whose history was confirmed after TrendPilot closed them: the position's
+ * funding total and settled figures as Bitunix's history reports them (once, idempotently).
+ */
+async function backfillClosedFacts(db: Db, conn: ConnectionRow, now: Date): Promise<void> {
+  const rows = await db
+    .select({ id: positions.id, fundingNow: positions.exchangeFundingUsdt, m: exchangePositions })
+    .from(positions)
+    .innerJoin(paperAccounts, eq(paperAccounts.id, positions.paperAccountId))
+    .innerJoin(exchangePositions, and(eq(exchangePositions.connectionId, conn.id), eq(exchangePositions.exchangePositionId, positions.exchangePositionRef)))
+    .where(and(eq(positions.ownerId, conn.ownerId), eq(positions.mode, 'LIVE'), eq(positions.status, 'CLOSED'), eq(paperAccounts.exchange, 'BITUNIX'), eq(exchangePositions.status, 'CLOSED'), isNull(positions.exchangeSyncedAt)));
+  for (const r of rows) {
+    await db
+      .update(positions)
+      .set({ exchangeFundingUsdt: r.m.settledFunding ?? r.m.reportedFunding, exchangeContracts: '0', exchangeLiquidationPrice: null, exchangeSyncedAt: now, updatedAt: sql`now()` })
+      .where(eq(positions.id, r.id));
+  }
+}
+
 interface OrderGroup {
   orderId: string;
   clientId: string | null;
@@ -70,7 +89,11 @@ interface OrderGroup {
 
 function groupByOrder(trades: BitunixTrade[]): OrderGroup[] {
   const m = new Map<string, OrderGroup>();
+  const seen = new Set<string>();
   for (const t of trades) {
+    // Each trade counts once, even if a caller passes overlapping reads.
+    if (seen.has(t.tradeId)) continue;
+    seen.add(t.tradeId);
     const g = m.get(t.orderId) ?? { orderId: t.orderId, clientId: t.clientId, qty: D(0), notional: D(0), fee: D(0), feeKnown: true, realized: D(0), reduceOnly: false, at: 0 };
     if (t.reduceOnly) g.reduceOnly = true;
     g.qty = g.qty.plus(t.qty);
@@ -86,6 +109,7 @@ function groupByOrder(trades: BitunixTrade[]): OrderGroup[] {
 
 export async function linkBitunixPositions(db: Db, conn: ConnectionRow, r: BitunixRequester, now: Date): Promise<BitunixPositionLink[]> {
   const out: BitunixPositionLink[] = [];
+  await backfillClosedFacts(db, conn, now);
   const open = await db
     .select({ p: positions })
     .from(positions)
@@ -114,6 +138,18 @@ export async function linkBitunixPositions(db: Db, conn: ConnectionRow, r: Bitun
       out.push({ ...base, result: 'SKIPPED', reason: mirror ? 'mirror detached (key replaced)' : 'not in the Bitunix mirror yet' });
       continue;
     }
+    // Bitunix's own figures for this leg, shown in Holdings and trade details as reported: estimated
+    // liquidation price, the running funding total (no per-settlement records exist), current size.
+    await db
+      .update(positions)
+      .set({
+        exchangeLiquidationPrice: mirror.status === 'OPEN' ? mirror.liqPrice : null,
+        exchangeFundingUsdt: mirror.status === 'CLOSED' ? (mirror.settledFunding ?? mirror.reportedFunding) : mirror.reportedFunding,
+        exchangeContracts: mirror.status === 'OPEN' ? mirror.qty : '0',
+        exchangeSyncedAt: now,
+        updatedAt: sql`now()`
+      })
+      .where(eq(positions.id, p.id));
     // Bitunix's size for this leg: CLOSED only once history confirmed it; a pending close check keeps the last size.
     const venueQty = mirror.status === 'CLOSED' ? D(0) : D(mirror.qty);
     let platformQty = D(p.contracts);

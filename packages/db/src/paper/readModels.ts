@@ -288,6 +288,8 @@ export interface OrderDto {
   id: string;
   clientOrderId: string;
   symbol: string;
+  /** Exchange of the order's contract (MEXC or BITUNIX). */
+  exchange: string;
   mode: string;
   kind: string;
   side: string;
@@ -311,15 +313,16 @@ export interface OrderDto {
   filledContracts: string;
 }
 
-async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$inferSelect; symbol: string }[]): Promise<OrderDto[]> {
+async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$inferSelect; symbol: string; exchange: string }[]): Promise<OrderDto[]> {
   const out: OrderDto[] = [];
-  for (const { i, symbol } of rows) {
+  for (const { i, symbol, exchange } of rows) {
     const fs = await db.select().from(fills).where(eq(fills.intentId, i.id));
     const [pos] = await db.select({ id: positions.id }).from(positions).where(eq(positions.openIntentId, i.id));
     out.push({
       id: i.id,
       clientOrderId: i.clientOrderId,
       symbol,
+      exchange,
       mode: i.mode,
       kind: i.kind,
       side: i.side,
@@ -346,7 +349,7 @@ async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$infer
   return out;
 }
 
-const orderSelect = (db: Executor) => db.select({ i: orderIntents, symbol: instruments.symbol }).from(orderIntents).innerJoin(instruments, eq(instruments.id, orderIntents.instrumentId));
+const orderSelect = (db: Executor) => db.select({ i: orderIntents, symbol: instruments.symbol, exchange: instruments.exchange }).from(orderIntents).innerJoin(instruments, eq(instruments.id, orderIntents.instrumentId));
 
 export async function listMyOrders(db: Executor, ownerId: string, limit = 100): Promise<OrderDto[]> {
   return hydrateOrders(db, await orderSelect(db).where(eq(orderIntents.ownerId, ownerId)).orderBy(desc(orderIntents.createdAt)).limit(limit));

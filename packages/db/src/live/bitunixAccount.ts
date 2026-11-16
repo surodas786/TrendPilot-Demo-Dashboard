@@ -332,8 +332,16 @@ export const readHistoryPositions = (r: BitunixRequester, params: { positionId?:
 export const readPendingOrders = (r: BitunixRequester, o?: { maxPages?: number }) => readAllPages(r, '/api/v1/futures/trade/get_pending_orders', {}, 'orderList', normalizeBitunixOrder, o);
 export const readHistoryOrders = (r: BitunixRequester, params: { startTime?: number; endTime?: number; symbol?: string }, o?: { maxPages?: number }) =>
   readAllPages(r, '/api/v1/futures/trade/get_history_orders', params, 'orderList', normalizeBitunixOrder, o);
-export const readHistoryTrades = (r: BitunixRequester, params: { startTime?: number; endTime?: number; positionId?: string; orderId?: string }, o?: { maxPages?: number }) =>
-  readAllPages(r, '/api/v1/futures/trade/get_history_trades', params, 'tradeList', normalizeBitunixTrade, o);
+/**
+ * Trade history, each trade once: pages are offset-based, so a trade arriving during the read shifts
+ * a row onto the next page and it is returned twice. Fees and quantities are summed downstream, so a
+ * repeated tradeId is dropped here.
+ */
+export async function readHistoryTrades(r: BitunixRequester, params: { startTime?: number; endTime?: number; positionId?: string; orderId?: string }, o?: { maxPages?: number }): Promise<ListRead<BitunixTrade>> {
+  const read = await readAllPages(r, '/api/v1/futures/trade/get_history_trades', params, 'tradeList', normalizeBitunixTrade, o);
+  const seen = new Set<string>();
+  return { ...read, items: read.items.filter((t) => (seen.has(t.tradeId) ? false : (seen.add(t.tradeId), true))) };
+}
 export const readPendingTpsl = (r: BitunixRequester, o?: { maxPages?: number }) => readAllPages(r, '/api/v1/futures/tpsl/get_pending_orders', {}, 'orderList', normalizeBitunixTpsl, o);
 
 export async function readOrderDetail(r: BitunixRequester, orderId: string): Promise<BitunixOrder | null> {

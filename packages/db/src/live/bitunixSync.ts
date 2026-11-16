@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { Decimal } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
-import { exchangeAccountEvents, exchangeConnections, exchangePositions } from '../schema';
+import { exchangeAccountEvents, exchangeConnections, exchangePositions, paperAccounts, positions } from '../schema';
 import {
   readHistoryOrders,
   readHistoryPositions,
@@ -702,3 +702,37 @@ export async function bitunixAccountView(db: Executor, conn: ConnectionRow): Pro
 }
 
 export type { BitunixPosition };
+
+export interface ExchangeOnlyLegDto {
+  exchange: 'BITUNIX';
+  exchangePositionId: string;
+  symbol: string;
+  side: string;
+  qty: string;
+  avgOpenPrice: string | null;
+  liqPrice: string | null;
+  /** Running funding total as Bitunix reports it on the position (sign as reported). */
+  reportedFunding: string | null;
+  unrealizedPnl: string | null;
+  closeCheck: string;
+  updatedAt: string | null;
+}
+
+/**
+ * The investor's open Bitunix legs that no TrendPilot position manages (opened on Bitunix, or the
+ * other Hedge leg): shown read-only next to TrendPilot's positions so both legs stay visible.
+ */
+export async function listBitunixExchangeOnlyLegs(db: Executor, ownerId: string): Promise<ExchangeOnlyLegDto[]> {
+  const [conn] = await db.select({ id: exchangeConnections.id }).from(exchangeConnections).where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, 'BITUNIX')));
+  if (!conn) return [];
+  const legs = await db.select().from(exchangePositions).where(and(eq(exchangePositions.connectionId, conn.id), eq(exchangePositions.status, 'OPEN')));
+  if (!legs.length) return [];
+  const managed = new Set(
+    (await db.select({ ref: positions.exchangePositionRef }).from(positions).innerJoin(paperAccounts, eq(paperAccounts.id, positions.paperAccountId)).where(and(eq(positions.ownerId, ownerId), eq(positions.status, 'OPEN'), eq(paperAccounts.exchange, 'BITUNIX'))))
+      .map((r) => r.ref)
+      .filter((r): r is string => !!r)
+  );
+  return legs
+    .filter((l) => !managed.has(l.exchangePositionId))
+    .map((l) => ({ exchange: 'BITUNIX' as const, exchangePositionId: l.exchangePositionId, symbol: l.symbol, side: l.side, qty: l.qty, avgOpenPrice: l.avgOpenPrice, liqPrice: l.liqPrice, reportedFunding: l.reportedFunding, unrealizedPnl: l.unrealizedPnl, closeCheck: l.closeCheck, updatedAt: l.exchangeUpdatedAt?.toISOString() ?? null }));
+}

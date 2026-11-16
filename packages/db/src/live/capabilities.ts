@@ -39,7 +39,8 @@ export type CapabilityId =
   | 'CLIENT_ORDER_ID_IDEMPOTENCY'
   | 'ACCOUNT_ELIGIBILITY'
   | 'BITUNIX_OPEN_WITH_ATTACHED_STOP'
-  | 'BITUNIX_HEDGE_CLOSE_BY_POSITION';
+  | 'BITUNIX_HEDGE_CLOSE_BY_POSITION'
+  | 'BITUNIX_TPSL_RESIZE';
 
 const DOC = 'https://www.mexc.com/api-docs/futures/account-and-trading-endpoints/';
 
@@ -200,6 +201,20 @@ export const BITUNIX_CAPABILITIES: Capability[] = [
     gaps: [
       'The page also calls `side` the order direction; its CLOSE rows (close long = BUY) contradict that reading. Confirm on the smallest size before relying on it',
       'Whether the position TP/SL shrinks with a partial close'
+    ]
+  },
+  {
+    id: 'BITUNIX_TPSL_RESIZE',
+    summary: 'POST /api/v1/futures/tpsl/modify_order {orderId, slPrice (unchanged), slStopType, slOrderType MARKET, slQty = remaining}: a fixed-quantity stop follows a partial close, verified by re-reading the pending TP/SL',
+    docs: 'https://www.bitunix.com/api-docs/futures/tp_sl/modify_tp_sl_order.html',
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: [
+      'Whether the entry-attached stop is listed as a fixed-quantity TP/SL (slQty) or a position TP/SL (whole position, one per position, modified by positionId)',
+      'Whether modify keeps the same orderId and applies atomically (no unprotected gap)',
+      'A TP/SL that also carries a take profit is not modified by TrendPilot (its TP part would change too)'
     ]
   }
 ];

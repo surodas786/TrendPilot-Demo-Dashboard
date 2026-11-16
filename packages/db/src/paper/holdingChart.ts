@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, gte } from 'drizzle-orm';
 import { Decimal } from '@trendpilot/domain';
 import type { Executor } from '../client';
-import { instruments, marketCandles, marketQuotes, positions } from '../schema';
+import { exchangeConnections, instruments, marketCandles, marketQuotes, orderIntents, positions, signalEvents } from '../schema';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const n = (v: string) => new Decimal(v).toFixed();
@@ -30,6 +30,14 @@ export interface HoldingChartDto {
   source: string | null;
   /** Labelled horizontal lines. The stop is the current effective stop, or the last recorded one once closed. */
   lines: { kind: 'ENTRY' | 'STOP'; price: string; label: string; historical: boolean }[];
+  /** The TradingView chart (source symbol and interval) whose signal opened this position, if any. */
+  tradingView: { source: string; interval: '5' | '15' } | null;
+  /**
+   * Live protection as the exchange confirms it. CONFIRMED: the stop line is the exchange's own
+   * stop for this leg; UNCONFIRMED / MISSING: the line is TrendPilot's planned stop and the exchange
+   * did not confirm it. Paper: SIMULATED.
+   */
+  protection: { status: 'CONFIRMED' | 'UNCONFIRMED' | 'MISSING' | 'SIMULATED' | 'CLOSED'; text: string; kind: 'WHOLE_LEG' | 'FIXED_QTY' | null; exchangeStopPrice: string | null };
 }
 
 /**
@@ -48,10 +56,18 @@ export async function getMyHoldingChart(db: Executor, ownerId: string, positionI
   const { p, inst } = row;
   const bars = Math.min(Math.max(o.bars ?? 300, 50), 1000);
 
-  // Prefer 15m candles; use 5m if that is what the feed stores for this contract.
+  // The TradingView chart that opened this position (its source symbol and timeframe).
+  const [ev] = await db
+    .select({ exchange: signalEvents.sourceExchange, symbol: signalEvents.sourceSymbol, interval: signalEvents.interval })
+    .from(orderIntents)
+    .innerJoin(signalEvents, eq(signalEvents.id, orderIntents.eventId))
+    .where(eq(orderIntents.id, p.openIntentId));
+  const tradingView = ev ? { source: `${ev.exchange}:${ev.symbol}`, interval: (ev.interval === '5' ? '5' : '15') as '5' | '15' } : null;
+
+  // Prefer the mapped chart's timeframe, then 15m, then 5m: whatever the feed stores for this contract.
   let interval: '5' | '15' = '15';
   let rows: (typeof marketCandles.$inferSelect)[] = [];
-  for (const iv of ['15', '5'] as const) {
+  for (const iv of tradingView?.interval === '5' ? (['5', '15'] as const) : (['15', '5'] as const)) {
     const end = p.closedAt ?? o.now;
     rows = await db
       .select()
@@ -83,6 +99,23 @@ export async function getMyHoldingChart(db: Executor, ownerId: string, positionI
   }
 
   const closed = p.status === 'CLOSED';
+  // Live on Bitunix: the stop Bitunix lists for this leg (pending TP/SL from the last account sync).
+  let protection: HoldingChartDto['protection'];
+  if (p.mode !== 'LIVE') protection = { status: closed ? 'CLOSED' : 'SIMULATED', text: closed ? 'Position closed.' : 'Paper: the simulator holds the stop.', kind: null, exchangeStopPrice: null };
+  else if (closed) protection = { status: 'CLOSED', text: 'Position closed; the stop line is the last recorded stop.', kind: null, exchangeStopPrice: null };
+  else if (inst.exchange === 'BITUNIX') {
+    const [c] = await db.select({ s: exchangeConnections.accountState }).from(exchangeConnections).where(and(eq(exchangeConnections.ownerId, ownerId), eq(exchangeConnections.exchange, 'BITUNIX')));
+    const listed = ((c?.s as { tpsl?: { positionId: string | null; slPrice: string | null; slQty: string | null }[] } | null)?.tpsl ?? []).find((t) => t.positionId === p.exchangePositionRef && t.slPrice !== null);
+    protection = listed && p.protectionStatus === 'PROTECTED'
+      ? { status: 'CONFIRMED', text: `Bitunix lists a ${listed.slQty === null ? 'whole-position' : `fixed-quantity (${n(listed.slQty)})`} stop at ${n(listed.slPrice!)} for this leg.`, kind: listed.slQty === null ? 'WHOLE_LEG' : 'FIXED_QTY', exchangeStopPrice: n(listed.slPrice!) }
+      : listed
+        ? { status: 'UNCONFIRMED', text: `Bitunix lists a stop at ${n(listed.slPrice!)}, but it does not cover the open quantity (${p.protectionStatus}).`, kind: listed.slQty === null ? 'WHOLE_LEG' : 'FIXED_QTY', exchangeStopPrice: n(listed.slPrice!) }
+        : { status: 'MISSING', text: 'Bitunix lists no stop for this leg in the last sync: the position is not confirmed protected.', kind: null, exchangeStopPrice: null };
+  } else {
+    protection = p.protectionStatus === 'PROTECTED' ? { status: 'CONFIRMED', text: 'The exchange stop covers the open quantity (verified).', kind: null, exchangeStopPrice: n(p.stopPrice) } : { status: 'UNCONFIRMED', text: `Protection is ${p.protectionStatus}.`, kind: null, exchangeStopPrice: null };
+  }
+  const stopPrice = protection.exchangeStopPrice ?? n(p.stopPrice);
+  const stopLabel = closed ? 'Stop loss (historical)' : protection.status === 'CONFIRMED' ? 'Exchange stop (confirmed)' : protection.status === 'SIMULATED' ? 'Stop loss' : 'Planned stop (not confirmed)';
   return {
     positionId: p.id,
     status: p.status,
@@ -96,7 +129,9 @@ export async function getMyHoldingChart(db: Executor, ownerId: string, positionI
     source: rows[rows.length - 1]?.source ?? quotes[quotes.length - 1]?.source ?? null,
     lines: [
       { kind: 'ENTRY', price: n(p.avgEntryPrice), label: 'Avg entry', historical: false },
-      { kind: 'STOP', price: n(p.stopPrice), label: closed ? 'Stop loss (historical)' : 'Stop loss', historical: closed }
-    ]
+      { kind: 'STOP', price: stopPrice, label: stopLabel, historical: closed }
+    ],
+    tradingView,
+    protection
   };
 }
