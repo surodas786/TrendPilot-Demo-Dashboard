@@ -8,6 +8,16 @@ export default async function TradeSettingsPage() {
   const { user } = await requirePageRole('INVESTOR');
   const db = getDb();
   // Owner comes from the session; the browser never names whose blocks to load.
-  const [blocks, instruments, versions, conn] = await Promise.all([orderBlocksFor(db, user.id).list(), listPublishedInstruments(db), listPublishedVersions(db), connectionFor(db, user.id)]);
-  return <TradeSettingsClient ownerName={user.name} timezone={user.timezone} blocks={blocks} instruments={instruments} versions={versions} liveConnectionStatus={conn?.status ?? null} />;
+  const [blocks, instruments, versions, conn, bitunix] = await Promise.all([orderBlocksFor(db, user.id).list(), listPublishedInstruments(db), listPublishedVersions(db), connectionFor(db, user.id), connectionFor(db, user.id, 'BITUNIX')]);
+  return (
+    <TradeSettingsClient
+      ownerName={user.name}
+      timezone={user.timezone}
+      blocks={blocks}
+      instruments={instruments}
+      versions={versions}
+      liveConnectionStatus={conn?.status ?? null}
+      bitunixConnectionStatus={bitunix && bitunix.status !== 'REVOKED' ? bitunix.status : null}
+    />
+  );
 }

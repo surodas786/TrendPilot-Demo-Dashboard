@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { hostname } from 'node:os';
 import type pg from 'pg';
 import {
+  BitunixKlineSource,
   BitunixPriceStream,
   BitunixQuoteWriter,
   BITUNIX_WS_PUBLIC_URL,
@@ -286,6 +287,13 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
   const bitunixQuotes = new BitunixQuoteWriter(handle.db, prices, { log });
   const bitunixSymbols = async () => [...new Set([...cfg.bitunix.symbols, ...(await bitunixQuotes.refresh())])];
   let bitunix: BitunixPriceStream | null = null;
+  // Bitunix closed 5m/15m candles (EMA 200) for Bitunix instruments: the shared candle sync on its
+  // own BITUNIX_PUBLIC history (never mixed with MEXC candles).
+  const bitunixCandles = cfg.bitunix.enabled
+    ? new MarketFeed(handle.db, { source: new BitunixKlineSource({ baseUrl: env.BITUNIX_PUBLIC_BASE_URL || undefined }), exchange: 'BITUNIX', log: (m) => log(`bitunix candles: ${m}`) })
+    : null;
+  let lastBitunixCandles = 0;
+  let bitunixCandleSummary: unknown = null;
   if (cfg.bitunix.enabled) {
     bitunix = new BitunixPriceStream({
       url: cfg.bitunix.wsUrl,
@@ -331,6 +339,12 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
       // Subscribe newly published contracts first, so their tickers do not wait for REST backfill.
       if (stream) stream.setSymbols(await feed.refreshCoverage());
       if (bitunix) bitunix.setSymbols(await bitunixSymbols());
+      if (bitunixCandles && Date.now() - lastBitunixCandles >= 15_000) {
+        lastBitunixCandles = Date.now();
+        const r = await bitunixCandles.candleCycle();
+        bitunixCandleSummary = r;
+        for (const x of r) if (x.error || x.backfilled) log(`bitunix candles ${x.symbol} ${x.interval}m: written=${x.written} backfilled=${x.backfilled}${x.error ? ` error="${x.error}"` : ''}`);
+      }
       const s = await feed.cycle();
       stream?.setSymbols(feed.coveredExchangeSymbols);
       if (Date.now() - lastBeat >= 15_000) {
@@ -346,7 +360,7 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
           restCalls: { ...(source.requestCounts ?? {}) },
           restPausedUntil: paused ? new Date(paused).toISOString() : null,
           contracts: s.instruments.map((r) => ({ symbol: r.symbol, state: r.state, error: r.error ?? null })),
-          ...(bitunix ? { bitunix: bitunixDetail() } : {})
+          ...(bitunix ? { bitunix: { ...bitunixDetail(), candles: bitunixCandleSummary } } : {})
         };
         await heartbeat(handle.db, { service: 'market-feed', instance, startedAt, detail }).catch((e) => log(`heartbeat failed: ${(e as Error).message}`));
       }

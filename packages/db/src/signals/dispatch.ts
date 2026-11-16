@@ -48,6 +48,10 @@ export async function dispatchSignalEvent(tx: Executor, eventId: string, now: Da
   const summary: DispatchSummary = { eventId, evaluated: 0, inserted: 0, ready: 0, skipped: 0, entriesApproved: 0, entriesSkipped: 0, exitsRequested: 0, exitsHeld: 0, reversalsPending: 0 };
 
   if (event.disposition === 'DISPATCH') {
+    // The instruments this event reaches: the route's own (MEXC) instrument and the explicit Bitunix
+    // target snapshotted at intake. A block belongs to one instrument (one exchange), so it is
+    // evaluated once; a block on any other instrument or exchange never sees this event.
+    const instrumentIds = [event.instrumentId, ...(event.targetInstrumentIds ?? []).filter((id) => id !== event.instrumentId)];
     // STR-03/04/05: exits first, for open positions whose saved strategy is in this lineage. Pause,
     // weekday, EMA and account status are entry restrictions and never block a valid exit. Only
     // positions already open when the event arrived: re-running an older event (crash recovery)
@@ -59,7 +63,7 @@ export async function dispatchSignalEvent(tx: Executor, eventId: string, now: Da
       .innerJoin(orderIntents, eq(orderIntents.id, positions.openIntentId))
       .where(
         and(
-          eq(positions.instrumentId, event.instrumentId),
+          inArray(positions.instrumentId, instrumentIds),
           eq(positions.status, 'OPEN'),
           eq(strategyVersions.packageId, event.packageId),
           lte(positions.openedAt, event.receivedAt),
@@ -120,7 +124,7 @@ export async function dispatchSignalEvent(tx: Executor, eventId: string, now: Da
       .from(orderBlocks)
       .innerJoin(users, eq(users.id, orderBlocks.ownerId))
       .innerJoin(strategyVersions, eq(strategyVersions.id, orderBlocks.strategyVersionId))
-      .where(and(eq(orderBlocks.instrumentId, event.instrumentId), eq(strategyVersions.packageId, event.packageId)))
+      .where(and(inArray(orderBlocks.instrumentId, instrumentIds), eq(strategyVersions.packageId, event.packageId)))
       // Owner order = account-lock order: concurrent dispatches can never deadlock.
       .orderBy(orderBlocks.ownerId, orderBlocks.id);
 

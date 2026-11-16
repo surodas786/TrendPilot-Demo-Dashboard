@@ -107,7 +107,7 @@ async function modeChangeBlockerFor(db: Executor, owner: PublicUser, block: Orde
   const repo = orderBlocksFor(db, owner.id);
   const from = block.mode as BlockMode;
   const [conn, instrument, destinationBlockId, activity] = await Promise.all([
-    connectionFor(db, owner.id),
+    connectionFor(db, owner.id, block.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC'),
     getInstrument(db, block.instrumentId),
     repo.idFor(block.instrumentId, to),
     repo.activity(block.id, lock ? { lockMode: from } : {})
@@ -117,6 +117,7 @@ async function modeChangeBlockerFor(db: Executor, owner: PublicUser, block: Orde
     to,
     pair: instrument ? `${instrument.base}/${instrument.quote}` : block.symbol,
     liveConnectionStatus: conn?.status ?? null,
+    exchange: block.exchange,
     destinationBlockId: destinationBlockId === block.id ? null : destinationBlockId,
     ...activity
   });
@@ -200,7 +201,9 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
   if (current.status === status) return current;
 
   if (status === 'ACTIVE') {
-    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), connectionFor(db, owner.id)]);
+    // Live needs the connection of the exchange this block's contract trades on.
+    const exchange = current.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), connectionFor(db, owner.id, exchange)]);
     const reason =
       owner.status !== 'ACTIVE'
         ? 'Your account is not active.'
@@ -209,7 +212,7 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
           : !version?.published
             ? 'This strategy version is not published.'
             : current.mode === 'LIVE' && (!conn || conn.status !== 'VERIFIED')
-              ? 'Connect and verify your MEXC account (My Account → Live trading) before activating Live settings.'
+              ? `Connect and verify your ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account (Live Trading page) before activating Live settings.`
               : undefined;
     if (reason) throw new DomainError(422, ErrorCode.RESUME_BLOCKED, reason);
   }
@@ -244,7 +247,9 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
 async function previewQuote(instrument: InstrumentDto): Promise<Quote | undefined> {
   const at = now();
   const q = await latestQuote(getDb(), instrument.id, at);
-  if (q && q.source === 'MEXC_PUBLIC' && quoteAgeState(q.asOf, at) === 'FRESH') return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf.toISOString(), source: 'MEXC_PUBLIC' };
+  // The contract's own exchange feed: MEXC public prices for MEXC pairs, Bitunix public prices for Bitunix pairs.
+  const own = instrument.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : 'MEXC_PUBLIC';
+  if (q && q.source === own && quoteAgeState(q.asOf, at) === 'FRESH') return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf.toISOString(), source: own as Quote['source'] };
   return fixtureQuote(instrument.symbol);
 }
 
@@ -256,7 +261,7 @@ async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettin
       ErrorCode.VALIDATION_FAILED,
       instrument.isFixture
         ? `No fixture quote is available for ${instrument.symbol}.`
-        : `No fresh public MEXC price for ${instrument.symbol} (${instrument.exchangeSymbol}) yet. The market feed picks up a newly published pair within seconds; if it stays unavailable, check Admin → Market Data Feed (the contract may not be trading).`
+        : `No fresh public ${instrument.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} price for ${instrument.symbol} (${instrument.exchangeSymbol}) yet. The market feed picks up a newly published pair within seconds; if it stays unavailable, check Admin → Market Data Feed (the contract may not be trading).`
     );
   const spec = {
     contractMultiplier: instrument.contract.multiplier,

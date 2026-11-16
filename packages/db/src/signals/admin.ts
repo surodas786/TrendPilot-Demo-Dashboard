@@ -3,6 +3,7 @@ import { DomainError, ErrorCode, type SignalRouteCreate } from '@trendpilot/doma
 import type { Executor } from '../client';
 import { latestPublishedVersion, openPositionsFor, routeHistory } from './routeAdmin';
 import { instruments, jobs, signalDecisions, signalEvents, signalRejections, signalRoutes, strategyPackages } from '../schema';
+import { routeTargets, type RouteTargetDto } from './routeTargets';
 
 /** Operations views for administrators. Aggregates only: no investor identity or private settings. */
 
@@ -15,7 +16,8 @@ export interface SignalRouteDto {
   interval: string;
   action: string;
   kind: 'ACTIONABLE' | 'INFO_ONLY';
-  instrument: { id: string; symbol: string };
+  instrument: { id: string; symbol: string; exchange: string; exchangeSymbol: string };
+  targets: RouteTargetDto[];
   /** `latest` = newest published version: its real timeframe, whatever the package name says. */
   package: { id: string; name: string; latest: { version: number; timeframe: string } | null };
   maxSignalAgeSeconds: number;
@@ -30,7 +32,7 @@ export interface SignalRouteDto {
 
 export async function listSignalRoutes(db: Executor): Promise<SignalRouteDto[]> {
   const rows = await db
-    .select({ r: signalRoutes, symbol: instruments.symbol, packageName: strategyPackages.name })
+    .select({ r: signalRoutes, symbol: instruments.symbol, exchange: instruments.exchange, exchangeSymbol: instruments.exchangeSymbol, packageName: strategyPackages.name })
     .from(signalRoutes)
     .innerJoin(instruments, eq(instruments.id, signalRoutes.instrumentId))
     .innerJoin(strategyPackages, eq(strategyPackages.id, signalRoutes.packageId))
@@ -42,7 +44,11 @@ export async function listSignalRoutes(db: Executor): Promise<SignalRouteDto[]> 
   }
   const extra = new Map<string, { history: { events: number; rejections: number }; openPositions: number }>();
   for (const { r } of rows) extra.set(r.id, { history: await routeHistory(db, r.id), openPositions: await openPositionsFor(db, r.instrumentId, r.packageId) });
-  return rows.map(({ r, symbol, packageName }) => ({
+  const targets = await routeTargets(
+    db,
+    rows.map((x) => x.r.id)
+  );
+  return rows.map(({ r, symbol, exchange, exchangeSymbol, packageName }) => ({
     id: r.id,
     ingressId: r.ingressId,
     name: r.name,
@@ -51,7 +57,9 @@ export async function listSignalRoutes(db: Executor): Promise<SignalRouteDto[]> 
     interval: r.interval,
     action: r.action,
     kind: r.kind,
-    instrument: { id: r.instrumentId, symbol },
+    instrument: { id: r.instrumentId, symbol, exchange, exchangeSymbol },
+    /** Step 4: explicit additional targets (the same contract on Bitunix). */
+    targets: targets.filter((t) => t.routeId === r.id),
     package: { id: r.packageId, name: packageName, latest: latest.get(r.packageId) ?? null },
     maxSignalAgeSeconds: r.maxSignalAgeSeconds,
     clockToleranceSeconds: r.clockToleranceSeconds,

@@ -6,6 +6,7 @@ import {
   Decimal,
   FEED_POLICY,
   FUNDING_CYCLE_HOURS,
+  isBitunixFuturesSymbol,
   INTERVAL_MS,
   isClosedBar,
   isRateLimitCode,
@@ -22,6 +23,7 @@ import { recordMarketTick } from '../paper/exits';
 import { recordFundingRate } from '../paper/funding';
 import { fundingRates, instruments, marketCandles, marketFeedEvents, marketFeedStatus } from '../schema';
 import { isMexcFuturesSymbol, MexcPublicError, type MexcKline, type MexcTicker, type PublicMarketSource } from './mexcPublic';
+import { BitunixPublicError } from './bitunixPublic';
 import type { StreamTicker, TickerStreamView } from './mexcWs';
 
 /**
@@ -50,6 +52,8 @@ export const FEED_SOURCE = 'MEXC_PUBLIC';
 
 export interface FeedOptions {
   source: PublicMarketSource;
+  /** Exchange of the covered instruments (default MEXC). */
+  exchange?: 'MEXC' | 'BITUNIX';
   /** Local wall clock. */
   now?: () => Date;
   log?: (m: string) => void;
@@ -132,10 +136,17 @@ export class MarketFeed {
   /** Per-contract serialisation of quote-state writes (stream ingest vs. cycle evaluation). */
   private readonly locks = new Map<string, Promise<unknown>>();
 
+  /** Exchange whose instruments this feed covers (MEXC by default; BITUNIX for the Bitunix candle feed). */
+  readonly exchange: 'MEXC' | 'BITUNIX';
+  /** Source label of everything this feed writes (MEXC_PUBLIC / BITUNIX_PUBLIC). */
+  readonly source: 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC';
+
   constructor(
     private readonly db: Db,
     private readonly o: FeedOptions
   ) {
+    this.exchange = o.exchange ?? 'MEXC';
+    this.source = this.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : FEED_SOURCE;
     this.now = o.now ?? (() => new Date());
     this.log = o.log ?? (() => {});
     this.intervals = o.intervals ?? ['5', '15'];
@@ -157,7 +168,7 @@ export class MarketFeed {
 
   /** Exchange symbols the stream should carry (from the last cycle's coverage). */
   get coveredExchangeSymbols(): string[] {
-    return this.lastCovered.map((c) => c.exchangeSymbol).filter(isMexcFuturesSymbol);
+    return this.lastCovered.map((c) => c.exchangeSymbol).filter(this.exchange === 'BITUNIX' ? isBitunixFuturesSymbol : isMexcFuturesSymbol);
   }
 
   /** Local ms until which REST is paused after a rate-limit answer (0 = not paused). */
@@ -170,7 +181,8 @@ export class MarketFeed {
   }
 
   private noteRateLimit(e: unknown): void {
-    if (!(e instanceof MexcPublicError) || !isRateLimitCode(e.kind, e.code)) return;
+    const bitunixLimited = e instanceof BitunixPublicError && ((e.kind === 'HTTP' && e.code === 429) || (e.kind === 'API' && (e.code === 10005 || e.code === 10006)));
+    if (!bitunixLimited && (!(e instanceof MexcPublicError) || !isRateLimitCode(e.kind, e.code))) return;
     const until = this.now().getTime() + Math.round(FEED_POLICY.restRateLimitCooldownMs * (0.8 + 0.4 * this.rand()));
     if (until > this.restCooldownUntil) {
       this.restCooldownUntil = until;
@@ -206,9 +218,9 @@ export class MarketFeed {
         openPositions: sql<number>`(select count(*) from positions p where p.instrument_id = "instruments"."id" and p.status = 'OPEN')`.mapWith(Number)
       })
       .from(instruments)
-      // MEXC contracts only: quotes are keyed by instrument, and an instrument belongs to one
-      // exchange, so another exchange's contract never receives MEXC prices (or vice versa).
-      .where(eq(instruments.exchange, 'MEXC'))
+      // This feed's exchange only: quotes and candles are keyed by instrument, and an instrument
+      // belongs to one exchange, so one exchange's prices never reach another exchange's contract.
+      .where(eq(instruments.exchange, this.exchange))
       .orderBy(instruments.symbol);
     return rows.filter((r) => r.status === 'PUBLISHED' || r.openPositions > 0);
   }
@@ -217,6 +229,32 @@ export class MarketFeed {
   async refreshCoverage(): Promise<string[]> {
     this.lastCovered = await this.covered();
     return this.coveredExchangeSymbols;
+  }
+
+  /**
+   * Closed 5m/15m candles only (EMA 200 history), for every covered contract: the same backfill,
+   * gap detection and late-revision handling as the full cycle, without any quote request. Used by
+   * the Bitunix feed, whose quotes come from its public WebSocket.
+   */
+  async candleCycle(): Promise<{ symbol: string; interval: CandleInterval; written: number; backfilled: number; error?: string }[]> {
+    await this.measureClock();
+    this.lastCovered = await this.covered();
+    const out: { symbol: string; interval: CandleInterval; written: number; backfilled: number; error?: string }[] = [];
+    for (const inst of this.lastCovered) {
+      for (const interval of this.intervals) {
+        if (this.restCooling()) {
+          out.push({ symbol: inst.symbol, interval, written: 0, backfilled: 0, error: 'REST paused (rate limit)' });
+          continue;
+        }
+        try {
+          out.push({ symbol: inst.symbol, interval, ...(await this.syncCandles(inst, interval)) });
+        } catch (e) {
+          this.noteRateLimit(e);
+          out.push({ symbol: inst.symbol, interval, written: 0, backfilled: 0, error: (e as Error).message.slice(0, 200) });
+        }
+      }
+    }
+    return out;
   }
 
   async cycle(): Promise<CycleSummary> {
@@ -253,17 +291,17 @@ export class MarketFeed {
     const [row] = await this.db
       .select()
       .from(marketFeedStatus)
-      .where(and(eq(marketFeedStatus.instrumentId, instrumentId), eq(marketFeedStatus.source, FEED_SOURCE)));
+      .where(and(eq(marketFeedStatus.instrumentId, instrumentId), eq(marketFeedStatus.source, this.source)));
     return row ?? null;
   }
 
   private async event(instrumentId: string, kind: EventKind, message: string, detail: Record<string, unknown> = {}, window?: { from: Date; to: Date }): Promise<void> {
-    await this.db.insert(marketFeedEvents).values({ instrumentId, source: FEED_SOURCE, kind, message, detail, windowFrom: window?.from ?? null, windowTo: window?.to ?? null });
+    await this.db.insert(marketFeedEvents).values({ instrumentId, source: this.source, kind, message, detail, windowFrom: window?.from ?? null, windowTo: window?.to ?? null });
     this.log(`${kind}: ${message}`);
   }
 
   private async save(instrumentId: string, exchangeSymbol: string, patch: Partial<typeof marketFeedStatus.$inferInsert>): Promise<void> {
-    const values = { instrumentId, source: FEED_SOURCE, exchangeSymbol, ...patch, updatedAt: this.now() };
+    const values = { instrumentId, source: this.source, exchangeSymbol, ...patch, updatedAt: this.now() };
     await this.db
       .insert(marketFeedStatus)
       .values(values)
@@ -541,7 +579,7 @@ export class MarketFeed {
       return 'REPEAT';
     }
 
-    await recordMarketTick(this.db, { instrumentId: inst.id, asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: null, source: FEED_SOURCE, channel, receivedAt: receivedAt ?? now });
+    await recordMarketTick(this.db, { instrumentId: inst.id, asOf, bid: t.bid, ask: t.ask, mark: t.mark, last: t.last, liquidityContracts: null, source: this.source, channel, receivedAt: receivedAt ?? now });
 
     // Recovery after an outage or a stale stretch: record the interval where price crossings could
     // not be observed. Exits continue from the current price; nothing is filled retroactively.
@@ -581,7 +619,7 @@ export class MarketFeed {
     let n = 0;
     for (const r of rows) {
       if (r.settledAt.getTime() <= floor || r.settledAt.getTime() > exNow) continue;
-      if ((await recordFundingRate(this.db, { instrumentId: inst.id, settledAt: r.settledAt, rate: r.rate, source: FEED_SOURCE })).created) n += 1;
+      if ((await recordFundingRate(this.db, { instrumentId: inst.id, settledAt: r.settledAt, rate: r.rate, source: this.source })).created) n += 1;
     }
     if (n) this.log(`${inst.symbol}: recorded ${n} settled funding rate(s)`);
     return n;
@@ -609,7 +647,7 @@ export class MarketFeed {
         and(
           eq(marketCandles.instrumentId, inst.id),
           eq(marketCandles.interval, interval),
-          eq(marketCandles.source, FEED_SOURCE),
+          eq(marketCandles.source, this.source),
           inArray(
             marketCandles.openTime,
             closed.map((c) => c.openTime)
@@ -628,7 +666,7 @@ export class MarketFeed {
     for (let i = 0; i < fresh.length; i += 500) {
       await this.db
         .insert(marketCandles)
-        .values(fresh.slice(i, i + 500).map((c) => ({ instrumentId: inst.id, interval, openTime: c.openTime, open: c.open, high: c.high, low: c.low, close: c.close, closed: true, source: FEED_SOURCE })))
+        .values(fresh.slice(i, i + 500).map((c) => ({ instrumentId: inst.id, interval, openTime: c.openTime, open: c.open, high: c.high, low: c.low, close: c.close, closed: true, source: this.source })))
         .onConflictDoUpdate({
           target: [marketCandles.instrumentId, marketCandles.interval, marketCandles.openTime],
           set: { open: sql`excluded.open`, high: sql`excluded.high`, low: sql`excluded.low`, close: sql`excluded.close`, closed: sql`excluded.closed`, source: sql`excluded.source` }
@@ -663,7 +701,7 @@ export class MarketFeed {
         await this.db
           .select({ t: marketCandles.openTime })
           .from(marketCandles)
-          .where(and(eq(marketCandles.instrumentId, inst.id), eq(marketCandles.interval, interval), eq(marketCandles.source, FEED_SOURCE), gte(marketCandles.openTime, windowStart), lte(marketCandles.openTime, newest)))
+          .where(and(eq(marketCandles.instrumentId, inst.id), eq(marketCandles.interval, interval), eq(marketCandles.source, this.source), gte(marketCandles.openTime, windowStart), lte(marketCandles.openTime, newest)))
       ).map((r) => r.t.getTime());
     const gaps = missingBarRanges(await have(), interval, windowStart, newest);
     // A first run's whole window is a backfill, not a gap.

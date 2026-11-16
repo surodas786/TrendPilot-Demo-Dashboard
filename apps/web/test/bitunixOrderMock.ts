@@ -34,6 +34,8 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
   fillPrice: Record<string, string> = { BTCUSDT: '64000', XAUUSDT: '3866.2' };
   /** Next placement: fill fraction (1 = full, 0 = none), TP/SL attach (NO / LATE n reads), outcome. */
   next: { fillFraction?: string; attachStop?: 'YES' | 'NO'; stopVisibleAfterReads?: number; timeout?: 'BEFORE_ACCEPT' | 'AFTER_ACCEPT'; rejectCode?: number; duplicate?: boolean } = {};
+  /** Exchange clock (tests set it to their own clock). */
+  nowMs: () => number = Date.now;
   private seq = 1;
   private tpslReads = 0;
   private hiddenTpsl: Record<string, unknown>[] = [];
@@ -102,7 +104,7 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
     const side = body.side as 'BUY' | 'SELL';
     const tradeSide = body.tradeSide as 'OPEN' | 'CLOSE';
     if (this.mode === 'HEDGE' && tradeSide !== 'OPEN' && tradeSide !== 'CLOSE') throw new BitunixPrivateError('tradeSide required (code 10002)', 'API', 10002);
-    const now = Date.now();
+    const now = this.nowMs();
     const price = this.fillPrice[symbol] ?? '1';
     const order: MockOrder = { orderId: String(900_000_000_000 + this.seq++), clientId, symbol, side, tradeSide, orderType: String(body.orderType), qty: String(body.qty), tradeQty: '0', price, status: 'NEW', ctime: now, mtime: now };
     // Documented hedge mapping: open long BUY+OPEN, open short SELL+OPEN, close long BUY+CLOSE, close short SELL+CLOSE.
@@ -147,7 +149,9 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
           this.tpsl = this.tpsl.filter((t) => t.positionId !== order.positionId);
         }
       }
-      this.trades.push({ tradeId: String(800_000_000_000 + this.seq++), orderId: order.orderId, positionId: order.positionId, symbol, side, qty: filled.toFixed(), price, fee: D(filled).times(price).times('0.0006').toFixed(), reduceOnly: false, clientId, ctime: now });
+      const entry = tradeSide === 'CLOSE' ? D(this.positions.get(order.positionId!)?.avgOpenPrice ?? price) : D(price);
+      const realizedPNL = tradeSide === 'CLOSE' ? D(price).minus(entry).times(filled).times(legSide === 'LONG' ? 1 : -1).toFixed() : '0';
+      this.trades.push({ tradeId: String(800_000_000_000 + this.seq++), orderId: order.orderId, positionId: order.positionId, symbol, side, qty: filled.toFixed(), price, fee: D(filled).times(price).times('0.0006').toFixed(), realizedPNL: realizedPNL === '0' && tradeSide === 'CLOSE' ? '0.0000001' : realizedPNL, reduceOnly: false, clientId, ctime: now });
     }
     if (n.timeout === 'AFTER_ACCEPT') throw new BitunixPrivateError('POST place_order: timed out', 'TIMEOUT');
     if (n.duplicate) throw new BitunixPrivateError('POST place_order: Client ID duplicate (code 30042)', 'API', 30042);

@@ -3,6 +3,7 @@ import { DomainError, ErrorCode, normDecimal, type Direction, type StrategyVersi
 import type { Executor } from '../client';
 import { FIXTURE_LABEL, leverageChoicesFor, type MexcContractFixture } from '../mexcFixtures';
 import { instruments, strategyPackages, strategyVersionInstruments, strategyVersions } from '../schema';
+import { routesDeliveringTo } from '../signals/routeTargets';
 
 /* ───────────────────────────── Instruments (trading pairs) ───────────────────────────── */
 
@@ -21,6 +22,8 @@ export interface InstrumentDto {
   fixtureLabel: string | null;
   revision: number;
   updatedAt: string;
+  /** TradingView sources whose alerts reach this contract (enabled routes, primary or Bitunix target). */
+  signalSources?: string[];
 }
 
 type InstrumentRow = typeof instruments.$inferSelect;
@@ -55,8 +58,13 @@ const toInstrument = (r: InstrumentRow): InstrumentDto => ({
 });
 
 export async function listPublishedInstruments(db: Executor): Promise<InstrumentDto[]> {
-  const rows = await db.select().from(instruments).where(eq(instruments.status, 'PUBLISHED')).orderBy(asc(instruments.symbol));
-  return rows.map(toInstrument);
+  const rows = await db.select().from(instruments).where(eq(instruments.status, 'PUBLISHED')).orderBy(asc(instruments.exchange), asc(instruments.symbol));
+  const out: InstrumentDto[] = [];
+  for (const r of rows) {
+    const routes = (await routesDeliveringTo(db, r.id)).filter((x) => x.enabled);
+    out.push({ ...toInstrument(r), signalSources: [...new Set(routes.map((x) => `${x.source} ${x.interval}m`))].sort() });
+  }
+  return out;
 }
 
 export async function listAllInstruments(db: Executor): Promise<InstrumentDto[]> {

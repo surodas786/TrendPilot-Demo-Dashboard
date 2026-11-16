@@ -388,6 +388,31 @@ export const signalRoutes = pgTable(
 );
 
 /** SIG-05: one row per accepted canonical event. */
+/**
+ * Explicit additional targets of a signal route (Step 4: Bitunix). The route's own instrument stays
+ * its primary (MEXC) target; a target names the same contract on another exchange. One target per
+ * route and exchange; disabled targets receive nothing.
+ */
+export const signalRouteTargets = pgTable(
+  'signal_route_targets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    routeId: uuid('route_id')
+      .notNull()
+      .references(() => signalRoutes.id),
+    instrumentId: uuid('instrument_id')
+      .notNull()
+      .references(() => instruments.id),
+    exchange: text('exchange').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    createdBy: uuid('created_by'),
+    revision: integer('revision').notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [uniqueIndex('signal_route_targets_route_exchange_key').on(t.routeId, t.exchange), check('signal_route_targets_exchange_valid', sql`${t.exchange} IN ('BITUNIX')`)]
+);
+
 export const signalEvents = pgTable(
   'signal_events',
   {
@@ -412,6 +437,12 @@ export const signalEvents = pgTable(
     alertFiredAt: timestamp('alert_fired_at', { withTimezone: true }).notNull(),
     receivedAt: timestamp('received_at', { withTimezone: true }).notNull(),
     referencePrice: numeric('reference_price', { precision: 32, scale: 12 }).notNull(),
+    /**
+     * Bitunix routing (Step 4): instruments this event ALSO dispatches to besides `instrument_id`,
+     * snapshotted from the route's enabled targets at intake, so a re-run dispatch (crash recovery)
+     * always reaches exactly the same blocks. Empty for every MEXC-only route.
+     */
+    targetInstrumentIds: uuid('target_instrument_ids').array().notNull().default(sql`'{}'::uuid[]`),
     disposition: eventDisposition('disposition').notNull(),
     status: eventStatus('status').notNull().default('ACCEPTED'),
     dispatchedAt: timestamp('dispatched_at', { withTimezone: true }),

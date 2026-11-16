@@ -23,14 +23,16 @@ interface Props {
   versions: StrategyVersionDto[];
   /** Status of the investor's MEXC connection (null = none); Live needs VERIFIED. */
   liveConnectionStatus: string | null;
+  /** The investor's Bitunix connection (Live on Bitunix contracts needs it verified). */
+  bitunixConnectionStatus?: string | null;
 }
 
 /** UI-03 Trade Settings for the signed-in investor only. All data arrives owner-scoped from the server. */
-export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus }: Props) {
+export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus, bitunixConnectionStatus = null }: Props) {
   const router = useRouter();
   /** A saved block id, 'new', or a new block prefilled from a saved one in the other mode. */
   const [editing, setEditing] = useState<string | 'new' | { copyFrom: OrderBlockDto; mode: BlockMode } | null>(null);
-  const liveConnected = liveUnavailableReason(liveConnectionStatus) === null;
+  const liveConnected = liveUnavailableReason(liveConnectionStatus) === null || liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') === null;
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const existing = typeof editing === 'string' && editing !== 'new' ? blocks.find((b) => b.id === editing) : undefined;
@@ -38,6 +40,10 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
   const takenByMode = { PAPER: blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId), LIVE: blocks.filter((b) => b.mode === 'LIVE').map((b) => b.instrumentId) };
   const tradable = (i: InstrumentDto) => versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id));
   const canAdd = instruments.some((i) => tradable(i) && (!takenByMode.PAPER.includes(i.id) || (liveConnected && !takenByMode.LIVE.includes(i.id))));
+  const contractOf = (b: OrderBlockDto) => {
+    const i = instruments.find((x) => x.id === b.instrumentId);
+    return i ? `${i.exchange === 'BITUNIX' ? 'Bitunix' : i.exchange} · ${i.exchangeSymbol}` : b.exchange;
+  };
   const labelOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
     return i ? pairLabel(i) : b.symbol;
@@ -77,7 +83,7 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
       ) : (
         <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
           {blocks.map((b) => (
-            <OrderBlockRow key={b.id} block={b} pairLabel={labelOf(b)} strategyName={strategyOf(b)} busy={busyId === b.id} onEdit={() => setEditing(b.id)} onToggle={() => toggle(b)} />
+            <OrderBlockRow key={b.id} block={b} pairLabel={labelOf(b)} contract={contractOf(b)} strategyName={strategyOf(b)} busy={busyId === b.id} onEdit={() => setEditing(b.id)} onToggle={() => toggle(b)} />
           ))}
         </ul>
       )}
@@ -105,6 +111,7 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
             versions={versions}
             takenByMode={takenByMode}
             liveConnectionStatus={liveConnectionStatus}
+            bitunixConnectionStatus={bitunixConnectionStatus}
             timezone={timezone}
             onDone={(saved) => {
               setEditing(null);
