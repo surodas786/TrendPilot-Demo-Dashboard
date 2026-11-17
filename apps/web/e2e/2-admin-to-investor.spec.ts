@@ -129,8 +129,8 @@ test('admin creates a package and publishes v1 (5m, EMA 200, close and reverse) 
   await pkg.getByLabel('Supertrend ATR length').fill('14');
   await pkg.getByLabel('Supertrend factor').fill('2.5');
   // Approve ETH/USDT only.
-  if ((await pkg.getByRole('checkbox', { name: 'BTC/USDT' }).getAttribute('aria-checked')) === 'true') await pkg.getByRole('checkbox', { name: 'BTC/USDT' }).click();
-  if ((await pkg.getByRole('checkbox', { name: 'ETH/USDT' }).getAttribute('aria-checked')) !== 'true') await pkg.getByRole('checkbox', { name: 'ETH/USDT' }).click();
+  if ((await pkg.getByRole('checkbox', { name: 'BTC/USDT · MEXC' }).getAttribute('aria-checked')) === 'true') await pkg.getByRole('checkbox', { name: 'BTC/USDT · MEXC' }).click();
+  if ((await pkg.getByRole('checkbox', { name: 'ETH/USDT · MEXC' }).getAttribute('aria-checked')) !== 'true') await pkg.getByRole('checkbox', { name: 'ETH/USDT · MEXC' }).click();
   await pkg.getByRole('button', { name: 'Save draft' }).click();
   await expect(pkg.getByTestId('version-1').getByText('Draft', { exact: true })).toBeVisible();
   await pkg.getByRole('button', { name: 'Publish', exact: true }).click();
@@ -181,7 +181,7 @@ test('the investor signs in, sees only their own profile and turns on MFA', asyn
 test('the investor configures ETH/USDT, previews the order with fixture data and activates', async () => {
   await chloe.getByRole('button', { name: 'Add Token' }).click();
   const panel = chloe.getByRole('dialog');
-  await panel.getByLabel('Trading pair').selectOption({ label: 'ETH/USDT' });
+  await panel.getByLabel('Trading pair').selectOption({ label: 'ETH/USDT · MEXC ETH_USDT' });
   await expect(panel.getByLabel('Strategy').locator('option:checked')).toHaveText(`${PKG} · v1 · 5m`);
   await panel.getByRole('radio', { name: 'Long only' }).click();
   await panel.getByLabel('Order cost (USDT)').fill('40');

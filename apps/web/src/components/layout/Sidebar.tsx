@@ -99,7 +99,7 @@ export function Sidebar({ role, name }: { role: ShellRole; name: string }) {
           <LockIcon className="mt-0.5 h-4 w-4 shrink-0 text-subtle" aria-hidden />
           <div>
             <p className="text-xs font-semibold text-muted">Live trading</p>
-            <p className="text-xs text-subtle">Disabled in this build. Paper settings only.</p>
+            <p className="text-xs text-subtle">Status, exchange connections (MEXC, Bitunix) and limits are on the Live Trading page.</p>
           </div>
         </div>
         <p className="text-xs text-subtle">

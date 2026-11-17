@@ -30,7 +30,7 @@ export interface LiveAdminData {
     lastSyncError: string | null;
     drift: { kind: string; symbol: string; detail: string }[];
   }[];
-  contracts: { id: string; symbol: string; exchangeSymbol: string; status: string; isFixture: boolean; liveAllowed: boolean }[];
+  contracts: { id: string; exchange: string; symbol: string; exchangeSymbol: string; status: string; isFixture: boolean; liveAllowed: boolean }[];
 }
 
 const ORDER_CAPS = ['OPEN_WITH_ATTACHED_STOP', 'REDUCE_ONLY_CLOSE', 'STOP_RESIZE_AFTER_PARTIAL_CLOSE', 'CANCEL_STOP'];
@@ -241,9 +241,9 @@ export function LiveAdmin({ initial }: { initial: LiveAdminData }) {
                 disabled={!x.liveAllowed && x.isFixture}
                 title={x.isFixture ? 'Fixture metadata: validate and publish the pair against MEXC first.' : undefined}
                 loading={busy === `ct-${x.id}`}
-                onClick={() => post(`ct-${x.id}`, `/v1/admin/live/contracts/${x.id}`, { allowed: !x.liveAllowed }, x.liveAllowed ? `${x.symbol} removed from Live.` : `${x.symbol} allowed for Live.`)}
+                onClick={() => post(`ct-${x.id}`, `/v1/admin/live/contracts/${x.id}`, { allowed: !x.liveAllowed }, `${x.exchange === 'BITUNIX' ? 'Bitunix' : x.exchange} ${x.symbol} ${x.liveAllowed ? 'removed from Live.' : 'allowed for Live.'}`)}
               >
-                {x.exchangeSymbol || x.symbol}: {x.liveAllowed ? 'Live allowed' : 'Paper only'}
+                {x.exchange === 'BITUNIX' ? 'Bitunix' : x.exchange} {x.exchangeSymbol || x.symbol}: {x.liveAllowed ? 'Live allowed' : x.exchange === 'MEXC' ? 'Paper only' : 'not allowed for Live'}
               </Button>
             ))}
         </div>

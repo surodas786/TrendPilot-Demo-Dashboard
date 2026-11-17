@@ -11,7 +11,7 @@ import { PageContainer } from '../layout/PageContainer';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { SidePanel } from '../ui/SidePanel';
-import { pairLabel } from './draft';
+import { exchangeName, pairLabel, supportsMode } from './draft';
 import { OrderBlockEditor } from './OrderBlockEditor';
 import { OrderBlockRow } from './OrderBlockRow';
 
@@ -32,17 +32,17 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
   const router = useRouter();
   /** A saved block id, 'new', or a new block prefilled from a saved one in the other mode. */
   const [editing, setEditing] = useState<string | 'new' | { copyFrom: OrderBlockDto; mode: BlockMode } | null>(null);
-  const liveConnected = liveUnavailableReason(liveConnectionStatus) === null || liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') === null;
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const existing = typeof editing === 'string' && editing !== 'new' ? blocks.find((b) => b.id === editing) : undefined;
   const copy = editing && typeof editing === 'object' ? editing : undefined;
   const takenByMode = { PAPER: blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId), LIVE: blocks.filter((b) => b.mode === 'LIVE').map((b) => b.instrumentId) };
   const tradable = (i: InstrumentDto) => versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id));
-  const canAdd = instruments.some((i) => tradable(i) && (!takenByMode.PAPER.includes(i.id) || (liveConnected && !takenByMode.LIVE.includes(i.id))));
+  const liveFor = (i: InstrumentDto) => (i.exchange === 'BITUNIX' ? liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') : liveUnavailableReason(liveConnectionStatus)) === null;
+  const canAdd = instruments.some((i) => tradable(i) && ((supportsMode(i, 'PAPER') && !takenByMode.PAPER.includes(i.id)) || (liveFor(i) && !takenByMode.LIVE.includes(i.id))));
   const contractOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
-    return i ? `${i.exchange === 'BITUNIX' ? 'Bitunix' : i.exchange} · ${i.exchangeSymbol}` : b.exchange;
+    return i ? `${exchangeName(i.exchange)} · ${i.exchangeSymbol}` : b.exchange;
   };
   const labelOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
@@ -71,9 +71,9 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
     <PageContainer
       title="Trade Settings"
       description="Configure how each token trades on shared signals: strategy, sizing, exits, trading days and pause controls in one order block."
-      scope={`${ownerName} · My Account · Paper only — live trading is disabled in this build`}
+      scope={`${ownerName} · My Account · Paper simulates MEXC pairs; Live trades MEXC or Bitunix pairs on your own exchange account`}
       actions={
-        <Button variant="primary" icon={PlusIcon} onClick={() => setEditing('new')} disabled={!canAdd} title={canAdd ? undefined : 'Every approved pair already has a Paper block'}>
+        <Button variant="primary" icon={PlusIcon} onClick={() => setEditing('new')} disabled={!canAdd} title={canAdd ? undefined : 'No approved pair is free: each already has an entry in every mode it supports (Bitunix pairs are Live only and need a verified Bitunix connection).'}>
           Add Token
         </Button>
       }

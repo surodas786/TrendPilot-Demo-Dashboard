@@ -59,11 +59,14 @@ export interface FeedConfig {
   logTicks: boolean;
   drillDisconnectAfterS: number | null;
   /**
-   * Bitunix public prices (Step 1): off unless BITUNIX_PUBLIC_WS=on. Prices go to the in-memory,
-   * exchange-keyed cache and the heartbeat only; they are not stored as quotes and drive no orders
-   * until Bitunix contracts exist as platform instruments.
+   * Bitunix public prices. BITUNIX_PUBLIC_WS:
+   *  - `auto` (default): the Bitunix stream starts as soon as a Bitunix instrument is published (or
+   *    holds an open position), also while the feed is already running, and covers those instruments;
+   *  - `on`: always, for BITUNIX_WS_SYMBOLS plus every Bitunix instrument;
+   *  - `off`: never (Bitunix entries then expire as FEED_STALE; a warning is logged).
+   * `enabled` is true for on and auto. Quotes are stored only for Bitunix instruments.
    */
-  bitunix: { enabled: boolean; wsUrl: string; symbols: string[] };
+  bitunix: { enabled: boolean; mode: 'on' | 'off' | 'auto'; wsUrl: string; symbols: string[] };
 }
 
 export function feedConfig(env: Record<string, string | undefined>): FeedConfig {
@@ -75,11 +78,12 @@ export function feedConfig(env: Record<string, string | undefined>): FeedConfig 
   if (fb !== 'on' && fb !== 'off') throw new Error(`MARKET_FEED_REST_FALLBACK must be "on" or "off" (got "${fb}").`);
   const minIntervalMs = Math.max(5_000, Number(env.MARKET_FEED_REST_FALLBACK_MIN_MS || FEED_POLICY.restFallbackMinIntervalMs));
   const drill = Number(env.MARKET_FEED_WS_DRILL_DISCONNECT_AFTER_S || '');
-  const bx = (env.BITUNIX_PUBLIC_WS || 'off').trim().toLowerCase();
-  if (bx !== 'on' && bx !== 'off') throw new Error(`BITUNIX_PUBLIC_WS must be "on" or "off" (got "${bx}").`);
+  const bx = (env.BITUNIX_PUBLIC_WS || 'auto').trim().toLowerCase();
+  if (bx !== 'on' && bx !== 'off' && bx !== 'auto') throw new Error(`BITUNIX_PUBLIC_WS must be "auto", "on" or "off" (got "${bx}").`);
   const bxUrl = env.BITUNIX_PUBLIC_WS_URL || BITUNIX_WS_PUBLIC_URL;
   if (!/^wss:\/\//.test(bxUrl) && !(env.NODE_ENV !== 'production' && /^ws:\/\/(127\.0\.0\.1|localhost)[:/]/.test(bxUrl))) throw new Error(`BITUNIX_PUBLIC_WS_URL must be a wss:// URL (got "${bxUrl}").`);
-  const bxSymbols = (env.BITUNIX_WS_SYMBOLS || 'BTCUSDT,XAUUSDT').split(',').map((x) => x.trim());
+  // auto: only the Bitunix instruments, unless symbols are listed explicitly.
+  const bxSymbols = (env.BITUNIX_WS_SYMBOLS || (bx === 'auto' ? '' : 'BTCUSDT,XAUUSDT')).split(',').map((x) => x.trim()).filter(Boolean);
   const badSymbol = bxSymbols.find((x) => !bitunixSymbolFor(x));
   if (badSymbol !== undefined) throw new Error(`BITUNIX_WS_SYMBOLS has an invalid symbol "${badSymbol}" (use e.g. BTCUSDT,XAUUSDT).`);
   return {
@@ -88,7 +92,7 @@ export function feedConfig(env: Record<string, string | undefined>): FeedConfig 
     restFallback: { enabled: fb === 'on', minIntervalMs },
     logTicks: env.MARKET_FEED_LOG_TICKS === '1',
     drillDisconnectAfterS: Number.isFinite(drill) && drill > 0 ? drill : null,
-    bitunix: { enabled: bx === 'on', wsUrl: bxUrl, symbols: [...new Set(bxSymbols.map((x) => bitunixSymbolFor(x)!))] }
+    bitunix: { enabled: bx !== 'off', mode: bx, wsUrl: bxUrl, symbols: [...new Set(bxSymbols.map((x) => bitunixSymbolFor(x)!))] }
   };
 }
 
@@ -281,20 +285,32 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
     log(`public MEXC feed started: REST ticker polling (${baseUrl}) every ${pollMs} ms [MARKET_FEED_TICKER_SOURCE=rest]; live order transport disabled`);
   }
 
-  // Bitunix public prices (opt-in): own socket, own exchange-keyed cache entries; MEXC is untouched.
+  // Bitunix public prices: own socket, own exchange-keyed cache entries; MEXC is untouched.
   const prices = new ExchangePriceCache();
   // Bitunix instruments (published, or with an open position) get BITUNIX_PUBLIC quotes from this stream.
   const bitunixQuotes = new BitunixQuoteWriter(handle.db, prices, { log });
-  const bitunixSymbols = async () => [...new Set([...cfg.bitunix.symbols, ...(await bitunixQuotes.refresh())])];
+  let bitunixSubscribed: string[] = [];
+  const bitunixSymbols = async () => (bitunixSubscribed = [...new Set([...cfg.bitunix.symbols, ...(await bitunixQuotes.refresh())])]);
   let bitunix: BitunixPriceStream | null = null;
   // Bitunix closed 5m/15m candles (EMA 200) for Bitunix instruments: the shared candle sync on its
   // own BITUNIX_PUBLIC history (never mixed with MEXC candles).
-  const bitunixCandles = cfg.bitunix.enabled
-    ? new MarketFeed(handle.db, { source: new BitunixKlineSource({ baseUrl: env.BITUNIX_PUBLIC_BASE_URL || undefined }), exchange: 'BITUNIX', log: (m) => log(`bitunix candles: ${m}`) })
-    : null;
+  let bitunixCandles: MarketFeed | null = null;
   let lastBitunixCandles = 0;
   let bitunixCandleSummary: unknown = null;
-  if (cfg.bitunix.enabled) {
+  let warnedBitunixOff = false;
+  /** Starts the Bitunix stream once it is wanted (on: at startup; auto: once a Bitunix instrument exists). */
+  const ensureBitunix = async () => {
+    if (bitunix) return bitunix.setSymbols(await bitunixSymbols());
+    const syms = await bitunixSymbols();
+    if (!cfg.bitunix.enabled) {
+      if (!warnedBitunixOff && bitunixQuotes.symbols().length) {
+        warnedBitunixOff = true;
+        log(`WARNING: Bitunix instruments exist (${bitunixQuotes.symbols().join(', ')}) but BITUNIX_PUBLIC_WS=off: they get no quotes, so Bitunix entries expire as FEED_STALE. Remove the setting (default auto) or set it to on.`);
+      }
+      return;
+    }
+    if (!syms.length) return; // auto with no Bitunix instrument yet: nothing to subscribe
+    bitunixCandles = new MarketFeed(handle.db, { source: new BitunixKlineSource({ baseUrl: env.BITUNIX_PUBLIC_BASE_URL || undefined }), exchange: 'BITUNIX', log: (m) => log(`bitunix candles: ${m}`) });
     bitunix = new BitunixPriceStream({
       url: cfg.bitunix.wsUrl,
       factory: o.wsFactory,
@@ -310,19 +326,19 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
       },
       onUnsupported: (sym) => prices.forget('BITUNIX', sym)
     });
-    const syms = await bitunixSymbols();
     bitunix.setSymbols(syms);
     bitunix.start();
-    log(`Bitunix public prices: WebSocket ${cfg.bitunix.wsUrl} for ${syms.join(', ')} (quotes stored for Bitunix instruments: ${bitunixQuotes.symbols().join(', ') || 'none yet'})`);
-  } else if ((await bitunixQuotes.refresh()).length) {
-    log(`WARNING: Bitunix instruments exist (${bitunixQuotes.symbols().join(', ')}) but BITUNIX_PUBLIC_WS is off: they get no quotes, so Bitunix entries expire as FEED_STALE.`);
-  }
+    log(`Bitunix public prices (BITUNIX_PUBLIC_WS=${cfg.bitunix.mode}): WebSocket ${cfg.bitunix.wsUrl} for ${syms.join(', ')} (quotes stored for Bitunix instruments: ${bitunixQuotes.symbols().join(', ') || 'none yet'})`);
+  };
+  await ensureBitunix();
+  if (!bitunix && cfg.bitunix.mode === 'auto') log('Bitunix public prices: auto (no Bitunix instrument yet; the stream starts when one is published)');
   const bitunixDetail = () => {
     if (!bitunix) return null;
     const at = new Date();
     return {
+      mode: cfg.bitunix.mode,
       stream: bitunix.status(),
-      quotes: cfg.bitunix.symbols.map((sym) => {
+      quotes: bitunixSubscribed.map((sym) => {
         const q = prices.quote('BITUNIX', sym, at);
         return { symbol: sym, state: q.state, problem: q.problem, bid: q.bid, ask: q.ask, last: q.last, mark: q.mark, asOf: q.asOf?.toISOString() ?? null };
       })
@@ -338,7 +354,7 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
     try {
       // Subscribe newly published contracts first, so their tickers do not wait for REST backfill.
       if (stream) stream.setSymbols(await feed.refreshCoverage());
-      if (bitunix) bitunix.setSymbols(await bitunixSymbols());
+      await ensureBitunix();
       if (bitunixCandles && Date.now() - lastBitunixCandles >= 15_000) {
         lastBitunixCandles = Date.now();
         const r = await bitunixCandles.candleCycle();

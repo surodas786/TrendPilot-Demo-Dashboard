@@ -16,13 +16,13 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-/** EXE-01 preview: estimates from a labelled fixture or a fresh public MEXC quote. Places no order. */
+/** EXE-01 preview: estimates from a labelled fixture or a fresh public quote from the pair's own exchange. Places no order. */
 export function PreviewPanel({ preview }: { preview: PreviewResult }) {
   return (
     <section aria-label="Order preview" data-testid="order-preview" className="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        {preview.quote.source === 'MEXC_PUBLIC' ? (
-          <StatusPill tone="accent">MEXC public price</StatusPill>
+        {preview.quote.source === 'MEXC_PUBLIC' || preview.quote.source === 'BITUNIX_PUBLIC' ? (
+          <StatusPill tone="accent">{preview.quote.source === 'BITUNIX_PUBLIC' ? 'Bitunix' : 'MEXC'} public price</StatusPill>
         ) : (
           <StatusPill tone="warn" icon={FlaskConicalIcon}>
             Fixture data

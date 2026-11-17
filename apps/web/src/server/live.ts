@@ -33,9 +33,9 @@ export async function liveStatusFor(ownerId: string) {
 export async function adminLiveData() {
   const db = getDb();
   const contracts = await db
-    .select({ id: schema.instruments.id, symbol: schema.instruments.symbol, exchangeSymbol: schema.instruments.exchangeSymbol, status: schema.instruments.status, isFixture: schema.instruments.isFixture, liveAllowed: schema.instruments.liveAllowed })
+    .select({ id: schema.instruments.id, exchange: schema.instruments.exchange, symbol: schema.instruments.symbol, exchangeSymbol: schema.instruments.exchangeSymbol, status: schema.instruments.status, isFixture: schema.instruments.isFixture, liveAllowed: schema.instruments.liveAllowed })
     .from(schema.instruments)
-    .orderBy(asc(schema.instruments.symbol));
+    .orderBy(asc(schema.instruments.symbol), asc(schema.instruments.exchange));
   return {
     control: liveControlDto(await getLiveControl(db)),
     capabilities: [...MEXC_CAPABILITIES, ...BITUNIX_CAPABILITIES].map((c) => ({ id: c.id, summary: c.summary, documented: c.documented, mock: c.mock, readOnly: c.readOnly, gaps: c.gaps, docs: c.docs })),

@@ -8,7 +8,7 @@ export const EXIT_LABEL: Record<string, string> = {
   REVERSAL_CLOSE: 'Close and reverse',
   MANUAL_CLOSE: 'Manual close',
   PROTECTION_FAILURE: 'Emergency close (stop not confirmed)',
-  EXTERNAL_CLOSE: 'Closed on MEXC',
+  EXTERNAL_CLOSE: 'Closed on the exchange',
   LIQUIDATION: 'Liquidated'
 };
 

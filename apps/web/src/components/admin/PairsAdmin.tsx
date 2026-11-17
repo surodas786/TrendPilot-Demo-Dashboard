@@ -68,18 +68,21 @@ function PairRow({ pair }: { pair: InstrumentDto }) {
       if (r.code === 'REVISION_CONFLICT') router.refresh();
       return;
     }
-    toast.success(patch.status ? (patch.status === 'PUBLISHED' ? `${pair.symbol} published` : `${pair.symbol} disabled`) : 'Suggested exits saved');
+    const name = `${pair.exchange === 'BITUNIX' ? 'Bitunix' : pair.exchange} ${pair.symbol}`;
+    toast.success(patch.status ? (patch.status === 'PUBLISHED' ? `${name} published` : `${name} disabled`) : 'Suggested exits saved', patch.status === 'PUBLISHED' ? { description: 'Investors can select it in Trade Settings once a published strategy version includes it (Strategies).' } : undefined);
     setEditing(false);
     router.refresh();
   };
 
   return (
-    <li data-testid={`pair-row-${pair.symbol}`} className="space-y-3 px-4 py-3.5">
+    <li data-testid={pair.exchange === 'MEXC' ? `pair-row-${pair.symbol}` : `pair-row-${pair.exchange}-${pair.symbol}`} className="space-y-3 px-4 py-3.5">
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-semibold text-ink">
           {pair.base}/{pair.quote}
         </span>
-        <span className="text-xs text-subtle">{pair.exchange} · {pair.exchangeSymbol}</span>
+        <span className="text-xs text-subtle" data-testid="pair-exchange">
+          {pair.exchange === 'BITUNIX' ? 'Bitunix' : pair.exchange} · {pair.exchangeSymbol}
+        </span>
         <StatusPill tone={pair.status === 'PUBLISHED' ? 'gain' : 'neutral'}>{pair.status === 'PUBLISHED' ? 'Published' : 'Disabled'}</StatusPill>
         {pair.isFixture && (
           <StatusPill tone="warn" icon={FlaskConicalIcon}>
@@ -107,6 +110,81 @@ function PairRow({ pair }: { pair: InstrumentDto }) {
         </div>
       )}
     </li>
+  );
+}
+
+/** "0.001000000000" → "0.001" (numeric columns come back at full scale). */
+const trimZeros = (v: string) => (v.includes('.') ? v.replace(/.?0+$/, '') : v);
+
+interface BitunixImport {
+  instrument: { id: string; symbol: string; exchangeSymbol: string; qtyStep: string; minQty: string; maxQty: string; priceTick: string; leverageChoices: number[]; status: string; isFixture: boolean };
+  warnings: string[];
+  source: 'BITUNIX_PUBLIC' | 'FIXTURE';
+}
+
+/**
+ * Bitunix contracts: read from Bitunix's public trading_pairs (fixtures in tests/demo) and added as a
+ * separate DISABLED instrument; refreshing an existing one updates only its trading rules. Publish it
+ * in the list below like any pair.
+ */
+function BitunixImportSection() {
+  const router = useRouter();
+  const [symbol, setSymbol] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<BitunixImport | null>(null);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setResult(null);
+    setBusy(true);
+    const r = await request<BitunixImport>('POST', '/v1/admin/instruments/bitunix', { body: { symbol } });
+    setBusy(false);
+    if (!r.ok) return setError(r.issues[0]?.message ?? r.message);
+    setResult(r.data);
+    toast.success(`Bitunix ${r.data.instrument.exchangeSymbol} imported`, { description: r.data.instrument.status === 'PUBLISHED' ? 'Trading rules refreshed.' : 'It starts Disabled: review it below and press Publish.' });
+    router.refresh();
+  };
+  return (
+    <section className="space-y-3 rounded-xl border border-line bg-surface p-4" data-testid="bitunix-import">
+      <h3 className="text-sm font-semibold text-ink">Add a Bitunix Futures pair</h3>
+      <form onSubmit={submit} className="flex flex-wrap items-start gap-2" noValidate>
+        <TextField label="Bitunix Futures symbol" placeholder="e.g. BTCUSDT or XAUUSDT" value={symbol} onChange={(v) => setSymbol(v.toUpperCase())} error={error ?? undefined} className="w-60" />
+        <Button type="submit" icon={SearchCheckIcon} className="mt-7" disabled={!symbol || busy} loading={busy}>
+          Import from Bitunix
+        </Button>
+      </form>
+      <p className="text-xs text-subtle">
+        Reads the contract from Bitunix (public trading_pairs): it must be USDT-margined, OPEN, API-enabled and launched. Quantity step, minimum and maximum market quantity, price tick and leverage come from the exchange. The pair is
+        separate from the MEXC pair with the same coin (own prices, orders and positions), is Live only, and starts Disabled. Test and local demo builds use captured fixture contracts.
+      </p>
+      {result && (
+        <div className="space-y-1 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs text-muted" data-testid="bitunix-imported">
+          <p className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-semibold text-ink">Bitunix {result.instrument.exchangeSymbol}</span>
+            {result.source === 'BITUNIX_PUBLIC' ? (
+              <StatusPill tone="gain" icon={BadgeCheckIcon}>
+                Read from Bitunix
+              </StatusPill>
+            ) : (
+              <StatusPill tone="warn" icon={FlaskConicalIcon}>
+                Fixture contract (not verified on Bitunix)
+              </StatusPill>
+            )}
+            <StatusPill tone={result.instrument.status === 'PUBLISHED' ? 'gain' : 'neutral'}>{result.instrument.status === 'PUBLISHED' ? 'Published' : 'Disabled'}</StatusPill>
+          </p>
+          <p>
+            Step {trimZeros(result.instrument.qtyStep)} · min {trimZeros(result.instrument.minQty)} · max (market) {trimZeros(result.instrument.maxQty)} · tick {trimZeros(result.instrument.priceTick)} · leverage up to {Math.max(...result.instrument.leverageChoices)}×
+          </p>
+          {result.warnings.map((w) => (
+            <p key={w} className="flex items-center gap-1.5 text-warn">
+              <TriangleAlertIcon className="h-3.5 w-3.5" aria-hidden />
+              {w}
+            </p>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -146,7 +224,7 @@ export function PairsAdmin({ pairs }: { pairs: InstrumentDto[] }) {
   return (
     <div className="space-y-5">
       <section className="space-y-3 rounded-xl border border-line bg-surface p-4">
-        <h3 className="text-sm font-semibold text-ink">Add a trading pair</h3>
+        <h3 className="text-sm font-semibold text-ink">Add a MEXC Futures pair</h3>
         <form onSubmit={validate} className="flex flex-wrap items-start gap-2" noValidate>
           <TextField label="MEXC Futures ticker" placeholder="e.g. XAUUSDT or XAU_USDT" value={symbol} onChange={(v) => setSymbol(v.toUpperCase())} error={errors.symbol} className="w-60" />
           <Button type="submit" icon={SearchCheckIcon} className="mt-7" disabled={!symbol || checking} loading={checking}>
@@ -192,6 +270,8 @@ export function PairsAdmin({ pairs }: { pairs: InstrumentDto[] }) {
           </div>
         )}
       </section>
+
+      <BitunixImportSection />
 
       <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
         {pairs.map((p) => (

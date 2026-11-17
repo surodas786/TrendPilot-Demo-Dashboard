@@ -113,6 +113,15 @@ export async function assessEntry(
 ): Promise<EntryAssessment> {
   const { event, block, version, side, now, account } = input;
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
+  // Paper simulates MEXC contracts only (one MEXC Paper account). A Paper block on a Bitunix
+  // contract (created before this check existed) is refused instead of filling in the MEXC wallet.
+  if (block.mode === 'PAPER' && inst!.exchange !== 'MEXC') {
+    return {
+      result: { ok: false, reason: 'PAPER_EXCHANGE_UNSUPPORTED', detail: { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, reasonText: ENTRY_REASON_TEXT.PAPER_EXCHANGE_UNSUPPORTED } },
+      live: null,
+      availableUsdt: availableOf(account)
+    };
+  }
   const [openInScope] = await tx
     .select({ n: count() })
     .from(positions)
@@ -160,7 +169,7 @@ export async function assessEntry(
       const never = !quote && Number(any?.n ?? 0) === 0;
       ctx.feed = never ? 'NO_PRICE_EVER' : quote ? 'STALE' : 'NO_RECENT_PRICE';
       ctx.reasonText = never
-        ? `No ${venueLabel} price has ever been received for ${inst!.exchangeSymbol}: the ${venueLabel} price feed is off or does not cover this contract${inst!.exchange === 'BITUNIX' ? ' (BITUNIX_PUBLIC_WS=on in the feed process)' : ''}.`
+        ? `No ${venueLabel} price has ever been received for ${inst!.exchangeSymbol}: the ${venueLabel} price feed is off or does not cover this contract${inst!.exchange === 'BITUNIX' ? ' (is the feed process running? BITUNIX_PUBLIC_WS must not be off)' : ''}.`
         : `The latest ${venueLabel} price for ${inst!.exchangeSymbol} is too old (the feed is stale).`;
     } else {
       ctx.reasonText = `The ${venueLabel} price for ${inst!.exchangeSymbol} is too far from the TradingView reference price.`;

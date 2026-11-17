@@ -91,7 +91,7 @@ export default async function MyAccountPage() {
           </div>
           {conn ? (
             <dl className="mt-4 grid gap-3 sm:grid-cols-2">
-              <Field label="Exchange" value={`MEXC Futures · ${conn.accountRef}`} />
+              <Field label="Exchange" value={`MEXC Futures · ${conn.accountRef}`} testId="account-exchange-mexc" />
               <Field label="API key" value={conn.keyFingerprint} />
               <Field label="Position mode" value={<StatusPill tone={modeLabel.tone}>{modeLabel.text}</StatusPill>} testId="account-position-mode" />
               <Field label="Contracts allowed for Live" value={live.liveContracts.length ? live.liveContracts.map((x) => x.exchangeSymbol || x.symbol).join(', ') : 'None yet'} />
@@ -99,6 +99,18 @@ export default async function MyAccountPage() {
           ) : (
             <p className="mt-3 text-sm text-muted">No MEXC account is connected. Connect one on the Live Trading page.</p>
           )}
+          <div className="mt-4 border-t border-line pt-3" data-testid="account-connection-bitunix">
+            {live.bitunix ? (
+              <dl className="grid gap-3 sm:grid-cols-2">
+                <Field label="Exchange" value={`Bitunix Futures · ${live.bitunix.accountRef}`} />
+                <Field label="Status" value={<StatusPill tone={connectionStatusLabel(live.bitunix.status).tone}>{connectionStatusLabel(live.bitunix.status).text}</StatusPill>} />
+                <Field label="Position mode" value={<StatusPill tone={positionModeLabel(live.bitunix.positionMode).tone}>{positionModeLabel(live.bitunix.positionMode).text}</StatusPill>} />
+                <Field label="API key" value={live.bitunix.keyFingerprint} />
+              </dl>
+            ) : (
+              <p className="text-sm text-muted">No Bitunix account is connected. Connect one on the Live Trading page (Bitunix Futures connection).</p>
+            )}
+          </div>
           <div className="mt-3 text-sm" data-testid="account-live-entries">
             {live.entries.allowed ? (
               <p className="text-gain">New Live entries are allowed within your limits.</p>

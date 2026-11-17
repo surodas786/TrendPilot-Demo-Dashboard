@@ -49,6 +49,8 @@ import {
   newDraft,
   OPPOSITE_LABELS,
   pairLabel,
+  pairOptionLabel,
+  supportsMode,
   settingsPayload,
   TP_SIDES,
   validateDraft,
@@ -97,7 +99,9 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
   const liveConnected = anyLive;
   const savedMode = existing ? (existing.mode as BlockMode) : undefined;
   const [mode, setMode] = useState<BlockMode>(() => savedMode ?? copyFrom?.mode ?? (takenByMode.PAPER.length >= instruments.length && liveConnected ? 'LIVE' : 'PAPER'));
-  const availableFor = (m: BlockMode) => instruments.filter((i) => i.status === 'PUBLISHED' && !takenByMode[m].includes(i.id));
+  const availableFor = (m: BlockMode) => instruments.filter((i) => i.status === 'PUBLISHED' && supportsMode(i, m) && !takenByMode[m].includes(i.id));
+  /** Published pairs that only Live can trade (Bitunix): named under the pair list in Paper. */
+  const liveOnlyPairs = instruments.filter((i) => i.status === 'PUBLISHED' && !supportsMode(i, 'PAPER'));
   const available = availableFor(mode);
   const [draft, setDraft] = useState<Draft>(() =>
     existing ? draftFromBlock(existing) : copyFrom ? draftFromBlock(copyFrom.block) : newDraft(available[0], available[0] ? versionChoices(versions, available[0].id)[0] : undefined)
@@ -182,8 +186,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
 
   const fixedPair = existing ?? copyFrom?.block;
   const pairOptions = fixedPair
-    ? [{ value: fixedPair.instrumentId, label: instrument ? pairLabel(instrument) : fixedPair.symbol }]
-    : available.map((i) => ({ value: i.id, label: i.exchange === 'BITUNIX' ? `${pairLabel(i)} · Bitunix` : pairLabel(i) }));
+    ? [{ value: fixedPair.instrumentId, label: instrument ? pairOptionLabel(instrument) : fixedPair.symbol }]
+    : available.map((i) => ({ value: i.id, label: pairOptionLabel(i) }));
 
   const cost = isDecimalString(draft.orderCostUsdt.trim()) ? new Decimal(draft.orderCostUsdt.trim()) : null;
   const notional = cost && cost.gt(0) && draft.leverage ? cost.times(draft.leverage) : null;
@@ -268,6 +272,11 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           )}
           <FilterSelect label="Trading pair" value={draft.instrumentId} onChange={changePair} options={pairOptions.length ? pairOptions : [{ value: '', label: 'No pairs available' }]} disabled={Boolean(fixedPair)} />
           {err('instrumentId') && <p className="-mt-2 text-xs text-loss">{err('instrumentId')}</p>}
+          {!fixedPair && mode === 'PAPER' && liveOnlyPairs.length > 0 && (
+            <p className="-mt-2 text-xs text-subtle" data-testid="live-only-pairs">
+              Live only (Paper simulates MEXC contracts): {liveOnlyPairs.map((i) => pairOptionLabel(i)).join(', ')}. Choose Live under Trading mode to select {liveOnlyPairs.length === 1 ? 'it' : 'them'}.
+            </p>
+          )}
           {instrument && (
             <p className="-mt-2 text-xs text-subtle">
               Exchange: {instrument.exchange === 'BITUNIX' ? 'Bitunix' : instrument.exchange} Futures (derived from the pair) · execution symbol{' '}
@@ -289,6 +298,11 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             onChange={changeVersion}
             options={strategyOptions.length ? strategyOptions.map((v) => ({ value: v.id, label: versionLabel(v) })) : [{ value: '', label: 'No strategy is approved for this pair' }]}
           />
+          {instrument && strategyOptions.length === 0 && (
+            <p className="-mt-2 text-xs text-warn" data-testid="no-strategy">
+              No published strategy version includes {pairOptionLabel(instrument)} yet. An administrator has to publish a strategy version with this pair (Admin → Strategies) before it can be saved.
+            </p>
+          )}
           {err('strategyVersionId') && <p className="-mt-2 text-xs text-loss">{err('strategyVersionId')}</p>}
           {newerForPinned && draft.strategyVersionId === existing?.strategyVersionId && (
             <p className="-mt-2 flex items-start gap-1.5 text-xs text-muted" data-testid="pinned-notice">
@@ -325,7 +339,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
                   ? [{ value: copyFrom.mode, label: MODE_LABELS[copyFrom.mode] }]
                   : [
                       { value: 'PAPER' as const, label: 'Paper' },
-                      { value: 'LIVE' as const, label: liveConnected ? (bitunixConnectionStatus === 'VERIFIED' ? (liveConnectionStatus === 'VERIFIED' ? 'Live (MEXC / Bitunix)' : 'Live (Bitunix)') : 'Live (MEXC)') : 'Live — connect MEXC first', disabled: !liveConnected }
+                      { value: 'LIVE' as const, label: liveConnected ? (bitunixConnectionStatus === 'VERIFIED' ? (liveConnectionStatus === 'VERIFIED' ? 'Live (MEXC / Bitunix)' : 'Live (Bitunix)') : 'Live (MEXC)') : 'Live — connect an exchange first', disabled: !liveConnected }
                     ]
             }
             hint={
@@ -651,7 +665,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
         title={`Switch to ${MODE_LABELS[mode]}?`}
         description={
           savedMode
-            ? `This entry will trade future signals in ${MODE_LABELS[mode]} instead of ${MODE_LABELS[savedMode]}. Your settings are kept and the entry is paused until you resume it.${mode === 'LIVE' ? ' Live sends real orders to your own MEXC account once every Live check passes.' : ''}`
+            ? `This entry will trade future signals in ${MODE_LABELS[mode]} instead of ${MODE_LABELS[savedMode]}. Your settings are kept and the entry is paused until you resume it.${mode === 'LIVE' ? ` Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account once every Live check passes.` : ''}`
             : ''
         }
         confirmLabel={`Switch to ${MODE_LABELS[mode]}`}

@@ -35,9 +35,11 @@ export type EntryReason =
   | 'RISK_LIMIT'
   | 'PROTECTION_FAILED'
   | 'INSUFFICIENT_MARGIN'
-  | 'LIVE_NOT_ELIGIBLE';
+  | 'LIVE_NOT_ELIGIBLE'
+  | 'PAPER_EXCHANGE_UNSUPPORTED';
 
 export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
+  PAPER_EXCHANGE_UNSUPPORTED: 'Paper trading simulates MEXC contracts only. This order block is on a Bitunix contract: switch it to Live (Bitunix) or use the MEXC pair for Paper.',
   TRAILING_CONVERSION_REQUIRED:
     'This order block still uses the old Trailing Stop. New entries are held until you open Trade Settings, enter Activate after profit (%) for Trailing Take Profit (or turn it off) and save.',
   POSITION_NOT_FLAT: 'A position is already open on this pair; adds and reversals are not enabled yet.',
@@ -113,7 +115,8 @@ export function evaluatePaperEntry(i: EntryInput): EntryEvaluation {
   if (ageMs > PAPER_POLICY.maxQuoteAgeSeconds * 1000 || ageMs < -PAPER_POLICY.quoteClockToleranceSeconds * 1000) {
     return { ok: false, reason: 'FEED_STALE', detail: { quoteAsOf: i.quote.asOf.toISOString(), ageSeconds: Math.round(ageMs / 1000) } };
   }
-  const source: MarketSource = i.quote.source === 'MEXC_PUBLIC' ? 'MEXC_PUBLIC' : 'FIXTURE';
+  // Keep the exchange the price came from (MEXC_PUBLIC or BITUNIX_PUBLIC); anything else is a fixture.
+  const source: MarketSource = i.quote.source === 'MEXC_PUBLIC' || i.quote.source === 'BITUNIX_PUBLIC' ? i.quote.source : 'FIXTURE';
   checks.quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString(), source };
 
   // Spread and price deviation (investor caps never exceed platform ceilings).

@@ -22,7 +22,7 @@ const sideLabel = (side: 'LONG' | 'SHORT' | null) => (side === 'LONG' ? 'Long' :
 /** How the original close of a withheld reversal ended, from its order state. */
 const closeOutcome = (state: string | null | undefined, reason: string | null | undefined) =>
   reason === 'REVERSAL_CLOSED_ON_EXCHANGE'
-    ? 'overtaken by a close on MEXC'
+    ? 'overtaken by a close on the exchange'
     : state === 'REJECTED' || state === 'CANCELLED'
       ? 'rejected'
       : state === 'EXPIRED' || state === 'PARTIALLY_FILLED'
@@ -43,7 +43,7 @@ export default async function SignalsPage() {
     <PageContainer
       title="Signals"
       description="How each shared TradingView alert was evaluated against your own order blocks."
-      scope={`${user.name} · My Account · Paper entries are simulated; Live entries are sent to your own MEXC account. Each outcome shows the mode of the order block it was evaluated for.`}
+      scope={`${user.name} · My Account · Paper entries are simulated; Live entries are sent to your own exchange account (MEXC or Bitunix, from the pair). Each outcome shows the mode of the order block it was evaluated for.`}
     >
       {outcomes.length === 0 ? (
         <EmptyState icon={BellRingIcon} title="No signal outcomes yet" body="When an approved TradingView alert matches one of your order blocks, its outcome appears here." />
