@@ -12,11 +12,13 @@ export interface InstrumentDto {
   exchange: string;
   symbol: string;
   exchangeSymbol: string;
+  /** The exchange's numeric market ID (Lighter); null for exchanges addressed by symbol. */
+  marketId: number | null;
   base: string;
   quote: string;
   status: 'PUBLISHED' | 'DISABLED';
   leverageChoices: number[];
-  contract: { multiplier: string; qtyStep: string; minQty: string; maxQty: string; priceTick: string; takerFeeRate: string };
+  contract: { multiplier: string; qtyStep: string; minQty: string; maxQty: string; priceTick: string; takerFeeRate: string; minNotional: string | null };
   suggested: { stopPct: string; takeProfitPct: string; trailingEnabled: boolean; trailingPct: string };
   isFixture: boolean;
   fixtureLabel: string | null;
@@ -33,6 +35,7 @@ const toInstrument = (r: InstrumentRow): InstrumentDto => ({
   exchange: r.exchange,
   symbol: r.symbol,
   exchangeSymbol: r.exchangeSymbol,
+  marketId: r.exchangeMarketId ?? null,
   base: r.base,
   quote: r.quote,
   status: r.status,
@@ -43,7 +46,8 @@ const toInstrument = (r: InstrumentRow): InstrumentDto => ({
     minQty: normDecimal(r.minQty),
     maxQty: normDecimal(r.maxQty),
     priceTick: normDecimal(r.priceTick),
-    takerFeeRate: normDecimal(r.takerFeeRate)
+    takerFeeRate: normDecimal(r.takerFeeRate),
+    minNotional: r.minNotional === null ? null : normDecimal(r.minNotional)
   },
   suggested: {
     stopPct: normDecimal(r.suggestedStopPct),

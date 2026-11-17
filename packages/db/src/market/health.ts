@@ -1,5 +1,5 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
-import { Decimal, FEED_POLICY, FEED_STATE_TEXT, quoteAgeState, quoteSourceLabel, type FeedState } from '@trendpilot/domain';
+import { Decimal, FEED_POLICY, FEED_STATE_TEXT, isForeignPublicSource, quoteAgeState, quoteSourceLabel, type FeedState } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { instruments, marketFeedEvents, marketFeedStatus, marketQuotes, serviceHeartbeats } from '../schema';
 import type { TickerStreamStatus } from './mexcWs';
@@ -138,8 +138,8 @@ async function latestQuoteRows(db: Executor, now: Date): Promise<Map<string, Quo
 }
 
 /** A MEXC public price on a Bitunix contract, or a Bitunix public price on a MEXC contract. */
-export const isForeignPublicSource = (exchange: string, source: string): boolean =>
-  (exchange === 'BITUNIX' && source === 'MEXC_PUBLIC') || (exchange !== 'BITUNIX' && source === 'BITUNIX_PUBLIC');
+// A public price from another exchange's feed (exact source match); defined in the domain.
+export { isForeignPublicSource };
 
 /** "74651.000000000000" → "74651" (the form the live stream pushes). */
 const num = (v: string) => new Decimal(v).toFixed();

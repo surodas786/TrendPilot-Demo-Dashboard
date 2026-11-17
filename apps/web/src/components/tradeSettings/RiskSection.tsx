@@ -12,10 +12,12 @@ interface Props {
   errors: Record<string, string>;
   showErrors: boolean;
   onChange: (patch: Partial<Draft>) => void;
+  /** Currency shown on money limits (the pair's settlement currency). */
+  currency?: string;
 }
 
 /** CFG-03 optional stricter caps. Blank uses the platform ceiling shown as the placeholder. */
-export function RiskSection({ draft, errors, showErrors, onChange }: Props) {
+export function RiskSection({ draft, errors, showErrors, onChange, currency = 'USDT' }: Props) {
   const set = Object.values(draft.risk).filter((v) => v.trim() !== '').length;
   const [open, setOpen] = useState(set > 0);
   return (
@@ -39,7 +41,7 @@ export function RiskSection({ draft, errors, showErrors, onChange }: Props) {
                 placeholder={`Ceiling ${PLATFORM_CEILINGS[f.key]}`}
                 onChange={(v) => onChange({ risk: { ...draft.risk, [f.key]: v } })}
                 error={showErrors ? errors[`risk.${f.key}`] : undefined}
-                trailing={f.unit ? <span className="pr-2 text-xs text-subtle">{f.unit}</span> : undefined}
+                trailing={f.unit ? <span className="pr-2 text-xs text-subtle">{f.unit === 'USDT' ? currency : f.unit}</span> : undefined}
               />
             ))}
           </div>

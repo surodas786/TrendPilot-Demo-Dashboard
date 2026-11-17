@@ -10,6 +10,8 @@ import { DIRECTION_LABELS } from './draft';
 interface Props {
   /** Exchange and execution symbol, e.g. "Bitunix · BTCUSDT". */
   contract?: string;
+  /** Currency of the order cost (the pair's settlement currency; USDT when unknown). */
+  currency?: string;
   block: OrderBlockDto;
   pairLabel: string;
   strategyName: string;
@@ -19,7 +21,7 @@ interface Props {
 }
 
 /** Adapted from the MagicPatterns TokenBlockRow. Status is always shown as text as well as colour (UI-06). */
-export function OrderBlockRow({ block, pairLabel, contract, strategyName, busy, onEdit, onToggle }: Props) {
+export function OrderBlockRow({ block, pairLabel, contract, currency = 'USDT', strategyName, busy, onEdit, onToggle }: Props) {
   const active = block.status === 'ACTIVE';
   const noDays = block.weekdays.length === 0;
   return (
@@ -45,7 +47,7 @@ export function OrderBlockRow({ block, pairLabel, contract, strategyName, busy, 
         <div>
           <dt className="text-xs text-subtle">Order cost</dt>
           <dd className="text-ink" data-testid="order-cost">
-            {new Decimal(block.orderCostUsdt).toFixed(2)} USDT
+            {new Decimal(block.orderCostUsdt).toFixed(2)} {currency}
           </dd>
         </div>
         <div>

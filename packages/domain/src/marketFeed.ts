@@ -18,6 +18,13 @@ export const MARKET_SOURCE_LABEL: Record<MarketSource, string> = {
   BITUNIX_PUBLIC: 'Bitunix public market data'
 };
 
+/**
+ * A public exchange price stored on an instrument of a DIFFERENT exchange (e.g. a MEXC price on a
+ * Bitunix or Lighter contract). Such a quote is never displayed or used for that instrument. An
+ * exchange's own public source is `<EXCHANGE>_PUBLIC`; FIXTURE rows are not exchange prices.
+ */
+export const isForeignPublicSource = (exchange: string, source: string): boolean => source.endsWith('_PUBLIC') && source !== `${exchange}_PUBLIC`;
+
 export const marketSourceLabel = (s: string | null | undefined): string => (s && s in MARKET_SOURCE_LABEL ? MARKET_SOURCE_LABEL[s as MarketSource] : 'Unknown source');
 
 /**

@@ -5,6 +5,7 @@ import {
   checkLiveEntry,
   DomainError,
   ErrorCode,
+  exchangeUnavailableReason,
   keyFingerprint,
   LIVE_REFUSAL_TEXT,
   liveAccountBlockers,
@@ -22,7 +23,7 @@ import type { Db, Executor } from '../client';
 import { recordAudit } from '../repos/audit';
 import { exchangeConnections, instruments, liveControl, orderIntents, paperAccounts, positions, users } from '../schema';
 import { open as unseal, seal } from '../security/secretBox';
-import { book, lockPaperAccount } from '../paper/accounts';
+import { book, lockPaperAccount, type AccountExchange } from '../paper/accounts';
 import { paperVenue } from '../venue/paper';
 import type { ExecutionVenue } from '../venue/types';
 import type { CapabilityId, CapabilityState } from './capabilities';
@@ -118,7 +119,7 @@ export async function connectionFor(db: Executor, ownerId: string, exchange: Exc
 }
 
 /** Default exchange of every pre-Bitunix caller (MEXC). Bitunix Live paths pass their exchange explicitly. */
-export const LIVE_EXCHANGE: ExchangeId = 'MEXC';
+export const LIVE_EXCHANGE: AccountExchange = 'MEXC';
 
 export interface LiveEligibility {
   verdict: LiveVerdict;
@@ -270,7 +271,9 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
       const control = await getLiveControl(db);
       const conn = await connectionFor(db, o.ownerId, exchange);
       const [inst] = await db.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier, exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, r.instrumentId));
-      if ((inst?.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC') !== exchange) return reject('LIVE_REFUSED:LIVE_EXCHANGE_MISMATCH');
+      // Exact match: an instrument on any other exchange (including one registered for selection
+      // only, such as Lighter) is never sent through this venue.
+      if (inst?.exchange !== exchange) return reject('LIVE_REFUSED:LIVE_EXCHANGE_MISMATCH');
       const gate = liveAccountGate(controlState(control, o.env), conn ? connectionState(conn) : null, o.ownerId, !!inst?.liveAllowed);
       if (!gate.ok) return reject(`LIVE_REFUSED:${gate.reason}`);
       // Hedge legs on Bitunix are separate positions: the limits count the leg being opened.
@@ -325,7 +328,7 @@ export async function applyExchangeBalance(
   usdt: { equity: string; availableOpen: string; unrealized: string },
   refId: string,
   now: Date,
-  exchange: ExchangeId = LIVE_EXCHANGE
+  exchange: AccountExchange = LIVE_EXCHANGE
 ): Promise<{ accountId: string; walletAdjustment: string }> {
   return db.transaction(async (tx) => {
     const a = await lockPaperAccount(tx, ownerId, 'LIVE', exchange);
@@ -716,6 +719,8 @@ export async function setPlatformEntriesHalted(db: Db, adminId: string, halted: 
 export async function setInstrumentLiveAllowed(db: Db, adminId: string, instrumentId: string, allowed: boolean, correlationId = 'live'): Promise<void> {
   const [i] = await db.select().from(instruments).where(eq(instruments.id, instrumentId));
   if (!i) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Instrument not found.');
+  const notTradable = exchangeUnavailableReason(i.exchange);
+  if (allowed && notTradable) throw new DomainError(409, ErrorCode.CONFLICT, notTradable);
   if (allowed && (i.status !== 'PUBLISHED' || !i.exchangeSymbol || i.isFixture)) throw new DomainError(409, ErrorCode.CONFLICT, 'Only a published contract validated against MEXC (not fixture metadata) can be allowed for Live.');
   await db.update(instruments).set({ liveAllowed: allowed, revision: sql`${instruments.revision} + 1`, updatedAt: sql`now()` }).where(eq(instruments.id, instrumentId));
   await recordAudit(db, { actorUserId: adminId, action: allowed ? 'ADMIN_LIVE_CONTRACT_ALLOW' : 'ADMIN_LIVE_CONTRACT_DISALLOW', targetType: 'instrument', targetId: instrumentId, result: 'SUCCESS', metadata: { symbol: i.symbol, exchangeSymbol: i.exchangeSymbol }, correlationId });

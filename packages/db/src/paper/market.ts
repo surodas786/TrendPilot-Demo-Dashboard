@@ -1,5 +1,5 @@
 import { and, desc, eq, lte, sql } from 'drizzle-orm';
-import { fixtureCandles, syntheticQuote, type Candle, type FixtureTrend, type PaperQuote } from '@trendpilot/domain';
+import { fixtureCandles, isForeignPublicSource, syntheticQuote, type Candle, type FixtureTrend, type PaperQuote } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { instruments, marketCandles, marketQuotes } from '../schema';
 
@@ -28,7 +28,7 @@ export async function latestQuote(db: Executor, instrumentId: string, now: Date,
   const q = row.q;
   // A Bitunix contract never trades on a MEXC public price (and vice versa): treat it as no quote
   // (the entry then reports FEED_STALE) instead of silently using another exchange's price.
-  if ((row.exchange === 'BITUNIX' && q.source === 'MEXC_PUBLIC') || (row.exchange !== 'BITUNIX' && q.source === 'BITUNIX_PUBLIC')) return null;
+  if (isForeignPublicSource(row.exchange, q.source)) return null;
   return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf, source: q.source };
 }
 

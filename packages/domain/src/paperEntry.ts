@@ -36,9 +36,11 @@ export type EntryReason =
   | 'PROTECTION_FAILED'
   | 'INSUFFICIENT_MARGIN'
   | 'LIVE_NOT_ELIGIBLE'
-  | 'PAPER_EXCHANGE_UNSUPPORTED';
+  | 'PAPER_EXCHANGE_UNSUPPORTED'
+  | 'EXCHANGE_NOT_ENABLED';
 
 export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
+  EXCHANGE_NOT_ENABLED: 'This order block is on an exchange TrendPilot cannot trade yet (Lighter markets can be selected, but Lighter prices and orders come in a later release). No order was placed.',
   PAPER_EXCHANGE_UNSUPPORTED: 'Paper trading simulates MEXC contracts only. This order block is on a Bitunix contract: switch it to Live (Bitunix) or use the MEXC pair for Paper.',
   TRAILING_CONVERSION_REQUIRED:
     'This order block still uses the old Trailing Stop. New entries are held until you open Trade Settings, enter Activate after profit (%) for Trailing Take Profit (or turn it off) and save.',

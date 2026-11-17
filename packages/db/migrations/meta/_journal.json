@@ -218,6 +218,13 @@
       "when": 1794830751589,
       "tag": "0030_m20_bitunix_signal_routing",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794915848168,
+      "tag": "0031_m21_lighter_market_registry",
+      "breakpoints": true
     }
   ]
 }

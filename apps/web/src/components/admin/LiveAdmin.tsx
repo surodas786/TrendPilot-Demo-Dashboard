@@ -1,5 +1,7 @@
 'use client';
 
+
+import { exchangeLabel } from '@trendpilot/domain';
 import React, { useState } from 'react';
 import { toast } from 'sonner';
 import { CheckCircle2Icon, OctagonPauseIcon, PlayIcon, PowerIcon, RefreshCwIcon } from 'lucide-react';
@@ -241,9 +243,9 @@ export function LiveAdmin({ initial }: { initial: LiveAdminData }) {
                 disabled={!x.liveAllowed && x.isFixture}
                 title={x.isFixture ? 'Fixture metadata: validate and publish the pair against MEXC first.' : undefined}
                 loading={busy === `ct-${x.id}`}
-                onClick={() => post(`ct-${x.id}`, `/v1/admin/live/contracts/${x.id}`, { allowed: !x.liveAllowed }, `${x.exchange === 'BITUNIX' ? 'Bitunix' : x.exchange} ${x.symbol} ${x.liveAllowed ? 'removed from Live.' : 'allowed for Live.'}`)}
+                onClick={() => post(`ct-${x.id}`, `/v1/admin/live/contracts/${x.id}`, { allowed: !x.liveAllowed }, `${exchangeLabel(x.exchange)} ${x.symbol} ${x.liveAllowed ? 'removed from Live.' : 'allowed for Live.'}`)}
               >
-                {x.exchange === 'BITUNIX' ? 'Bitunix' : x.exchange} {x.exchangeSymbol || x.symbol}: {x.liveAllowed ? 'Live allowed' : x.exchange === 'MEXC' ? 'Paper only' : 'not allowed for Live'}
+                {exchangeLabel(x.exchange)} {x.exchangeSymbol || x.symbol}: {x.liveAllowed ? 'Live allowed' : x.exchange === 'MEXC' ? 'Paper only' : 'not allowed for Live'}
               </Button>
             ))}
         </div>

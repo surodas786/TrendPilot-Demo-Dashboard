@@ -1,5 +1,5 @@
 import { and, count, desc, eq, isNotNull, ne, sql } from 'drizzle-orm';
-import type { SignalRouteCreate } from '@trendpilot/domain';
+import { exchangeUnavailableReason, type SignalRouteCreate } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { instruments, positions, signalEvents, signalRejections, signalRoutes, strategyPackages, strategyVersionInstruments, strategyVersions } from '../schema';
 
@@ -35,6 +35,10 @@ export async function routeStrategyIssues(db: Executor, r: Pick<SignalRouteCreat
   const v = await latestPublishedVersion(db, r.packageId);
   if (!v) return [{ path: 'packageId', message: `${pkg.name} has no published version yet. Publish one before routing signals to it.` }];
   const issues: { path: string; message: string }[] = [];
+  // Routing to an exchange TrendPilot cannot trade yet (Lighter: registration only) is refused.
+  const [target] = await db.select({ exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, r.instrumentId));
+  const notTradable = target ? exchangeUnavailableReason(target.exchange) : null;
+  if (notTradable) issues.push({ path: 'instrumentId', message: notTradable });
   if (v.timeframe !== `${r.interval}m`) {
     issues.push({ path: 'interval', message: `${pkg.name}: its newest published version v${v.version} uses ${v.timeframe}, but this route is ${r.interval}m. Choose ${v.timeframe.replace('m', '')}m or a lineage whose current version uses ${r.interval}m.` });
   }

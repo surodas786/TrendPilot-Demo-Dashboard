@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import type { FeedEventDto, FeedHealthDto, FeedTransportDto, LiveQuoteDto } from '@trendpilot/db';
-import { FEED_POLICY } from '@trendpilot/domain';
+import { FEED_POLICY, exchangeLabel } from '@trendpilot/domain';
 import { request } from '@/lib/api';
 import { ConnectionPill } from '../market/LiveQuotesPanel';
 import { useLiveQuotes } from '../market/useLiveQuotes';
@@ -116,7 +116,7 @@ export function MarketFeedsAdmin({
                 <td className="px-4 py-3">
                   <div className="font-medium text-ink">{i.symbol}</div>
                   <div className="text-xs text-subtle">
-                    {i.exchange === 'BITUNIX' ? 'Bitunix' : i.exchange} {i.exchangeSymbol || 'no exchange symbol'} · {i.instrumentStatus === 'PUBLISHED' ? 'Published' : 'Disabled'}
+                    {exchangeLabel(i.exchange)} {i.exchangeSymbol || 'no exchange symbol'} · {i.instrumentStatus === 'PUBLISHED' ? 'Published' : 'Disabled'}
                   </div>
                 </td>
                 <td className="px-4 py-3">
@@ -146,7 +146,7 @@ export function MarketFeedsAdmin({
                     const fresh = age === null ? i.latestQuote?.freshness !== 'STALE' : age * 1000 <= FEED_POLICY.maxQuoteAgeMs;
                     return (
                       <div className="space-y-1">
-                        <StatusPill tone={q.channel === 'REST_FALLBACK' ? 'warn' : q.source === 'MEXC_PUBLIC' || q.source === 'BITUNIX_PUBLIC' ? 'accent' : 'neutral'}>
+                        <StatusPill tone={q.channel === 'REST_FALLBACK' ? 'warn' : q.source.endsWith('_PUBLIC') ? 'accent' : 'neutral'}>
                           <span data-testid="quote-source">{q.sourceLabel}</span>
                         </StatusPill>
                         <div className={`text-xs ${fresh ? 'text-muted' : 'text-warn'}`} data-testid="quote-age">

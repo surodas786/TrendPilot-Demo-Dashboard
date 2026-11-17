@@ -5,6 +5,9 @@ import {
   changedFields,
   MODE_LABELS,
   modeChangeBlocker,
+  exchangeLabel,
+  exchangeUnavailableReason,
+  isTradableExchange,
   paperUnsupportedReason,
   DomainError,
   ErrorCode,
@@ -112,7 +115,9 @@ async function modeChangeBlockerFor(db: Executor, owner: PublicUser, block: Orde
   const repo = orderBlocksFor(db, owner.id);
   const from = block.mode as BlockMode;
   const [conn, instrument, destinationBlockId, activity] = await Promise.all([
-    connectionFor(db, owner.id, block.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC'),
+    // Only an exchange TrendPilot can trade has a connection; Lighter (selection only) has none and
+    // modeChangeBlocker reports it as unavailable for Live.
+    isTradableExchange(block.exchange) ? connectionFor(db, owner.id, block.exchange) : Promise.resolve(undefined),
     getInstrument(db, block.instrumentId),
     repo.idFor(block.instrumentId, to),
     repo.activity(block.id, lock ? { lockMode: from } : {})
@@ -207,8 +212,9 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
 
   if (status === 'ACTIVE') {
     // Live needs the connection of the exchange this block's contract trades on.
-    const exchange = current.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
-    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), connectionFor(db, owner.id, exchange)]);
+    const exchange = current.exchange;
+    const notTradable = exchangeUnavailableReason(exchange);
+    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), isTradableExchange(exchange) ? connectionFor(db, owner.id, exchange) : Promise.resolve(undefined)]);
     const reason =
       owner.status !== 'ACTIVE'
         ? 'Your account is not active.'
@@ -216,10 +222,12 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
           ? 'This pair is no longer available.'
           : !version?.published
             ? 'This strategy version is not published.'
+            : notTradable
+              ? notTradable
             : current.mode === 'PAPER' && paperUnsupportedReason(current.exchange)
               ? paperUnsupportedReason(current.exchange)!
             : current.mode === 'LIVE' && (!conn || conn.status !== 'VERIFIED')
-              ? `Connect and verify your ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account (Live Trading page) before activating Live settings.`
+              ? `Connect and verify your ${exchangeLabel(exchange)} account (Live Trading page) before activating Live settings.`
               : undefined;
     if (reason) throw new DomainError(422, ErrorCode.RESUME_BLOCKED, reason);
   }
@@ -254,12 +262,13 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
 async function previewQuote(instrument: InstrumentDto): Promise<Quote | undefined> {
   const at = now();
   const q = await latestQuote(getDb(), instrument.id, at);
-  // The contract's own exchange feed: MEXC public prices for MEXC pairs, Bitunix public prices for Bitunix pairs.
-  const own = instrument.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : 'MEXC_PUBLIC';
+  // The contract's own exchange feed only: MEXC_PUBLIC for MEXC pairs, BITUNIX_PUBLIC for Bitunix pairs, etc.
+  const own = `${instrument.exchange}_PUBLIC`;
   if (q && q.source === own && quoteAgeState(q.asOf, at) === 'FRESH') return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf.toISOString(), source: own as Quote['source'] };
   // The static fixture prices are MEXC-shaped demo data keyed by symbol. A real Bitunix contract never
   // previews on them: without a fresh Bitunix price the preview says so instead.
-  if (instrument.exchange === 'BITUNIX' && !instrument.isFixture) return undefined;
+  // Lighter has no price feed yet and never previews on another exchange's or fixture prices.
+  if (instrument.exchange !== 'MEXC' && (instrument.exchange !== 'BITUNIX' || !instrument.isFixture)) return undefined;
   return fixtureQuote(instrument.symbol);
 }
 
@@ -269,9 +278,11 @@ async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettin
     throw new DomainError(
       422,
       ErrorCode.VALIDATION_FAILED,
-      instrument.isFixture
+      !isTradableExchange(instrument.exchange)
+        ? `No ${exchangeLabel(instrument.exchange)} price is available for ${instrument.exchangeSymbol}: ${exchangeLabel(instrument.exchange)} prices come in a later release, so this pair cannot be previewed yet. Nothing from another exchange is used in its place.`
+        : instrument.isFixture
         ? `No fixture quote is available for ${instrument.symbol}.`
-        : `No fresh public ${instrument.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} price for ${instrument.symbol} (${instrument.exchangeSymbol}) yet. The market feed picks up a newly published pair within seconds; if it stays unavailable, check Admin → Market Data Feed (the contract may not be trading).`
+        : `No fresh public ${exchangeLabel(instrument.exchange)} price for ${instrument.symbol} (${instrument.exchangeSymbol}) yet. The market feed picks up a newly published pair within seconds; if it stays unavailable, check Admin → Market Data Feed (the contract may not be trading).`
     );
   const spec = {
     contractMultiplier: instrument.contract.multiplier,

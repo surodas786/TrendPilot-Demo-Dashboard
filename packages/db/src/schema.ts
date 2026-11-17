@@ -97,6 +97,13 @@ export const instruments = pgTable(
     priceTick: numeric('price_tick', { precision: 28, scale: 12 }).notNull().default('0.01'),
     takerFeeRate: numeric('taker_fee_rate', { precision: 10, scale: 8 }).notNull().default('0.0004'),
     exchangeSymbol: text('exchange_symbol').notNull().default(''),
+    /**
+     * The exchange's own numeric market identifier, when its API addresses markets by ID (Lighter
+     * `market_id` from the official catalog). Null for MEXC and Bitunix, which use the symbol.
+     */
+    exchangeMarketId: integer('exchange_market_id'),
+    /** Minimum order value in the settlement currency, when the exchange reports one (Lighter `min_quote_amount`). */
+    minNotional: numeric('min_notional', { precision: 28, scale: 12 }),
     leverageChoices: integer('leverage_choices').array().notNull(),
     suggestedStopPct: numeric('suggested_stop_pct', { precision: 10, scale: 4 }).notNull(),
     suggestedTakeProfitPct: numeric('suggested_take_profit_pct', { precision: 10, scale: 4 }).notNull(),
@@ -110,7 +117,12 @@ export const instruments = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt()
   },
-  (t) => [uniqueIndex('instruments_exchange_symbol_key').on(t.exchange, t.symbol)]
+  (t) => [
+    uniqueIndex('instruments_exchange_symbol_key').on(t.exchange, t.symbol),
+    uniqueIndex('instruments_exchange_market_id_key').on(t.exchange, t.exchangeMarketId).where(sql`${t.exchangeMarketId} IS NOT NULL`),
+    // A Lighter instrument is addressed by its verified market ID; it can never exist without one.
+    check('instruments_lighter_market_id', sql`${t.exchange} <> 'LIGHTER' OR (${t.exchangeMarketId} IS NOT NULL AND ${t.exchangeMarketId} >= 0)`)
+  ]
 );
 
 export const strategyPackages = pgTable('strategy_packages', {

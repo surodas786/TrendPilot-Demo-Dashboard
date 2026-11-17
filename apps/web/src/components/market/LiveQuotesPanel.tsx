@@ -3,7 +3,7 @@
 import React from 'react';
 import { RadioIcon, RefreshCwIcon, WifiOffIcon } from 'lucide-react';
 import type { LiveQuoteDto } from '@trendpilot/db';
-import { FEED_POLICY } from '@trendpilot/domain';
+import { FEED_POLICY, exchangeLabel } from '@trendpilot/domain';
 import { Button } from '../ui/Button';
 import { StatusPill } from '../ui/StatusPill';
 import { useLiveQuotes, type LiveConnection } from './useLiveQuotes';
@@ -63,7 +63,7 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
                   <tr key={i.instrumentId} className="border-t border-line/60" data-testid={`live-${i.exchange}-${i.symbol}`}>
                     <td className="py-2 pr-4 font-medium text-ink">{i.symbol}</td>
                     <td className="py-2 pr-4 text-xs text-muted" data-testid="exchange">
-                      {i.exchange === 'BITUNIX' ? 'Bitunix' : i.exchange} · <span className="font-mono">{i.exchangeSymbol}</span>
+                      {exchangeLabel(i.exchange)} · <span className="font-mono">{i.exchangeSymbol}</span>
                     </td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="bid">{q?.bid ?? '—'}</td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="ask">{q?.ask ?? '—'}</td>
@@ -74,8 +74,8 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
                           <span data-testid="source">{q.sourceLabel}</span>
                         </StatusPill>
                       ) : (
-                        <span className="text-subtle" title={`No ${i.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} price has been stored for this contract. Another exchange's price is never shown in its place.`}>
-                          No {i.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} price
+                        <span className="text-subtle" title={`No ${exchangeLabel(i.exchange)} price has been stored for this contract. Another exchange's price is never shown in its place.`}>
+                          No {exchangeLabel(i.exchange)} price
                         </span>
                       )}
                     </td>
