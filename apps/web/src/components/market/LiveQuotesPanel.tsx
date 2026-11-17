@@ -42,10 +42,11 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
         <p className="mt-3 text-xs text-subtle">No contracts are published.</p>
       ) : (
         <div className="mt-3 overflow-x-auto">
-          <table className="w-full min-w-[640px] text-left text-sm">
+          <table className="w-full min-w-[760px] text-left text-sm">
             <thead className="text-xs text-subtle">
               <tr>
                 <th scope="col" className="py-1.5 pr-4 font-medium">Contract</th>
+                <th scope="col" className="py-1.5 pr-4 font-medium">Exchange · execution symbol</th>
                 <th scope="col" className="py-1.5 pr-4 text-right font-medium">Bid</th>
                 <th scope="col" className="py-1.5 pr-4 text-right font-medium">Ask</th>
                 <th scope="col" className="py-1.5 pr-4 text-right font-medium">Mark</th>
@@ -59,8 +60,11 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
                 const age = q && nowMs !== null ? Math.max(0, Math.round((nowMs - Date.parse(q.asOf)) / 1000)) : null;
                 const stale = !q || (age !== null && age * 1000 > FEED_POLICY.maxQuoteAgeMs);
                 return (
-                  <tr key={i.instrumentId} className="border-t border-line/60" data-testid={`live-${i.symbol}`}>
+                  <tr key={i.instrumentId} className="border-t border-line/60" data-testid={`live-${i.exchange}-${i.symbol}`}>
                     <td className="py-2 pr-4 font-medium text-ink">{i.symbol}</td>
+                    <td className="py-2 pr-4 text-xs text-muted" data-testid="exchange">
+                      {i.exchange === 'BITUNIX' ? 'Bitunix' : i.exchange} · <span className="font-mono">{i.exchangeSymbol}</span>
+                    </td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="bid">{q?.bid ?? '—'}</td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="ask">{q?.ask ?? '—'}</td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="mark">{q?.mark ?? '—'}</td>
@@ -70,7 +74,9 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
                           <span data-testid="source">{q.sourceLabel}</span>
                         </StatusPill>
                       ) : (
-                        <span className="text-subtle">No price</span>
+                        <span className="text-subtle" title={`No ${i.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} price has been stored for this contract. Another exchange's price is never shown in its place.`}>
+                          No {i.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} price
+                        </span>
                       )}
                     </td>
                     <td className={`py-2 text-xs ${stale ? 'text-warn' : 'text-muted'}`} data-testid="updated">
@@ -83,7 +89,7 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
           </table>
         </div>
       )}
-      <p className="mt-2 text-[11px] text-subtle">Prices come from TrendPilot&apos;s public MEXC feed and update automatically. Refresh re-reads TrendPilot&apos;s latest stored price; it does not contact the exchange.</p>
+      <p className="mt-2 text-[11px] text-subtle">Each contract shows prices from its own exchange&apos;s public feed (MEXC or Bitunix; never mixed) and updates automatically. Refresh re-reads TrendPilot&apos;s latest stored price; it does not contact the exchange.</p>
     </section>
   );
 }

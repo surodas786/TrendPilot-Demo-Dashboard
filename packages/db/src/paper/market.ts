@@ -1,9 +1,9 @@
 import { and, desc, eq, lte, sql } from 'drizzle-orm';
 import { fixtureCandles, syntheticQuote, type Candle, type FixtureTrend, type PaperQuote } from '@trendpilot/domain';
 import type { Executor } from '../client';
-import { marketCandles, marketQuotes } from '../schema';
+import { instruments, marketCandles, marketQuotes } from '../schema';
 
-/** MKT-01 reads used by entry evaluation. Rows are FIXTURE (replays, tests) or MEXC_PUBLIC (public feed). */
+/** MKT-01 reads used by entry evaluation. Rows are FIXTURE (replays, tests), MEXC_PUBLIC or BITUNIX_PUBLIC (public feeds). */
 
 export async function loadClosedCandles(db: Executor, instrumentId: string, interval: string, upToOpen: Date, limit = 1000): Promise<Candle[]> {
   const rows = await db
@@ -17,13 +17,19 @@ export async function loadClosedCandles(db: Executor, instrumentId: string, inte
 
 /** Newest quote stamped at or before `now` (plus a small skew allowance). */
 export async function latestQuote(db: Executor, instrumentId: string, now: Date, skewSeconds = 2): Promise<(PaperQuote & { source: string }) | null> {
-  const [q] = await db
-    .select()
+  const [row] = await db
+    .select({ q: marketQuotes, exchange: instruments.exchange })
     .from(marketQuotes)
+    .innerJoin(instruments, eq(instruments.id, marketQuotes.instrumentId))
     .where(and(eq(marketQuotes.instrumentId, instrumentId), lte(marketQuotes.asOf, new Date(now.getTime() + skewSeconds * 1000))))
     .orderBy(desc(marketQuotes.asOf))
     .limit(1);
-  return q ? { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf, source: q.source } : null;
+  if (!row) return null;
+  const q = row.q;
+  // A Bitunix contract never trades on a MEXC public price (and vice versa): treat it as no quote
+  // (the entry then reports FEED_STALE) instead of silently using another exchange's price.
+  if ((row.exchange === 'BITUNIX' && q.source === 'MEXC_PUBLIC') || (row.exchange !== 'BITUNIX' && q.source === 'BITUNIX_PUBLIC')) return null;
+  return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf, source: q.source };
 }
 
 export interface MarketFixtureOptions {

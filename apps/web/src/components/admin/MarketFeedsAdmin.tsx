@@ -21,6 +21,7 @@ const trim = (v: string) => (v.includes('.') ? v.replace(/\.?0+$/, '') : v);
 const toLive = (items: FeedHealthDto[]): LiveQuoteDto[] =>
   items.map((i) => ({
     instrumentId: i.instrumentId,
+    exchange: i.exchange,
     symbol: i.symbol,
     exchangeSymbol: i.exchangeSymbol,
     quote: i.latestQuote ? { bid: trim(i.latestQuote.bid), ask: trim(i.latestQuote.ask), mark: trim(i.latestQuote.mark), last: trim(i.latestQuote.last), source: i.latestQuote.source, channel: i.latestQuote.channel, sourceLabel: i.latestQuote.sourceLabel, asOf: i.latestQuote.asOf } : null
@@ -102,7 +103,7 @@ export function MarketFeedsAdmin({
           <thead className="border-b border-line text-xs text-subtle">
             <tr>
               <th scope="col" className="px-4 py-2.5 font-medium">Contract</th>
-              <th scope="col" className="px-4 py-2.5 font-medium">Public MEXC feed</th>
+              <th scope="col" className="px-4 py-2.5 font-medium">Public feed (own exchange)</th>
               <th scope="col" className="px-4 py-2.5 font-medium">Current price source</th>
               <th scope="col" className="px-4 py-2.5 font-medium">Bid / Ask · Mark</th>
               <th scope="col" className="px-4 py-2.5 font-medium">Closed candles</th>
@@ -111,11 +112,11 @@ export function MarketFeedsAdmin({
           </thead>
           <tbody>
             {data.items.map((i) => (
-              <tr key={i.instrumentId} className="border-b border-line/60 align-top last:border-0" data-testid={`feed-${i.symbol}`}>
+              <tr key={i.instrumentId} className="border-b border-line/60 align-top last:border-0" data-testid={i.exchange === 'MEXC' ? `feed-${i.symbol}` : `feed-${i.exchange}-${i.symbol}`}>
                 <td className="px-4 py-3">
                   <div className="font-medium text-ink">{i.symbol}</div>
                   <div className="text-xs text-subtle">
-                    {i.exchangeSymbol || 'no exchange symbol'} · {i.instrumentStatus === 'PUBLISHED' ? 'Published' : 'Disabled'}
+                    {i.exchange === 'BITUNIX' ? 'Bitunix' : i.exchange} {i.exchangeSymbol || 'no exchange symbol'} · {i.instrumentStatus === 'PUBLISHED' ? 'Published' : 'Disabled'}
                   </div>
                 </td>
                 <td className="px-4 py-3">
@@ -145,7 +146,7 @@ export function MarketFeedsAdmin({
                     const fresh = age === null ? i.latestQuote?.freshness !== 'STALE' : age * 1000 <= FEED_POLICY.maxQuoteAgeMs;
                     return (
                       <div className="space-y-1">
-                        <StatusPill tone={q.channel === 'REST_FALLBACK' ? 'warn' : q.source === 'MEXC_PUBLIC' ? 'accent' : 'neutral'}>
+                        <StatusPill tone={q.channel === 'REST_FALLBACK' ? 'warn' : q.source === 'MEXC_PUBLIC' || q.source === 'BITUNIX_PUBLIC' ? 'accent' : 'neutral'}>
                           <span data-testid="quote-source">{q.sourceLabel}</span>
                         </StatusPill>
                         <div className={`text-xs ${fresh ? 'text-muted' : 'text-warn'}`} data-testid="quote-age">

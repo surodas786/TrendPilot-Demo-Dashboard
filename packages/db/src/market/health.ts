@@ -14,13 +14,16 @@ export interface ContractMismatch {
 
 export interface FeedHealthDto {
   instrumentId: string;
+  /** MEXC or BITUNIX: the venue this contract trades on (BTCUSDT exists once per exchange). */
+  exchange: string;
   symbol: string;
   exchangeSymbol: string;
   instrumentStatus: string;
   /** Source of the newest stored quote for this contract (whatever wrote it). */
   latestQuote: { source: string; channel: string | null; sourceLabel: string; asOf: string; ageSeconds: number; bid: string; ask: string; mark: string; last: string; freshness: 'FRESH' | 'STALE' } | null;
   feed: {
-    source: 'MEXC_PUBLIC';
+    /** The instrument's own public feed: MEXC_PUBLIC for MEXC pairs, BITUNIX_PUBLIC for Bitunix pairs. */
+    source: 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC';
     state: FeedState;
     stateText: string;
     /** The stored state can lag when the feed process is stopped; this flags that case. */
@@ -68,6 +71,7 @@ export async function listFeedHealth(db: Executor, now = new Date()): Promise<Fe
     const reporting = f ? now.getTime() - f.updatedAt.getTime() <= Math.max(FEED_POLICY.maxQuoteAgeMs, 30_000) : false;
     return {
       instrumentId: i.id,
+      exchange: i.exchange,
       symbol: i.symbol,
       exchangeSymbol: i.exchangeSymbol,
       instrumentStatus: i.status,
@@ -88,7 +92,7 @@ export async function listFeedHealth(db: Executor, now = new Date()): Promise<Fe
           : null,
       feed: f
         ? {
-            source: 'MEXC_PUBLIC',
+            source: i.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : 'MEXC_PUBLIC',
             state: f.state as FeedState,
             stateText: FEED_STATE_TEXT[f.state as FeedState] ?? f.state,
             reporting,
@@ -133,12 +137,18 @@ async function latestQuoteRows(db: Executor, now: Date): Promise<Map<string, Quo
   return new Map(latest.rows.map((r) => [r.instrument_id, r]));
 }
 
+/** A MEXC public price on a Bitunix contract, or a Bitunix public price on a MEXC contract. */
+export const isForeignPublicSource = (exchange: string, source: string): boolean =>
+  (exchange === 'BITUNIX' && source === 'MEXC_PUBLIC') || (exchange !== 'BITUNIX' && source === 'BITUNIX_PUBLIC');
+
 /** "74651.000000000000" → "74651" (the form the live stream pushes). */
 const num = (v: string) => new Decimal(v).toFixed();
 
 /** One contract's newest stored quote, as shown to investors and admins (live via the quote stream). */
 export interface LiveQuoteDto {
   instrumentId: string;
+  /** MEXC or BITUNIX. The quote below always comes from this exchange's own feed. */
+  exchange: string;
   symbol: string;
   exchangeSymbol: string;
   quote: { bid: string; ask: string; mark: string; last: string; source: string; channel: string | null; sourceLabel: string; asOf: string } | null;
@@ -150,16 +160,20 @@ export interface LiveQuoteDto {
  */
 export async function listLatestQuotes(db: Executor, now = new Date(), o: { publishedOnly?: boolean } = {}): Promise<LiveQuoteDto[]> {
   const rows = await db
-    .select({ id: instruments.id, symbol: instruments.symbol, exchangeSymbol: instruments.exchangeSymbol, status: instruments.status })
+    .select({ id: instruments.id, exchange: instruments.exchange, symbol: instruments.symbol, exchangeSymbol: instruments.exchangeSymbol, status: instruments.status })
     .from(instruments)
-    .orderBy(instruments.symbol);
+    .orderBy(instruments.symbol, instruments.exchange);
   const byInst = await latestQuoteRows(db, now);
   return rows
     .filter((r) => !o.publishedOnly || r.status === 'PUBLISHED')
     .map((r) => {
-      const q = byInst.get(r.id);
+      // Keyed by instrument: a Bitunix row only ever shows a quote stored for the Bitunix instrument.
+      // Defence in depth: a public quote from the other exchange's feed is never shown for this row.
+      const row = byInst.get(r.id);
+      const q = row && !isForeignPublicSource(r.exchange, row.source) ? row : undefined;
       return {
         instrumentId: r.id,
+        exchange: r.exchange,
         symbol: r.symbol,
         exchangeSymbol: r.exchangeSymbol,
         quote: q ? { bid: num(q.bid), ask: num(q.ask), mark: num(q.mark), last: num(q.last), source: q.source, channel: q.channel, sourceLabel: quoteSourceLabel(q.source, q.channel), asOf: new Date(q.as_of).toISOString() } : null

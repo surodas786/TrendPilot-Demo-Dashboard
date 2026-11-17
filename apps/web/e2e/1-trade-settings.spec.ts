@@ -39,7 +39,7 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
   await pageA.getByRole('button', { name: 'Add Token' }).click();
   const panelA = pageA.getByRole('dialog');
   await expect(panelA.getByLabel('Trading pair')).toHaveValue(/.+/);
-  await expect(panelA.getByLabel('Trading pair').locator('option:checked')).toHaveText('BTC/USDT');
+  await expect(panelA.getByLabel('Trading pair').locator('option:checked')).toHaveText('BTC/USDT · MEXC BTC_USDT');
   // Live needs the investor's own verified MEXC connection first (Live Trading page).
   await expect(panelA.getByRole('radio', { name: 'Live — connect MEXC first' })).toBeDisabled();
 
@@ -78,7 +78,7 @@ test('two investors keep private, different settings for BTC/USDT', async ({ bro
 
   await pageB.getByRole('button', { name: 'Add Token' }).click();
   const panelB = pageB.getByRole('dialog');
-  await expect(panelB.getByLabel('Trading pair').locator('option:checked')).toHaveText('BTC/USDT');
+  await expect(panelB.getByLabel('Trading pair').locator('option:checked')).toHaveText('BTC/USDT · MEXC BTC_USDT');
   for (const day of ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']) await panelB.getByRole('checkbox', { name: day }).click();
   await panelB.getByLabel('Order cost (USDT)').fill('35');
   await panelB.getByLabel('Leverage').selectOption('3');

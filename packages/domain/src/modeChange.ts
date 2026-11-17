@@ -25,7 +25,17 @@ export function liveUnavailableReason(connectionStatus: string | null | undefine
   }
 }
 
+/**
+ * Paper simulates MEXC contracts only (one MEXC Paper account per investor). A Bitunix contract is
+ * Live-only until a Bitunix Paper simulator exists. Null when Paper is available for the exchange.
+ */
+export function paperUnsupportedReason(exchange: string | null | undefined): string | null {
+  return exchange && exchange !== 'MEXC' ? 'Paper trading simulates MEXC contracts only. Bitunix pairs are Live only: choose Live, or pick the MEXC pair for Paper.' : null;
+}
+
 export type ModeChangeBlocker =
+  /** Paper is not available for this exchange (Bitunix is Live only). */
+  | { code: 'PAPER_UNSUPPORTED'; message: string }
   /** Live is not available to this investor (same rule as New Entry). */
   | { code: 'LIVE_UNAVAILABLE'; message: string }
   /** One block per pair and mode: the investor already has one in the destination mode. */
@@ -56,6 +66,10 @@ export function modeChangeBlocker(f: ModeChangeFacts): ModeChangeBlocker | null 
   if (f.from === f.to) return null;
   const to = MODE_LABELS[f.to];
   const from = MODE_LABELS[f.from];
+  if (f.to === 'PAPER') {
+    const reason = paperUnsupportedReason(f.exchange);
+    if (reason) return { code: 'PAPER_UNSUPPORTED', message: reason };
+  }
   if (f.to === 'LIVE') {
     const reason = liveUnavailableReason(f.liveConnectionStatus, f.exchange);
     if (reason) return { code: 'LIVE_UNAVAILABLE', message: reason };

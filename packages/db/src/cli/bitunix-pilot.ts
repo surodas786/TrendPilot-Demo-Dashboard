@@ -64,7 +64,7 @@ try {
   check('Bitunix Live account synced', !!acct?.exchangeSyncedAt, acct?.exchangeAvailable ? `available ${acct.exchangeAvailable} USDT` : 'never synced');
   const [q] = inst ? await db.select().from(marketQuotes).where(and(eq(marketQuotes.instrumentId, inst.id), eq(marketQuotes.source, 'BITUNIX_PUBLIC'))).orderBy(desc(marketQuotes.asOf)).limit(1) : [];
   const fresh = !!q && Date.now() - q.asOf.getTime() < 15_000;
-  check('fresh Bitunix price (feed with BITUNIX_PUBLIC_WS=on)', fresh, q ? `${q.bid}/${q.ask} at ${q.asOf.toISOString()}` : 'no quote');
+  check('fresh Bitunix price (feed running; BITUNIX_PUBLIC_WS auto or on)', fresh, q ? `${q.bid}/${q.ask} at ${q.asOf.toISOString()}` : 'no quote');
 
   // Settings are read, never changed: both legs must already use the same leverage.
   let leverage = 0;

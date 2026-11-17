@@ -506,7 +506,8 @@ export async function getMyTrade(db: Executor, ownerId: string, positionId: stri
   const openDetail = openDecision?.detail as { fromPositionId?: string; checks?: { quote?: { source?: string; asOf?: string }; ema?: { source?: string | null } } } | undefined;
   const reversedFromPositionId = openDetail?.fromPositionId ?? null;
   // Decisions made before Step 8 carry no source: those were always fixtures.
-  const source: MarketSource = openDetail?.checks?.quote?.source === 'MEXC_PUBLIC' ? 'MEXC_PUBLIC' : 'FIXTURE';
+  const recorded = openDetail?.checks?.quote?.source;
+  const source: MarketSource = recorded === 'MEXC_PUBLIC' || recorded === 'BITUNIX_PUBLIC' ? recorded : 'FIXTURE';
   const marketData = { source, label: marketSourceLabel(source), quoteAsOf: openDetail?.checks?.quote?.asOf ?? null, emaSource: openDetail?.checks?.ema?.source ?? null, execution: 'PAPER_SIMULATOR' as const };
   const fundingRows = await db.select().from(paperFunding).where(and(eq(paperFunding.positionId, pos.id), eq(paperFunding.ownerId, ownerId))).orderBy(asc(paperFunding.settledAt));
   const funding = fundingRows.map((f) => ({ settledAt: f.settledAt.toISOString(), rate: n(f.rate)!, contracts: n(f.contracts)!, markPrice: n(f.markPrice)!, notionalUsdt: n(f.notional)!, amountUsdt: n(f.amount)!, source: f.source }));

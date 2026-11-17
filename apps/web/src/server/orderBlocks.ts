@@ -5,6 +5,7 @@ import {
   changedFields,
   MODE_LABELS,
   modeChangeBlocker,
+  paperUnsupportedReason,
   DomainError,
   ErrorCode,
   notFound,
@@ -32,12 +33,16 @@ import { validationError } from './http';
  * every repository call is scoped through orderBlocksFor(…, owner.id).
  */
 
-async function catalogCheck(db: Executor, instrumentId: string, s: { strategyVersionId: string; leverage: number; direction: OrderBlockDto['direction'] }): Promise<Issue[]> {
+async function catalogCheck(db: Executor, instrumentId: string, s: { strategyVersionId: string; leverage: number; direction: OrderBlockDto['direction'] }, mode?: BlockMode): Promise<Issue[]> {
   const [instrument, version] = await Promise.all([getInstrument(db, instrumentId), getVersion(db, s.strategyVersionId)]);
   const issues: Issue[] = [];
   if (!instrument) issues.push({ path: 'instrumentId', message: 'Select a trading pair.' });
   if (!version) issues.push({ path: 'strategyVersionId', message: 'Select a strategy.' });
   else if (version.packageArchived) issues.push({ path: 'strategyVersionId', message: `“${version.packageName}” has been archived by the administrator. Select another strategy.` });
+  if (instrument && mode === 'PAPER') {
+    const reason = paperUnsupportedReason(instrument.exchange);
+    if (reason) issues.push({ path: 'instrumentId', message: reason });
+  }
   if (instrument && version) {
     // CFG-02: the version must be approved for this pair (contract mapping).
     issues.push(...catalogIssues(s, { instrument, version }));
@@ -62,7 +67,7 @@ export async function createBlock(owner: PublicUser, raw: unknown, correlationId
   assertModeAllowed(input.mode);
 
   const db = getDb();
-  const issues = await catalogCheck(db, input.instrumentId, input);
+  const issues = await catalogCheck(db, input.instrumentId, input, input.mode as BlockMode);
   if (issues.length) throw validationError(issues);
 
   return db.transaction(async (tx) => {
@@ -124,7 +129,7 @@ async function modeChangeBlockerFor(db: Executor, owner: PublicUser, block: Orde
 }
 
 const modeChangeError = (b: ModeChangeBlocker) =>
-  new DomainError(b.code === 'LIVE_UNAVAILABLE' ? 422 : 409, ErrorCode.MODE_CHANGE_BLOCKED, b.message, [{ path: 'mode', message: b.message }], { blocker: b });
+  new DomainError(b.code === 'LIVE_UNAVAILABLE' || b.code === 'PAPER_UNSUPPORTED' ? 422 : 409, ErrorCode.MODE_CHANGE_BLOCKED, b.message, [{ path: 'mode', message: b.message }], { blocker: b });
 
 /** GET …/mode-change?to=: whether the block may switch to `to` now, and why not (read-only). */
 export async function modeChangeStatus(owner: PublicUser, id: string, to: string | null) {
@@ -211,6 +216,8 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
           ? 'This pair is no longer available.'
           : !version?.published
             ? 'This strategy version is not published.'
+            : current.mode === 'PAPER' && paperUnsupportedReason(current.exchange)
+              ? paperUnsupportedReason(current.exchange)!
             : current.mode === 'LIVE' && (!conn || conn.status !== 'VERIFIED')
               ? `Connect and verify your ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account (Live Trading page) before activating Live settings.`
               : undefined;
@@ -250,6 +257,9 @@ async function previewQuote(instrument: InstrumentDto): Promise<Quote | undefine
   // The contract's own exchange feed: MEXC public prices for MEXC pairs, Bitunix public prices for Bitunix pairs.
   const own = instrument.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : 'MEXC_PUBLIC';
   if (q && q.source === own && quoteAgeState(q.asOf, at) === 'FRESH') return { bid: q.bid, ask: q.ask, mark: q.mark, asOf: q.asOf.toISOString(), source: own as Quote['source'] };
+  // The static fixture prices are MEXC-shaped demo data keyed by symbol. A real Bitunix contract never
+  // previews on them: without a fresh Bitunix price the preview says so instead.
+  if (instrument.exchange === 'BITUNIX' && !instrument.isFixture) return undefined;
   return fixtureQuote(instrument.symbol);
 }
 

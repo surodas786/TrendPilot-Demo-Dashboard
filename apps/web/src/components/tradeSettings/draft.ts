@@ -79,6 +79,15 @@ export const newTargetId = () => `tp${Date.now().toString(36)}${(seq++).toString
 
 export const pairLabel = (i: Pick<InstrumentDto, 'base' | 'quote'>) => `${i.base}/${i.quote}`;
 
+/** "MEXC" / "Bitunix" for display. */
+export const exchangeName = (exchange: string) => (exchange === 'BITUNIX' ? 'Bitunix' : exchange);
+
+/** Pair list entry: "BTC/USDT · Bitunix BTCUSDT", "BTC/USDT · MEXC BTC_USDT" (the same coin exists once per exchange). */
+export const pairOptionLabel = (i: Pick<InstrumentDto, 'base' | 'quote' | 'exchange' | 'exchangeSymbol'>) => `${pairLabel(i)} · ${exchangeName(i.exchange)} ${i.exchangeSymbol}`;
+
+/** Paper simulates MEXC contracts only; Bitunix pairs are Live only. */
+export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => mode === 'LIVE' || i.exchange === 'MEXC';
+
 /**
  * Exit fields prefilled from the administrator's published pair suggestions (CFG-05).
  * Trailing Take Profit starts off: it needs an explicit activation value and a quantity left
