@@ -12,6 +12,7 @@ import {
   type EntryEvaluation,
   localTime,
   type TradingWindow,
+  isTradableExchange,
   PAPER_POLICY,
   type EntryReason,
   type Weekday
@@ -113,6 +114,9 @@ export async function assessEntry(
 ): Promise<EntryAssessment> {
   const { event, block, version, side, now, account } = input;
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
+  if (!isTradableExchange(inst!.exchange)) {
+    return { result: { ok: false, reason: 'EXCHANGE_NOT_ENABLED', detail: { exchange: inst!.exchange, reasonText: ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED } }, live: null, availableUsdt: availableOf(account) };
+  }
   // Paper simulates MEXC contracts only (one MEXC Paper account). A Paper block on a Bitunix
   // contract (created before this check existed) is refused instead of filling in the MEXC wallet.
   if (block.mode === 'PAPER' && inst!.exchange !== 'MEXC') {
@@ -201,6 +205,15 @@ export async function evaluateAndReserveEntry(
   // ARC-02: the account lock serialises reservations and scope checks for this investor. Live
   // trades on the instrument's exchange (MEXC or Bitunix), each with its own account.
   const [instEx] = await tx.select({ exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, block.instrumentId));
+  // An exchange registered for pair selection only (Lighter) never reaches an account, a venue or
+  // an order, in Paper or Live: the entry is skipped before any account is locked or created.
+  if (!isTradableExchange(instEx?.exchange)) {
+    await tx
+      .insert(signalDecisions)
+      .values({ eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId, status: 'SKIPPED', reason: 'EXCHANGE_NOT_ENABLED', detail: { side, reasonText: ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED, exchange: instEx?.exchange ?? null, strategyVersion: version.version, blockRevision: block.revision, ...extra } })
+      .onConflictDoNothing();
+    return { status: 'SKIPPED', reason: 'EXCHANGE_NOT_ENABLED' };
+  }
   const account = await lockPaperAccount(tx, block.ownerId, block.mode, accountExchangeFor(block.mode, instEx?.exchange));
   const { result, live } = await assessEntry(tx, { event, block, version, side, now, account });
 

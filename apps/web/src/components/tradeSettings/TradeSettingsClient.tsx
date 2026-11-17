@@ -38,11 +38,11 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
   const copy = editing && typeof editing === 'object' ? editing : undefined;
   const takenByMode = { PAPER: blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId), LIVE: blocks.filter((b) => b.mode === 'LIVE').map((b) => b.instrumentId) };
   const tradable = (i: InstrumentDto) => versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id));
-  const liveFor = (i: InstrumentDto) => (i.exchange === 'BITUNIX' ? liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') : liveUnavailableReason(liveConnectionStatus)) === null;
+  const liveFor = (i: InstrumentDto) => liveUnavailableReason(i.exchange === 'BITUNIX' ? bitunixConnectionStatus : i.exchange === 'MEXC' ? liveConnectionStatus : null, i.exchange) === null;
   const canAdd = instruments.some((i) => tradable(i) && ((supportsMode(i, 'PAPER') && !takenByMode.PAPER.includes(i.id)) || (liveFor(i) && !takenByMode.LIVE.includes(i.id))));
   const contractOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
-    return i ? `${exchangeName(i.exchange)} · ${i.exchangeSymbol}` : b.exchange;
+    return i ? `${exchangeName(i.exchange)} · ${i.exchangeSymbol}${i.marketId !== null ? ` (market ${i.marketId})` : ''}` : b.exchange;
   };
   const labelOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
@@ -83,7 +83,7 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
       ) : (
         <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
           {blocks.map((b) => (
-            <OrderBlockRow key={b.id} block={b} pairLabel={labelOf(b)} contract={contractOf(b)} strategyName={strategyOf(b)} busy={busyId === b.id} onEdit={() => setEditing(b.id)} onToggle={() => toggle(b)} />
+            <OrderBlockRow key={b.id} block={b} pairLabel={labelOf(b)} contract={contractOf(b)} currency={instruments.find((x) => x.id === b.instrumentId)?.quote} strategyName={strategyOf(b)} busy={busyId === b.id} onEdit={() => setEditing(b.id)} onToggle={() => toggle(b)} />
           ))}
         </ul>
       )}

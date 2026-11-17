@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { AlertTriangleIcon, CheckCircle2Icon, FlaskConicalIcon } from 'lucide-react';
-import type { OrderPreview } from '@trendpilot/domain';
+import { exchangeLabel, type OrderPreview } from '@trendpilot/domain';
 import { StatusPill } from '../ui/StatusPill';
 
 export type PreviewResult = OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null } };
@@ -21,8 +21,8 @@ export function PreviewPanel({ preview }: { preview: PreviewResult }) {
   return (
     <section aria-label="Order preview" data-testid="order-preview" className="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        {preview.quote.source === 'MEXC_PUBLIC' || preview.quote.source === 'BITUNIX_PUBLIC' ? (
-          <StatusPill tone="accent">{preview.quote.source === 'BITUNIX_PUBLIC' ? 'Bitunix' : 'MEXC'} public price</StatusPill>
+        {preview.quote.source.endsWith('_PUBLIC') ? (
+          <StatusPill tone="accent">{exchangeLabel(preview.quote.source.replace(/_PUBLIC$/, ''))} public price</StatusPill>
         ) : (
           <StatusPill tone="warn" icon={FlaskConicalIcon}>
             Fixture data

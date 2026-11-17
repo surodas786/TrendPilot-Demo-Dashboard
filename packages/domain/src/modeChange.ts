@@ -3,6 +3,8 @@
  * Shared by the Trade Settings editor (New Entry and Edit) and the server, so the reason the
  * investor sees is the one the server enforces.
  */
+import { exchangeLabel, exchangeUnavailableReason } from './exchange';
+
 export type BlockMode = 'PAPER' | 'LIVE';
 
 export const MODE_LABELS: Record<BlockMode, string> = { PAPER: 'Paper', LIVE: 'Live (MEXC)' };
@@ -12,7 +14,10 @@ export const MODE_LABELS: Record<BlockMode, string> = { PAPER: 'Paper', LIVE: 'L
  * Returns why Live is unavailable, or null when it is available.
  */
 export function liveUnavailableReason(connectionStatus: string | null | undefined, exchange: string = 'MEXC'): string | null {
-  const name = exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
+  // An exchange registered for pair selection only (Lighter) is never Live-ready, whatever is stored.
+  const unavailable = exchangeUnavailableReason(exchange);
+  if (unavailable) return unavailable;
+  const name = exchangeLabel(exchange);
   switch (connectionStatus) {
     case 'VERIFIED':
       return null;
@@ -30,7 +35,7 @@ export function liveUnavailableReason(connectionStatus: string | null | undefine
  * Live-only until a Bitunix Paper simulator exists. Null when Paper is available for the exchange.
  */
 export function paperUnsupportedReason(exchange: string | null | undefined): string | null {
-  return exchange && exchange !== 'MEXC' ? 'Paper trading simulates MEXC contracts only. Bitunix pairs are Live only: choose Live, or pick the MEXC pair for Paper.' : null;
+  return exchange && exchange !== 'MEXC' ? `Paper trading simulates MEXC contracts only. ${exchangeLabel(exchange)} pairs are Live only: choose Live, or pick the MEXC pair for Paper.` : null;
 }
 
 export type ModeChangeBlocker =

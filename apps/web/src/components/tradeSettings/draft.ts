@@ -1,6 +1,7 @@
 import {
   ALL_WEEKDAYS,
   catalogIssues,
+  exchangeLabel,
   orderBlockSettingsSchema,
   parseWith,
   type Direction,
@@ -80,10 +81,14 @@ export const newTargetId = () => `tp${Date.now().toString(36)}${(seq++).toString
 export const pairLabel = (i: Pick<InstrumentDto, 'base' | 'quote'>) => `${i.base}/${i.quote}`;
 
 /** "MEXC" / "Bitunix" for display. */
-export const exchangeName = (exchange: string) => (exchange === 'BITUNIX' ? 'Bitunix' : exchange);
+export const exchangeName = (exchange: string) => exchangeLabel(exchange);
 
 /** Pair list entry: "BTC/USDT · Bitunix BTCUSDT", "BTC/USDT · MEXC BTC_USDT" (the same coin exists once per exchange). */
-export const pairOptionLabel = (i: Pick<InstrumentDto, 'base' | 'quote' | 'exchange' | 'exchangeSymbol'>) => `${pairLabel(i)} · ${exchangeName(i.exchange)} ${i.exchangeSymbol}`;
+export const pairOptionLabel = (i: Pick<InstrumentDto, 'base' | 'quote' | 'exchange' | 'exchangeSymbol'> & { marketId?: number | null }) =>
+  `${pairLabel(i)} · ${exchangeName(i.exchange)} ${i.exchangeSymbol}${i.marketId !== null && i.marketId !== undefined ? ` (market ${i.marketId})` : ''}`;
+
+/** Currency of order cost and money amounts for a pair: its settlement/quote currency (USDT on MEXC and Bitunix, USDC on Lighter). */
+export const costCurrency = (i: Pick<InstrumentDto, 'quote'> | undefined) => i?.quote || 'USDT';
 
 /** Paper simulates MEXC contracts only; Bitunix pairs are Live only. */
 export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => mode === 'LIVE' || i.exchange === 'MEXC';

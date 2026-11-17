@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm';
-import { Decimal, PAPER_POLICY } from '@trendpilot/domain';
+import { Decimal, exchangeUnavailableReason, isTradableExchange, PAPER_POLICY } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { ledgerEntries, paperAccounts } from '../schema';
 
@@ -48,7 +48,11 @@ export type AccountMode = 'PAPER' | 'LIVE';
 export type AccountExchange = 'MEXC' | 'BITUNIX';
 
 /** The account an order uses: Live trades on the instrument's exchange; Paper is always MEXC. */
-export const accountExchangeFor = (mode: string, instrumentExchange: string | null | undefined): AccountExchange => (mode === 'LIVE' && instrumentExchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
+export const accountExchangeFor = (mode: string, instrumentExchange: string | null | undefined): AccountExchange => {
+  // Never map an exchange TrendPilot cannot trade (Lighter) onto the MEXC account.
+  if (instrumentExchange && !isTradableExchange(instrumentExchange)) throw new Error(exchangeUnavailableReason(instrumentExchange) ?? 'exchange not tradable');
+  return mode === 'LIVE' && instrumentExchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+};
 
 /**
  * Locks (creating on first use) the investor's account for a mode and exchange. All reservations go through

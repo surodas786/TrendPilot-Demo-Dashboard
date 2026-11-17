@@ -9,6 +9,7 @@ import {
   DIRECTIONS,
   EMA_FILTERS,
   EMA_LABELS,
+  exchangeLabel,
   OPPOSITE_LABELS,
   OPPOSITE_POLICIES,
   PAPER_TEMPLATE,
@@ -83,7 +84,7 @@ function VersionForm({ form, onChange, errors, pairs }: { form: Form; onChange: 
       <ChipCheckboxGroup
         label="Approved pairs"
         description="Investors can use this version only on these pairs. The same coin is a separate pair per exchange (MEXC, Bitunix); Bitunix pairs are Live only."
-        options={pairs.map((p) => ({ value: p.id, label: `${p.base}/${p.quote} · ${p.exchange === 'BITUNIX' ? 'Bitunix' : p.exchange}` }))}
+        options={pairs.map((p) => ({ value: p.id, label: `${p.base}/${p.quote} · ${exchangeLabel(p.exchange)}` }))}
         value={form.instrumentIds}
         onChange={(v) => set({ instrumentIds: v })}
         error={errors.instrumentIds ?? Object.entries(errors).find(([k]) => k.startsWith('instrumentIds.'))?.[1]}
@@ -95,7 +96,7 @@ function VersionForm({ form, onChange, errors, pairs }: { form: Form; onChange: 
 function VersionRow({ v, pairs, hasDraft, archived, onEdit, onDelete, onDeriveFrom }: { v: StrategyVersionDto; pairs: InstrumentDto[]; hasDraft: boolean; archived: boolean; onEdit: () => void; onDelete: () => void; onDeriveFrom: () => void }) {
   const names = v.instrumentIds
     .map((id) => pairs.find((p) => p.id === id))
-    .map((p) => (p ? `${p.exchange === 'BITUNIX' ? 'Bitunix' : p.exchange} ${p.symbol}` : 'unknown'))
+    .map((p) => (p ? `${exchangeLabel(p.exchange)} ${p.symbol}` : 'unknown'))
     .join(', ');
   return (
     <li data-testid={`version-${v.version}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">

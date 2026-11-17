@@ -9,6 +9,7 @@ import {
   directionPermitted,
   isDecimalString,
   isHhMm,
+  isTradableExchange,
   liveUnavailableReason,
   MODE_LABELS,
   NO_DAYS_WARNING,
@@ -50,6 +51,8 @@ import {
   OPPOSITE_LABELS,
   pairLabel,
   pairOptionLabel,
+  costCurrency,
+  exchangeName,
   supportsMode,
   settingsPayload,
   TP_SIDES,
@@ -70,7 +73,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-const formatUsdt = (v: Decimal) => `${v.toDecimalPlaces(2).toFixed(2)} USDT`;
+const formatMoney = (v: Decimal, currency: string) => `${v.toDecimalPlaces(2).toFixed(2)} ${currency}`;
 
 interface Props {
   existing?: OrderBlockDto;
@@ -135,7 +138,10 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
 
   const instrument = instruments.find((i) => i.id === draft.instrumentId);
   // Once a pair is chosen, Live follows THAT exchange's connection.
-  if (instrument) liveReason = instrument.exchange === 'BITUNIX' ? liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') : liveUnavailableReason(liveConnectionStatus);
+  // Lighter (selection only) is never Live-ready: liveUnavailableReason explains why, whatever the status.
+  if (instrument) liveReason = liveUnavailableReason(instrument.exchange === 'BITUNIX' ? bitunixConnectionStatus : instrument.exchange === 'MEXC' ? liveConnectionStatus : null, instrument.exchange);
+  /** Order cost and money amounts are in the pair's settlement currency (USDC on Lighter). */
+  const ccy = costCurrency(instrument);
   const version = versions.find((v) => v.id === draft.strategyVersionId);
   const issues = useMemo(() => validateDraft(draft, instrument, version), [draft, instrument, version]);
   const errors = { ...errorMap(issues), ...serverIssues };
@@ -279,11 +285,13 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           )}
           {instrument && (
             <p className="-mt-2 text-xs text-subtle">
-              Exchange: {instrument.exchange === 'BITUNIX' ? 'Bitunix' : instrument.exchange} Futures (derived from the pair) · execution symbol{' '}
+              Exchange: {exchangeName(instrument.exchange)} {instrument.exchange === 'LIGHTER' ? `${instrument.quote} perpetual` : 'Futures'} (derived from the pair) · {instrument.exchange === 'LIGHTER' ? 'native symbol' : 'execution symbol'}{' '}
               <span className="font-mono" data-testid="execution-symbol">
                 {instrument.exchangeSymbol}
               </span>
-              {instrument.exchange === 'BITUNIX' ? ' · quantity in the base coin' : ''}
+              {instrument.marketId !== null ? <span data-testid="market-id">{` · market ID ${instrument.marketId}`}</span> : null}
+              {instrument.exchange !== 'MEXC' ? ' · quantity in the base coin' : ''}
+              {instrument.exchange !== 'MEXC' ? ` · settles in ${instrument.quote}` : ''}
               {instrument.isFixture ? ' · fixture metadata, not verified exchange limits' : ''}
             </p>
           )}
@@ -344,7 +352,9 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             }
             hint={
               mode === 'LIVE'
-                ? `Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'} Futures account with the stop loss in the same request.`
+                ? (instrument && !isTradableExchange(instrument.exchange)
+                    ? `${exchangeName(instrument.exchange)} orders are not available yet: you can select and save this pair, but the entry cannot be activated until ${exchangeName(instrument.exchange)} trading is released.`
+                    : `Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'} Futures account with the stop loss in the same request.`)
                   + ' Entries also need the platform switch, administrator approval of your account and limits, your own activation (Live Trading page) and a contract on the Live allowlist. Same strategy rules and prices as Paper; separate balance, orders and positions.'
                 : 'Paper uses the simulator with an isolated paper balance. Same strategy rules and public prices as Live.'
             }
@@ -462,7 +472,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
 
         <Section title="Order size">
           <DecimalField
-            label="Order cost (USDT)"
+            label={`Order cost (${ccy})`}
             value={draft.orderCostUsdt}
             onChange={(v) => update({ orderCostUsdt: v })}
             onCommit={() => commit('orderCostUsdt')}
@@ -492,7 +502,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           <dl className="grid grid-cols-3 gap-2 rounded-lg bg-inset px-3 py-2.5 text-xs tabular-nums">
             <div>
               <dt className="text-subtle">Margin per entry</dt>
-              <dd className="mt-0.5 text-sm text-ink">{cost && cost.gt(0) ? formatUsdt(cost) : '—'}</dd>
+              <dd className="mt-0.5 text-sm text-ink">{cost && cost.gt(0) ? formatMoney(cost, ccy) : '—'}</dd>
             </div>
             <div>
               <dt className="text-subtle">Leverage</dt>
@@ -500,7 +510,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             </div>
             <div>
               <dt className="text-subtle">Target notional</dt>
-              <dd className="mt-0.5 text-sm font-semibold text-ink">{notional ? formatUsdt(notional) : '—'}</dd>
+              <dd className="mt-0.5 text-sm font-semibold text-ink">{notional ? formatMoney(notional, ccy) : '—'}</dd>
             </div>
           </dl>
           <p className="text-xs text-subtle">Estimate before fees and contract rounding. A full order preview arrives with sizing (EXE-01).</p>
@@ -551,7 +561,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
                 : 'Required. Absolute trigger price. Must be below entry for longs and above for shorts — check the preview.'
             }
             error={err('stop')}
-            trailing={draft.stopType === 'PERCENT' ? pct : <span className="pr-2 text-xs text-subtle">USDT</span>}
+            trailing={draft.stopType === 'PERCENT' ? pct : <span className="pr-2 text-xs text-subtle">{ccy}</span>}
           />
           <p className="text-xs text-muted" data-testid="tp-sides-note">
             Take profit is set separately for Long and Short positions. The side of each confirmed entry selects its plan, which is saved with the position (a reversal uses the new side&apos;s plan).
@@ -616,7 +626,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
         </Section>
 
         <MultipleEntriesSection draft={draft} errors={errors} showErrors={touched} onChange={update} />
-        <RiskSection draft={draft} errors={errors} showErrors={touched} onChange={update} />
+        <RiskSection draft={draft} errors={errors} showErrors={touched} onChange={update} currency={ccy} />
 
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -665,7 +675,7 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
         title={`Switch to ${MODE_LABELS[mode]}?`}
         description={
           savedMode
-            ? `This entry will trade future signals in ${MODE_LABELS[mode]} instead of ${MODE_LABELS[savedMode]}. Your settings are kept and the entry is paused until you resume it.${mode === 'LIVE' ? ` Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account once every Live check passes.` : ''}`
+            ? `This entry will trade future signals in ${MODE_LABELS[mode]} instead of ${MODE_LABELS[savedMode]}. Your settings are kept and the entry is paused until you resume it.${mode === 'LIVE' ? ` Live sends real orders to your own ${exchangeName(instrument?.exchange ?? 'MEXC')} account once every Live check passes.` : ''}`
             : ''
         }
         confirmLabel={`Switch to ${MODE_LABELS[mode]}`}

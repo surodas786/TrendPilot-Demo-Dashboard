@@ -46,6 +46,8 @@ export * from './market/publicStream';
 export * from './market/bitunixPublic';
 export * from './market/bitunixWs';
 export * from './market/bitunixInstruments';
+export * from './market/lighterPublic';
+export * from './market/lighterInstruments';
 export * from './market/bitunixQuotes';
 export * from './market/bitunixKlines';
 export * from './market/priceCache';

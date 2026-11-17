@@ -1,5 +1,7 @@
 'use client';
 
+
+import { exchangeLabel } from '@trendpilot/domain';
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { BadgeCheckIcon, FlaskConicalIcon, SearchCheckIcon, TriangleAlertIcon } from 'lucide-react';
@@ -68,7 +70,7 @@ function PairRow({ pair }: { pair: InstrumentDto }) {
       if (r.code === 'REVISION_CONFLICT') router.refresh();
       return;
     }
-    const name = `${pair.exchange === 'BITUNIX' ? 'Bitunix' : pair.exchange} ${pair.symbol}`;
+    const name = `${exchangeLabel(pair.exchange)} ${pair.symbol}`;
     toast.success(patch.status ? (patch.status === 'PUBLISHED' ? `${name} published` : `${name} disabled`) : 'Suggested exits saved', patch.status === 'PUBLISHED' ? { description: 'Investors can select it in Trade Settings once a published strategy version includes it (Strategies).' } : undefined);
     setEditing(false);
     router.refresh();
@@ -81,7 +83,8 @@ function PairRow({ pair }: { pair: InstrumentDto }) {
           {pair.base}/{pair.quote}
         </span>
         <span className="text-xs text-subtle" data-testid="pair-exchange">
-          {pair.exchange === 'BITUNIX' ? 'Bitunix' : pair.exchange} · {pair.exchangeSymbol}
+          {exchangeLabel(pair.exchange)} · {pair.exchangeSymbol}
+          {pair.marketId !== null ? ` · market ${pair.marketId}` : ''}
         </span>
         <StatusPill tone={pair.status === 'PUBLISHED' ? 'gain' : 'neutral'}>{pair.status === 'PUBLISHED' ? 'Published' : 'Disabled'}</StatusPill>
         {pair.isFixture && (
@@ -114,7 +117,7 @@ function PairRow({ pair }: { pair: InstrumentDto }) {
 }
 
 /** "0.001000000000" → "0.001" (numeric columns come back at full scale). */
-const trimZeros = (v: string) => (v.includes('.') ? v.replace(/.?0+$/, '') : v);
+const trimZeros = (v: string) => (v.includes('.') ? v.replace(/\.?0+$/, '') : v);
 
 interface BitunixImport {
   instrument: { id: string; symbol: string; exchangeSymbol: string; qtyStep: string; minQty: string; maxQty: string; priceTick: string; leverageChoices: number[]; status: string; isFixture: boolean };
@@ -182,6 +185,78 @@ function BitunixImportSection() {
               {w}
             </p>
           ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface LighterImport {
+  instrument: { id: string; symbol: string; exchangeSymbol: string; marketId: number; base: string; quote: string; qtyStep: string; minQty: string; minNotional: string | null; priceTick: string; leverageChoices: number[]; status: string; isFixture: boolean };
+  market: { marketId: number; symbol: string; marketType: string; status: string; settlementCurrency: string; environment: string; maxLeverage: number };
+  source: 'LIGHTER_PUBLIC' | 'FIXTURE';
+}
+
+/**
+ * Lighter USDC perpetuals (registration only): validated against the official public catalog of the
+ * Ethereum-based Lighter mainnet by exact native symbol or market ID, and added as a separate
+ * DISABLED instrument. Lighter trading (connection, prices, orders) is not available yet.
+ */
+function LighterImportSection() {
+  const router = useRouter();
+  const [market, setMarket] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<LighterImport | null>(null);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setResult(null);
+    setBusy(true);
+    const r = await request<LighterImport>('POST', '/v1/admin/instruments/lighter', { body: { market: market.trim() } });
+    setBusy(false);
+    if (!r.ok) return setError(r.issues[0]?.message ?? r.message);
+    setResult(r.data);
+    toast.success(`Lighter ${r.data.instrument.exchangeSymbol} (market ${r.data.instrument.marketId}) registered`, { description: r.data.instrument.status === 'PUBLISHED' ? 'Market rules refreshed.' : 'It starts Disabled: review it below and press Publish.' });
+    router.refresh();
+  };
+  return (
+    <section className="space-y-3 rounded-xl border border-line bg-surface p-4" data-testid="lighter-import">
+      <h3 className="text-sm font-semibold text-ink">Add a Lighter USDC perpetual</h3>
+      <form onSubmit={submit} className="flex flex-wrap items-start gap-2" noValidate>
+        <TextField label="Lighter market (native symbol or market ID)" placeholder="e.g. XAU or 92" value={market} onChange={setMarket} error={error ?? undefined} className="w-72" />
+        <Button type="submit" icon={SearchCheckIcon} className="mt-7" disabled={!market.trim() || busy} loading={busy}>
+          Look up on Lighter
+        </Button>
+      </form>
+      <p className="text-xs text-subtle">
+        Looks the market up in Lighter&apos;s official public catalog for the Ethereum mainnet. Only active, Lighter-deployed perpetuals settled in USDC are accepted; spot pairs, inactive or frozen markets, dated or binary markets and other
+        environments are refused. Enter the symbol exactly as Lighter lists it (XAU, not XAUUSDT) or its market ID. Lighter trading is not available yet: the pair can be published and selected, but not connected, priced or traded.
+      </p>
+      {result && (
+        <div className="space-y-1 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs text-muted" data-testid="lighter-imported">
+          <p className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-semibold text-ink">
+              {result.instrument.base}/{result.instrument.quote} · Lighter {result.instrument.exchangeSymbol}
+            </span>
+            <span className="font-mono text-xs" data-testid="lighter-market-id">
+              market {result.instrument.marketId}
+            </span>
+            {result.source === 'LIGHTER_PUBLIC' ? (
+              <StatusPill tone="gain" icon={BadgeCheckIcon}>
+                Verified on Lighter ({result.market.environment.toLowerCase()}) · {result.market.marketType} · {result.market.status} · {result.market.settlementCurrency}
+              </StatusPill>
+            ) : (
+              <StatusPill tone="warn" icon={FlaskConicalIcon}>
+                Fixture market (captured catalog, not read live)
+              </StatusPill>
+            )}
+            <StatusPill tone={result.instrument.status === 'PUBLISHED' ? 'gain' : 'neutral'}>{result.instrument.status === 'PUBLISHED' ? 'Published' : 'Disabled'}</StatusPill>
+          </p>
+          <p>
+            Size step {trimZeros(result.instrument.qtyStep)} {result.instrument.base} · min {trimZeros(result.instrument.minQty)} {result.instrument.base}
+            {result.instrument.minNotional ? ` · min order ${trimZeros(result.instrument.minNotional)} ${result.instrument.quote}` : ''} · price tick {trimZeros(result.instrument.priceTick)} · leverage up to {result.market.maxLeverage}×
+          </p>
         </div>
       )}
     </section>
@@ -272,6 +347,8 @@ export function PairsAdmin({ pairs }: { pairs: InstrumentDto[] }) {
       </section>
 
       <BitunixImportSection />
+
+      <LighterImportSection />
 
       <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
         {pairs.map((p) => (
