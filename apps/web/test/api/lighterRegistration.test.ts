@@ -143,7 +143,7 @@ describe('investor pair selection: server-side eligibility', () => {
     const [b] = await direct.db.select().from(schema.orderBlocks).where(eq(schema.orderBlocks.instrumentId, xau));
     const rs = await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: b!.revision });
     expect(rs.status).toBe(422);
-    expect(rs.body.message).toMatch(/Lighter Live trading is not available yet/);
+    expect(rs.body.message).toMatch(/Lighter Live trading is not enabled for this account.*LIGHTER_MAINNET_ORDERS is not enabled/);
     const mc = await call(modeChange.GET, { path: '/x?to=PAPER', cookie: cookies.a, params: { id: b!.id } });
     expect(mc.body).toMatchObject({ allowed: true });
     const pv = await call(preview.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: { ...blockBody({ instrumentId: xau, strategyVersionId: lighterVersion, leverage: 10, weekdays: ALL_DAYS }), mode: 'LIVE' } });

@@ -29,6 +29,7 @@ export * from './live/bitunixPositionSync';
 export * from './live/bitunixPilot';
 export * from './live/bitunixPrivate';
 export * from './live/lighterPrivate';
+export * from './live/lighterLiveScope';
 export * from './live/lighterWasmSigner';
 export * from './live/lighterConnection';
 export * from './live/lighterOrders';

@@ -13,9 +13,10 @@ export const MODE_LABELS: Record<BlockMode, string> = { PAPER: 'Paper', LIVE: 'L
  * The New Entry rule for Live settings: the investor's own MEXC connection is verified.
  * Returns why Live is unavailable, or null when it is available.
  */
-export function liveUnavailableReason(connectionStatus: string | null | undefined, exchange: string = 'MEXC'): string | null {
-  // An exchange registered for pair selection only (Lighter) is never Live-ready, whatever is stored.
-  const unavailable = exchangeUnavailableReason(exchange);
+export function liveUnavailableReason(connectionStatus: string | null | undefined, exchange: string = 'MEXC', o: { lighterLive?: boolean } = {}): string | null {
+  // Lighter is Live-ready only when the server says this investor is in the Lighter Live scope
+  // (`lighterLive`); otherwise, like any exchange TrendPilot cannot trade, it is never Live-ready.
+  const unavailable = exchange === 'LIGHTER' && o.lighterLive ? null : exchangeUnavailableReason(exchange);
   if (unavailable) return unavailable;
   const name = exchangeLabel(exchange);
   switch (connectionStatus) {
@@ -55,6 +56,8 @@ export interface ModeChangeFacts {
   liveConnectionStatus: string | null | undefined;
   /** Exchange of the block's contract (whose connection Live needs). Default MEXC. */
   exchange?: string;
+  /** Lighter only: the server found this investor and market inside the Lighter Live scope. */
+  lighterLive?: boolean;
   /** The investor's block for the same pair in the destination mode, if any. */
   destinationBlockId: string | null;
   /** Open positions and unfinished orders (intents not yet filled, rejected or cancelled) of this block. */
@@ -76,7 +79,7 @@ export function modeChangeBlocker(f: ModeChangeFacts): ModeChangeBlocker | null 
     if (reason) return { code: 'PAPER_UNSUPPORTED', message: reason };
   }
   if (f.to === 'LIVE') {
-    const reason = liveUnavailableReason(f.liveConnectionStatus, f.exchange);
+    const reason = liveUnavailableReason(f.liveConnectionStatus, f.exchange, { lighterLive: f.lighterLive });
     if (reason) return { code: 'LIVE_UNAVAILABLE', message: reason };
   }
   if (f.destinationBlockId) {

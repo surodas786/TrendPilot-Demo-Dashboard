@@ -21,7 +21,7 @@ import {
 } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { recordAudit } from '../repos/audit';
-import { exchangeConnections, instruments, liveControl, orderIntents, paperAccounts, positions, users } from '../schema';
+import { exchangeConnections, instruments, lighterTxs, liveControl, orderIntents, paperAccounts, positions, users } from '../schema';
 import { open as unseal, seal } from '../security/secretBox';
 import { book, lockPaperAccount, type AccountExchange } from '../paper/accounts';
 import { paperVenue } from '../venue/paper';
@@ -33,6 +33,7 @@ import { bitunixCredentialsOf } from './bitunixConnection';
 import { BitunixOrderTransport, bitunixVenue, type BitunixOrderRequester } from './bitunixOrders';
 import { lighterApiFor, lighterLiveInputs, lighterScopeOf, lighterSeamActive, lighterSignerFor } from './lighterConnection';
 import { openLighterOrderTransport } from './lighterPrivate';
+import { LIGHTER_EVIDENCE_PURPOSES, lighterEvidenceHash, lighterLiveRefusal, lighterLiveScope, type LighterScopeTarget } from './lighterLiveScope';
 import { lighterVenue } from './lighterOrders';
 import { lighterMarketOf } from './lighterSync';
 
@@ -162,8 +163,34 @@ export async function liveEntryEligibility(
   return { verdict, reasonText: blockers.map((b) => LIVE_REFUSAL_TEXT[b]).join(' '), blockers };
 }
 
-/** Lighter Live approval and activation are refused in this build (Lighter plan Step 4). */
-export const LIGHTER_LIVE_DISABLED = 'Lighter Live trading is not enabled in this release: the Lighter signer and order capabilities are still being verified. Your Lighter connection is kept for verification and sync only.';
+/** Shown when no Lighter Live scope applies; the specific reason follows it. */
+export const LIGHTER_LIVE_DISABLED = 'Lighter Live trading is not enabled for this account.';
+
+/**
+ * Why Lighter Live is refused for this investor / market / route, or null (lighterLiveScope.ts).
+ * Reads the live control's capability records, the investor's Lighter connection and the market.
+ * Gates NEW entries, approval and activation only; protection, closes and sync never call it.
+ */
+export async function lighterLiveRefusalFor(
+  db: Executor,
+  t: { ownerId?: string; instrumentId?: string; routeId?: string | null },
+  level: 'ACCOUNT' | 'MARKET' | 'SEND' | 'ENTRY',
+  env: Record<string, string | undefined> = process.env
+): Promise<string | null> {
+  const control = await getLiveControl(db);
+  const target: LighterScopeTarget = { routeId: t.routeId ?? null };
+  if (t.ownerId) {
+    const conn = await connectionFor(db, t.ownerId, 'LIGHTER');
+    target.connection = conn && conn.status !== 'REVOKED' ? { id: conn.id, status: conn.status, venueEnvironment: conn.venueEnvironment } : null;
+  }
+  if (t.instrumentId) {
+    const [i] = await db.select({ exchange: instruments.exchange, marketId: instruments.exchangeMarketId }).from(instruments).where(eq(instruments.id, t.instrumentId));
+    if (!i || i.exchange !== 'LIGHTER') return 'Not a Lighter market.';
+    target.marketId = i.marketId;
+  }
+  const refusal = lighterLiveRefusal(lighterLiveScope(env), capabilityStateOf(control), lighterLiveInputs(env), target, level);
+  return refusal ? `${LIGHTER_LIVE_DISABLED} ${refusal}` : null;
+}
 
 /* ───────────────────────── Capabilities ───────────────────────── */
 
@@ -310,6 +337,8 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
       // Exact match: an instrument on any other exchange (including one registered for selection
       // only, such as Lighter) is never sent through this venue.
       if (inst?.exchange !== exchange) return reject('LIVE_REFUSED:LIVE_EXCHANGE_MISMATCH');
+      // Lighter: the account and market must be in the Lighter Live scope right before sending.
+      if (exchange === 'LIGHTER' && (await lighterLiveRefusalFor(db, { ownerId: o.ownerId, instrumentId: r.instrumentId }, 'SEND', o.env))) return reject('LIVE_REFUSED:LIGHTER_SCOPE');
       const gate = liveAccountGate(controlState(control, o.env), conn ? connectionState(conn) : null, o.ownerId, !!inst?.liveAllowed);
       if (!gate.ok) return reject(`LIVE_REFUSED:${gate.reason}`);
       // Hedge legs on Bitunix are separate positions: the limits count the leg being opened.
@@ -574,9 +603,12 @@ export async function setLiveActivation(db: Db, ownerId: string, enabled: boolea
       .for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'No exchange connection is set up.');
     if (enabled) {
-      if (exchange === 'LIGHTER') throw new DomainError(409, ErrorCode.CONFLICT, LIGHTER_LIVE_DISABLED);
+      if (exchange === 'LIGHTER') {
+        const refusal = await lighterLiveRefusalFor(tx, { ownerId }, 'ACCOUNT');
+        if (refusal) throw new DomainError(409, ErrorCode.CONFLICT, refusal);
+      }
       if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Verify the exchange connection first.');
-      if (!conn.approvedAt) throw new DomainError(409, ErrorCode.CONFLICT, `An administrator must approve this ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account and set its limits first.`);
+      if (!conn.approvedAt) throw new DomainError(409, ErrorCode.CONFLICT, `An administrator must approve this ${exchange === 'BITUNIX' ? 'Bitunix' : exchange === 'LIGHTER' ? 'Lighter' : 'MEXC'} account and set its limits first.`);
       if (exchange === 'BITUNIX' && conn.positionMode !== 'HEDGE') throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix Live trading needs the account in Hedge mode (Bitunix reports another mode). Change it in Bitunix, then check the connection again.');
     }
     const [u] = await tx
@@ -609,7 +641,10 @@ export async function approveConnection(db: Db, adminId: string, connectionId: s
     const [conn] = await tx.select().from(exchangeConnections).where(eq(exchangeConnections.id, connectionId)).for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
     if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Only a verified connection can be approved.');
-    if (conn.exchange === 'LIGHTER') throw new DomainError(409, ErrorCode.CONFLICT, LIGHTER_LIVE_DISABLED);
+    if (conn.exchange === 'LIGHTER') {
+      const refusal = await lighterLiveRefusalFor(tx, { ownerId: conn.ownerId }, 'ACCOUNT');
+      if (refusal) throw new DomainError(409, ErrorCode.CONFLICT, refusal);
+    }
     const before = limitsOf(conn);
     const [u] = await tx
       .update(exchangeConnections)
@@ -717,6 +752,20 @@ export async function recordCapabilityEvidence(db: Db, adminId: string, capabili
   if (state === 'VERIFIED' && capability.startsWith('BITUNIX_') && !/bitunix-pilot:[0-9a-f]{64}/.test(evidence)) {
     throw new DomainError(400, ErrorCode.VALIDATION_FAILED, 'A Bitunix capability is VERIFIED only with real-exchange evidence: cite the pilot evidence reference (bitunix-pilot:<sha256>) printed by ops:bitunix-pilot --execute.');
   }
+  // A Lighter capability is VERIFIED only on real-exchange evidence: a Lighter MAINNET transaction
+  // TrendPilot sent and saw EXECUTED, of the kind the capability is about (lighter-tx:<hash>).
+  if (state === 'VERIFIED' && capability.startsWith('LIGHTER_')) {
+    const hash = lighterEvidenceHash(evidence);
+    const purposes = LIGHTER_EVIDENCE_PURPOSES[capability as keyof typeof LIGHTER_EVIDENCE_PURPOSES] ?? [];
+    const [tx] = hash
+      ? await db
+          .select({ id: lighterTxs.id })
+          .from(lighterTxs)
+          .where(and(eq(lighterTxs.txHash, hash), eq(lighterTxs.environment, 'MAINNET'), eq(lighterTxs.state, 'EXECUTED'), inArray(lighterTxs.purpose, [...purposes])))
+      : [];
+    if (!tx)
+      throw new DomainError(400, ErrorCode.VALIDATION_FAILED, `A Lighter capability is VERIFIED only with real-exchange evidence: cite lighter-tx:<hash> of a Lighter mainnet transaction TrendPilot recorded as EXECUTED (${purposes.join(' or ')}).`);
+  }
   return db.transaction(async (tx) => {
     const c = await getLiveControl(tx);
     const ev = { ...(c.capabilityEvidence as Record<string, CapabilityRecord>), [capability]: { state, evidence: evidence.trim().slice(0, 500), by: adminId, at: new Date().toISOString() } };
@@ -762,9 +811,9 @@ export async function setPlatformEntriesHalted(db: Db, adminId: string, halted: 
 export async function setInstrumentLiveAllowed(db: Db, adminId: string, instrumentId: string, allowed: boolean, correlationId = 'live'): Promise<void> {
   const [i] = await db.select().from(instruments).where(eq(instruments.id, instrumentId));
   if (!i) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Instrument not found.');
-  const notTradable = exchangeUnavailableReason(i.exchange);
+  const notTradable = i.exchange === 'LIGHTER' ? (allowed ? await lighterLiveRefusalFor(db, { instrumentId }, 'MARKET') : null) : exchangeUnavailableReason(i.exchange);
   if (allowed && notTradable) throw new DomainError(409, ErrorCode.CONFLICT, notTradable);
-  if (allowed && (i.status !== 'PUBLISHED' || !i.exchangeSymbol || i.isFixture)) throw new DomainError(409, ErrorCode.CONFLICT, 'Only a published contract validated against MEXC (not fixture metadata) can be allowed for Live.');
+  if (allowed && (i.status !== 'PUBLISHED' || !i.exchangeSymbol || i.isFixture)) throw new DomainError(409, ErrorCode.CONFLICT, 'Only a published contract validated against its exchange (not fixture metadata) can be allowed for Live.');
   await db.update(instruments).set({ liveAllowed: allowed, revision: sql`${instruments.revision} + 1`, updatedAt: sql`now()` }).where(eq(instruments.id, instrumentId));
   await recordAudit(db, { actorUserId: adminId, action: allowed ? 'ADMIN_LIVE_CONTRACT_ALLOW' : 'ADMIN_LIVE_CONTRACT_DISALLOW', targetType: 'instrument', targetId: instrumentId, result: 'SUCCESS', metadata: { symbol: i.symbol, exchangeSymbol: i.exchangeSymbol }, correlationId });
 }

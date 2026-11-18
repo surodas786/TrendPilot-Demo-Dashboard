@@ -372,7 +372,7 @@ describe('Lighter Live stays unreachable', () => {
     expect(c.status).toBe(201);
     const r = await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies.b, params: { id: c.body.id }, ifMatch: c.body.revision });
     expect(r.status).toBe(422);
-    expect(r.body.message).toMatch(/Lighter Live trading is not available yet/);
+    expect(r.body.message).toMatch(/Lighter Live trading is not enabled for this account.*LIGHTER_MAINNET_ORDERS is not enabled/);
     const [block] = await direct.db.select().from(schema.orderBlocks).where(eq(schema.orderBlocks.id, c.body.id));
     const [ver] = await direct.db.select().from(schema.strategyVersions).where(eq(schema.strategyVersions.id, version));
     const assessed = await direct.db.transaction(async (tx) => assessEntry(tx, { event: { interval: '15', barOpenAt: bar, referencePrice: '3860' }, block: block!, version: ver!, side: 'LONG', now: clock.now, account: await lockPaperAccount(tx, idB, 'PAPER', 'LIGHTER') }));

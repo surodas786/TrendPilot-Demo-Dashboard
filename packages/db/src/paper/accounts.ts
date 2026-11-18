@@ -52,8 +52,10 @@ export type AccountExchange = 'MEXC' | 'BITUNIX' | 'LIGHTER';
  * the MEXC Paper account (USDT), except Lighter pairs, which use their own isolated Lighter Paper
  * account (USDC). An exchange that cannot trade Live (Lighter) never maps to any Live account.
  */
-export const accountExchangeFor = (mode: string, instrumentExchange: string | null | undefined): AccountExchange => {
+export const accountExchangeFor = (mode: string, instrumentExchange: string | null | undefined, o: { lighterLive?: boolean } = {}): AccountExchange => {
   if (mode === 'LIVE') {
+    // Lighter Live: only after the caller passed the Lighter Live scope (lighterLiveRefusalFor).
+    if (instrumentExchange === 'LIGHTER' && o.lighterLive) return 'LIGHTER';
     if (instrumentExchange && !isTradableExchange(instrumentExchange)) throw new Error(exchangeUnavailableReason(instrumentExchange) ?? 'exchange not tradable');
     return instrumentExchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
   }

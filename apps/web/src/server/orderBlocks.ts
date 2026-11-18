@@ -1,4 +1,4 @@
-import { connectionFor, fixtureQuote, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
+import { connectionFor, fixtureQuote, lighterLiveRefusalFor, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
 import {
   assertModeAllowed,
   catalogIssues,
@@ -26,7 +26,8 @@ import {
   type OrderBlockDto,
   type Quote,
   type BlockMode,
-  type ModeChangeBlocker
+  type ModeChangeBlocker,
+  type ExchangeId
 } from '@trendpilot/domain';
 import { now } from './clock';
 import { validationError } from './http';
@@ -117,17 +118,20 @@ async function modeChangeBlockerFor(db: Executor, owner: PublicUser, block: Orde
   const [conn, instrument, destinationBlockId, activity] = await Promise.all([
     // Only an exchange TrendPilot can trade has a connection; Lighter (selection only) has none and
     // modeChangeBlocker reports it as unavailable for Live.
-    isTradableExchange(block.exchange) ? connectionFor(db, owner.id, block.exchange) : Promise.resolve(undefined),
+    isTradableExchange(block.exchange) || block.exchange === 'LIGHTER' ? connectionFor(db, owner.id, block.exchange as ExchangeId) : Promise.resolve(undefined),
     getInstrument(db, block.instrumentId),
     repo.idFor(block.instrumentId, to),
     repo.activity(block.id, lock ? { lockMode: from } : {})
   ]);
+  // Lighter Live: only inside the Lighter Live scope (account + market; the route is checked per alert).
+  const lighterLive = block.exchange === 'LIGHTER' && to === 'LIVE' && !(await lighterLiveRefusalFor(db, { ownerId: owner.id, instrumentId: block.instrumentId }, 'SEND'));
   return modeChangeBlocker({
     from,
     to,
     pair: instrument ? `${instrument.base}/${instrument.quote}` : block.symbol,
     liveConnectionStatus: conn?.status ?? null,
     exchange: block.exchange,
+    lighterLive,
     destinationBlockId: destinationBlockId === block.id ? null : destinationBlockId,
     ...activity
   });
@@ -213,8 +217,9 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
   if (status === 'ACTIVE') {
     // Live needs the connection of the exchange this block's contract trades on.
     const exchange = current.exchange;
-    const notTradable = exchangeUnavailableReason(exchange);
-    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), isTradableExchange(exchange) ? connectionFor(db, owner.id, exchange) : Promise.resolve(undefined)]);
+    // Lighter Live: only inside the Lighter Live scope (lighterLiveScope.ts), refused by default.
+    const notTradable = exchange === 'LIGHTER' && current.mode === 'LIVE' ? await lighterLiveRefusalFor(db, { ownerId: owner.id, instrumentId: current.instrumentId }, 'SEND') : exchangeUnavailableReason(exchange);
+    const [instrument, version, conn] = await Promise.all([getInstrument(db, current.instrumentId), getVersion(db, current.strategyVersionId), isTradableExchange(exchange) || exchange === 'LIGHTER' ? connectionFor(db, owner.id, exchange as ExchangeId) : Promise.resolve(undefined)]);
     const reason =
       owner.status !== 'ACTIVE'
         ? 'Your account is not active.'

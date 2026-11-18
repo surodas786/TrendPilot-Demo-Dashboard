@@ -45,7 +45,10 @@ export async function processPaperReverse(db: Db, job: JobRow, now: Date, hooks:
     .where(eq(orderIntents.id, closeIntentId));
   let liveBalance: { equityUsdt: string; availableUsdt: string; refreshedAt: string } | null = null;
   let balanceError: string | null = null;
-  if (peek?.mode === 'LIVE' && !(UNRESOLVED as readonly string[]).includes(peek.state)) {
+  if (peek?.mode === 'LIVE' && peek.exchange === 'LIGHTER') {
+    // Lighter: no on-demand balance read here; the re-entry leg is withheld (the close stands).
+    balanceError = 'Lighter reversal re-entry is not supported: the opposite entry waits for the next alert.';
+  } else if (peek?.mode === 'LIVE' && !(UNRESOLVED as readonly string[]).includes(peek.state)) {
     try {
       // The balance of the exchange the closed leg traded on (MEXC or Bitunix).
       const b = await refreshLiveBalance(db, peek.ownerId, now, process.env, peek.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
