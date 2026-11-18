@@ -26,9 +26,13 @@ const now = () => new Date('2026-11-09T10:00:00Z');
 
 describe('pair input', () => {
   it('accepts XAUUSDT and XAU_USDT (any case) and resolves both to platform XAUUSDT / MEXC XAU_USDT', () => {
-    for (const s of ['XAUUSDT', 'XAU_USDT', ' xau_usdt ', 'xauusdt']) expect(normalizePairInput(s)).toEqual({ symbol: 'XAUUSDT', exchangeSymbol: 'XAU_USDT', base: 'XAU' });
-    expect(normalizePairInput('1000PEPE_USDT')).toEqual({ symbol: '1000PEPEUSDT', exchangeSymbol: '1000PEPE_USDT', base: '1000PEPE' });
-    for (const s of ['XAU', 'XAUUSD', 'XAU_USDC', 'XAU__USDT', 'X_USDT', 'XAU/USDT']) expect(normalizePairInput(s)).toBeNull();
+    for (const s of ['XAUUSDT', 'XAU_USDT', ' xau_usdt ', 'xauusdt']) expect(normalizePairInput(s)).toEqual({ symbol: 'XAUUSDT', exchangeSymbol: 'XAU_USDT', base: 'XAU', quote: 'USDT' });
+    expect(normalizePairInput('1000PEPE_USDT')).toEqual({ symbol: '1000PEPEUSDT', exchangeSymbol: '1000PEPE_USDT', base: '1000PEPE', quote: 'USDT' });
+    for (const s of ['XAU', 'XAUUSD', 'XAU__USDT', 'X_USDT', 'XAU/USDT', 'XAU_BUSD', 'XAU_USDCX']) expect(normalizePairInput(s)).toBeNull();
+  });
+
+  it('accepts USDC perpetual tickers XAUUSDC and XAU_USDC as platform XAUUSDC / MEXC XAU_USDC', () => {
+    for (const s of ['XAUUSDC', 'XAU_USDC', ' xau_usdc ']) expect(normalizePairInput(s)).toEqual({ symbol: 'XAUUSDC', exchangeSymbol: 'XAU_USDC', base: 'XAU', quote: 'USDC' });
   });
 });
 
@@ -98,8 +102,26 @@ describe('resolvePairContract', () => {
   it('rejects contracts that are not an enabled, USDT-settled perpetual', async () => {
     const run = (p: Partial<MexcContractInfo>) => resolvePairContract('XAUUSDT', { source: 'MEXC_PUBLIC', client: new Stub(() => xauInfo(p)), now });
     expect(await run({ futureType: 2 })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not a perpetual/) });
-    expect(await run({ settleCoin: 'XAU' })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not USDT-settled/) });
+    expect(await run({ settleCoin: 'XAU' })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not a USDT- or USDC-settled perpetual/) });
+    expect(await run({ quoteCoin: 'USDT', settleCoin: 'USDC' })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not a USDT- or USDC-settled perpetual/) });
+    // Asked for the USDT contract, MEXC answers with a USDC-settled one: refused on MEXC's metadata.
+    expect(await run({ quoteCoin: 'USDC', settleCoin: 'USDC' })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/settled in USDC, not USDT/) });
     expect(await run({ state: 1 })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not enabled/) });
+  });
+
+  it('MEXC XAU_USDC: accepted when MEXC reports an enabled USDC-settled perpetual; the currency comes from MEXC', async () => {
+    // Values as MEXC contract/detail reported them for XAU_USDC on 2026-11-18.
+    const usdc = xauInfo({ exchangeSymbol: 'XAU_USDC', quoteCoin: 'USDC', settleCoin: 'USDC', maxVol: '48000', maxLeverage: 100, takerFeeRate: '0.0002' });
+    const stub = new Stub(() => usdc);
+    const r = await resolvePairContract('XAU_USDC', { source: 'MEXC_PUBLIC', client: stub, now });
+    expect(stub.asked).toEqual(['XAU_USDC']);
+    expect(r).toMatchObject({ ok: true, contract: { symbol: 'XAUUSDC', exchangeSymbol: 'XAU_USDC', quote: 'USDC', settleCoin: 'USDC', maxQty: '48000', takerFeeRate: '0.0002', source: 'MEXC_PUBLIC' } });
+    expect(contractProblems(usdc, 'USDC')).toEqual([]);
+    // A disabled or non-perpetual USDC contract is refused on MEXC's own metadata.
+    expect(await resolvePairContract('XAU_USDC', { source: 'MEXC_PUBLIC', client: new Stub(() => ({ ...usdc, state: 1 })), now })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not enabled/) });
+    expect(await resolvePairContract('XAU_USDC', { source: 'MEXC_PUBLIC', client: new Stub(() => ({ ...usdc, futureType: 2 })), now })).toMatchObject({ ok: false, reason: 'NOT_ELIGIBLE', message: expect.stringMatching(/not a perpetual/) });
+    // Fixture mode carries the fixture's currency too.
+    expect(await resolvePairContract('XAU_USDC', { source: 'FIXTURE', now })).toMatchObject({ ok: true, contract: { symbol: 'XAUUSDC', quote: 'USDC', settleCoin: 'USDC', source: 'FIXTURE' } });
   });
 
   it('accepts with warnings when API trading is off or the contract opens later', async () => {

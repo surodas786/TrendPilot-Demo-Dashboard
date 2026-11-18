@@ -239,8 +239,8 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
   const ownerId = user.id;
   const mode: ReportMode = o.mode ?? 'PAPER';
   // One account per mode AND exchange, never summed: Paper is the MEXC (USDT) or the Lighter (USDC)
-  // simulator account; Live is the MEXC or the Bitunix account.
-  const exchange: ReportExchange = mode === 'LIVE' ? (o.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC') : o.exchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC';
+  // simulator account; Live is the MEXC (USDT), Bitunix (USDT) or Lighter (USDC) account.
+  const exchange: ReportExchange = mode === 'LIVE' ? (o.exchange === 'BITUNIX' ? 'BITUNIX' : o.exchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC') : o.exchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC';
   const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)));
   // No account for this mode yet: every figure below is zero (an impossible ID matches nothing).
   const acctId = acct?.id ?? '00000000-0000-0000-0000-000000000000';

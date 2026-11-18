@@ -303,8 +303,8 @@ async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettin
     ...(lighter ? { minNotional: instrument.contract.minNotional, maxNotional: instrument.contract.maxNotional, quoteCurrency: instrument.quote } : {})
   };
   const inst = { symbol: instrument.symbol, exchangeSymbol: instrument.exchangeSymbol, fixtureLabel: instrument.fixtureLabel, exchange: instrument.exchange, quoteCurrency: instrument.quote };
-  // Lighter Live is not available: its own fresh public price only, no Live estimates.
-  if (mode === 'LIVE' && !isTradableExchange(instrument.exchange)) {
+  // An exchange without a Live order path: its own fresh public price only, no Live estimates.
+  if (mode === 'LIVE' && !isTradableExchange(instrument.exchange) && !lighter) {
     return { quote, sides: [], notes: [`${exchangeLabel(instrument.exchange)} public price only: Live order estimates are not available until ${exchangeLabel(instrument.exchange)} Live trading is released. Paper is available.`], instrument: inst };
   }
   if (lighter) {
@@ -313,9 +313,11 @@ async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettin
     return {
       ...p,
       notes: [
-        `Paper simulation on Lighter public prices (USDC): bid/ask ${quote.asOf ? `at ${quote.asOf}` : ''}. Nothing is sent to Lighter.`,
+        mode === 'LIVE'
+          ? `Live estimate on Lighter public prices (USDC): bid/ask ${quote.asOf ? `at ${quote.asOf}` : ''}. Live orders are sent only once the Lighter account, contract and route pass the Live checks.`
+          : `Paper simulation on Lighter public prices (USDC): bid/ask ${quote.asOf ? `at ${quote.asOf}` : ''}. Nothing is sent to Lighter.`,
         `Lighter rules: size step ${instrument.contract.qtyStep} ${instrument.base}, minimum ${instrument.contract.minQty} ${instrument.base} and ${instrument.contract.minNotional ?? '?'} USDC, maximum ${instrument.contract.maxNotional} USDC per order (catalog market ${instrument.marketId}).`,
-        'Simulated fee: Lighter Standard account 0% (per Lighter docs); your real Lighter account tier may differ.',
+        `Fee: ${instrument.contract.takerFeeRate} taker as published by Lighter for this market; your account's fills are what count.`,
         'Market entry estimate before slippage. A preview is not a guarantee of fill price.'
       ],
       instrument: inst

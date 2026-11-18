@@ -41,24 +41,32 @@ export interface ContractInfoSource {
 
 const MEXC_PERPETUAL = 1;
 
-/** Eligibility: an enabled, USDT-settled perpetual. Returns the reasons it is not. */
-export function contractProblems(c: MexcContractInfo): string[] {
+/** Settlement currencies TrendPilot supports on MEXC perpetuals, as MEXC reports them. */
+export const MEXC_SUPPORTED_SETTLE = ['USDT', 'USDC'] as const;
+
+/**
+ * Eligibility from MEXC's own metadata: an enabled perpetual quoted AND settled in the same supported
+ * currency (USDT or USDC), and the currency the admin asked for. Returns the reasons it is not.
+ */
+export function contractProblems(c: MexcContractInfo, requestedQuote?: string): string[] {
   const out: string[] = [];
   if (c.futureType !== MEXC_PERPETUAL) out.push(`it is not a perpetual contract (futureType ${c.futureType ?? 'unknown'})`);
-  if (c.quoteCoin !== 'USDT' || c.settleCoin !== 'USDT') out.push(`it is not USDT-settled (quote ${c.quoteCoin || '?'}, settle ${c.settleCoin || '?'})`);
+  if (!(MEXC_SUPPORTED_SETTLE as readonly string[]).includes(c.settleCoin) || c.quoteCoin !== c.settleCoin)
+    out.push(`it is not a USDT- or USDC-settled perpetual (quote ${c.quoteCoin || '?'}, settle ${c.settleCoin || '?'})`);
+  else if (requestedQuote && c.settleCoin !== requestedQuote) out.push(`MEXC reports it settled in ${c.settleCoin}, not ${requestedQuote}`);
   if (c.state !== 0) out.push(`it is not enabled for trading on MEXC (state ${c.state})`);
   return out;
 }
 
 export async function resolvePairContract(input: string, o: { source: PairContractSource; client?: ContractInfoSource; now?: () => Date }): Promise<PairLookup> {
   const parsed = normalizePairInput(input);
-  if (!parsed) return { ok: false, reason: 'INVALID_INPUT', message: 'Enter a USDT perpetual ticker such as BTCUSDT or XAU_USDT.' };
+  if (!parsed) return { ok: false, reason: 'INVALID_INPUT', message: 'Enter a USDT or USDC perpetual ticker such as BTCUSDT or XAU_USDC.' };
   const checkedAt = (o.now?.() ?? new Date()).toISOString();
 
   if (o.source === 'FIXTURE') {
     const f = lookupFixtureContract(parsed.symbol);
     if (!f) return { ok: false, reason: 'UNKNOWN_SYMBOL', message: `${parsed.symbol} is not in the local MEXC contract fixtures (demo/test mode). Deployed apps validate against MEXC.` };
-    return { ok: true, contract: { ...f, source: 'FIXTURE', minLeverage: 1, displayName: null, settleCoin: 'USDT', warnings: [], checkedAt } };
+    return { ok: true, contract: { ...f, source: 'FIXTURE', minLeverage: 1, displayName: null, settleCoin: f.quote, warnings: [], checkedAt } };
   }
 
   if (!o.client) throw new Error('resolvePairContract: a MEXC client is required');
@@ -73,7 +81,7 @@ export async function resolvePairContract(input: string, o: { source: PairContra
     return { ok: false, reason: 'EXCHANGE_UNAVAILABLE', message: `MEXC did not answer the contract lookup (${(e as Error).message}). This is not a problem with the ticker; try again shortly.` };
   }
 
-  const problems = contractProblems(info);
+  const problems = contractProblems(info, parsed.quote);
   if (problems.length) return { ok: false, reason: 'NOT_ELIGIBLE', message: `${info.exchangeSymbol} cannot be added: ${problems.join('; ')}.` };
 
   const warnings: string[] = [];
@@ -89,7 +97,8 @@ export async function resolvePairContract(input: string, o: { source: PairContra
       symbol: parsed.symbol,
       exchangeSymbol: info.exchangeSymbol,
       base: info.baseCoin || parsed.base,
-      quote: 'USDT',
+      // The currency MEXC reports (validated above: quote = settle = the requested USDT or USDC).
+      quote: info.settleCoin as 'USDT' | 'USDC',
       contractMultiplier: info.contractSize,
       qtyStep: info.volUnit,
       minQty: info.minVol,

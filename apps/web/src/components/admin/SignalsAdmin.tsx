@@ -101,7 +101,14 @@ function RouteFields({ form, setForm, errors, instruments, packages }: { form: R
       </div>
       <div className="grid gap-3 sm:grid-cols-4">
         <div>
-          <FilterSelect label="Execution contract" value={form.instrumentId} onChange={(v) => setForm({ ...form, instrumentId: v })} options={instruments.filter((i) => i.exchange !== 'BITUNIX').map((i) => ({ value: i.id, label: `${i.symbol} (${i.exchange} ${i.exchangeSymbol})` }))} />
+          <FilterSelect
+            label="Signal contract (the chart's exchange contract)"
+            value={form.instrumentId}
+            onChange={(v) => setForm({ ...form, instrumentId: v })}
+            options={instruments
+              .filter((i) => i.exchange !== 'BITUNIX' && i.exchange !== 'LIGHTER')
+              .map((i) => ({ value: i.id, label: `${i.symbol} (${i.exchange} ${i.exchangeSymbol}, ${i.quote})${i.status === 'PUBLISHED' ? '' : ' · disabled: signal source only, no entries'}` }))}
+          />
           {errors.instrumentId && <p className="mt-1 text-xs text-loss">{errors.instrumentId}</p>}
         </div>
         <div>
@@ -133,7 +140,7 @@ const formErrors = (r: { issues: { path: string; message: string }[]; message: s
 /** Link, pause or remove the same contract on Bitunix as an explicit target of a route. */
 function BitunixTargetControl({ route, instruments, onSet }: { route: SignalRouteDto; instruments: InstrumentDto[]; onSet: (instrumentId: string | null, enabled: boolean) => void }) {
   const current = route.targets.find((t) => t.exchange === 'BITUNIX');
-  const candidates = instruments.filter((i) => i.exchange === 'BITUNIX' && i.symbol === route.instrument.symbol);
+  const candidates = instruments.filter((i) => i.exchange === 'BITUNIX' && i.status === 'PUBLISHED' && i.symbol === route.instrument.symbol);
   if (!current && !candidates.length) return <div className="mt-1 text-[11px] text-subtle">No published Bitunix {route.instrument.symbol} contract to route to.</div>;
   return (
     <div className="mt-1 flex flex-wrap gap-1.5" data-testid={`route-bitunix-${route.sourceSymbol}-${route.interval}-${route.action}`}>
@@ -210,7 +217,7 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     interval: '15',
     action: 'BULLISH_FLIP',
     kind: 'ACTIONABLE',
-    instrumentId: instruments[0]?.id ?? '',
+    instrumentId: instruments.find((i) => i.status === 'PUBLISHED' && i.exchange === 'MEXC')?.id ?? instruments[0]?.id ?? '',
     packageId: packages.find((p) => !p.archivedAt)?.id ?? '',
     maxSignalAgeSeconds: '120',
     clockToleranceSeconds: '5'

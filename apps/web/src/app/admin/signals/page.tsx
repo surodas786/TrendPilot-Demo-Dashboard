@@ -22,12 +22,14 @@ export default async function AdminSignalsPage() {
     <PageContainer
       title="TradingView Webhook & Signal Routes"
       description="The central webhook, alert message templates, routes from TradingView charts to approved contracts and strategy lineages, and recent signal activity."
-      scope="Signals are stored and routed to each investor's Paper order blocks. No orders are placed in this release."
+      scope="Signals are stored and routed to each destination's order blocks. Whether an order is sent is decided per destination (contract status, mode, Live eligibility)."
     >
       <SignalsAdmin
         ingress={first ? { ...first, urlTemplate: `${appBaseUrl()}/v1/webhooks/tradingview/<token>` } : null}
         routes={routes}
-        instruments={instruments.filter((i) => i.status === 'PUBLISHED')}
+        // All contracts: a DISABLED contract may still be a route's TradingView signal source (it takes
+        // no entries). Target pickers offer published contracts only.
+        instruments={instruments}
         packages={packages}
         events={events}
         rejections={rejections}

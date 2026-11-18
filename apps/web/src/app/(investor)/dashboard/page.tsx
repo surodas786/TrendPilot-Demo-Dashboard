@@ -6,7 +6,7 @@ import { PageContainer } from '@/components/layout/PageContainer';
 import { LiveQuotesPanel } from '@/components/market/LiveQuotesPanel';
 import { FUNDING_LABEL, fmtTime, pnlTone, usdtOrUnavailable } from '@/components/reporting/format';
 import { StatusPill } from '@/components/ui/StatusPill';
-import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf, liveViewExchanges } from '@/components/ui/ModeTabs';
 import { connectionFor } from '@trendpilot/db';
 import { now } from '@/server/clock';
 import { requirePageRole } from '@/server/pageSession';
@@ -35,13 +35,15 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const ccy = exchange === 'LIGHTER' ? 'USDC' : 'USDT';
   const money = (v: string | null | undefined, signed = false) => usdtOrUnavailable(v, signed, ccy);
   const at = now();
-  const [d, quotes, bitunix, lighterPaper] = await Promise.all([
+  const [d, quotes, bitunix, lighterPaper, lighter] = await Promise.all([
     getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined, mode, exchange }),
     listLatestQuotes(getDb(), at, { publishedOnly: true }),
     connectionFor(getDb(), user.id, 'BITUNIX'),
-    getMyPaperAccount(getDb(), user.id, 'PAPER', 'LIGHTER')
+    getMyPaperAccount(getDb(), user.id, 'PAPER', 'LIGHTER'),
+    connectionFor(getDb(), user.id, 'LIGHTER')
   ]);
-  const showExchanges = mode === 'LIVE' ? !!bitunix && bitunix.status !== 'REVOKED' : !!lighterPaper || exchange === 'LIGHTER';
+  const liveOptions = liveViewExchanges({ bitunix, lighter });
+  const showExchanges = mode === 'LIVE' ? liveOptions.length > 1 : !!lighterPaper || exchange === 'LIGHTER';
   const venue = exchange === 'BITUNIX' ? 'Bitunix' : exchange === 'LIGHTER' ? 'Lighter' : 'MEXC';
   const stale = d.freshness.stale;
 
@@ -52,7 +54,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       scope={`${user.name} · My Account · Reporting day ${d.day.date} (${d.timezone})`}
       actions={
         <form className="flex items-end gap-2" method="get">
-          {showExchanges && <ExchangeTabs exchange={exchange} path="/dashboard" params={{ date }} mode={mode} />}
+          {showExchanges && <ExchangeTabs options={mode === 'LIVE' ? liveOptions : undefined} exchange={exchange} path="/dashboard" params={{ date }} mode={mode} />}
           <ModeTabs mode={mode} path="/dashboard" params={{ date }} />
           {mode === 'LIVE' && <input type="hidden" name="mode" value="live" />}
           {mode === 'LIVE' && exchange === 'BITUNIX' && <input type="hidden" name="exchange" value="bitunix" />}

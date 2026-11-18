@@ -100,7 +100,9 @@ interface Props {
 /** Adapted from the MagicPatterns TokenBlockEditor; persists through /v1/me/order-blocks. */
 export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [], copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
   /** The same rule as the server: Live needs a verified connection to the pair's exchange. */
-  const anyLive = liveUnavailableReason(liveConnectionStatus) === null || liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') === null;
+  // Live entries can be CONFIGURED with any verified exchange connection (a Lighter one included);
+  // activation is decided server-side.
+  const anyLive = liveUnavailableReason(liveConnectionStatus) === null || liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') === null || lighterConnectionStatus === 'VERIFIED';
   let liveReason = liveUnavailableReason(liveConnectionStatus);
   const liveConnected = anyLive;
   const savedMode = existing ? (existing.mode as BlockMode) : undefined;
@@ -356,13 +358,16 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
                   ? [{ value: copyFrom.mode, label: MODE_LABELS[copyFrom.mode] }]
                   : [
                       { value: 'PAPER' as const, label: 'Paper' },
-                      { value: 'LIVE' as const, label: liveConnected ? (bitunixConnectionStatus === 'VERIFIED' ? (liveConnectionStatus === 'VERIFIED' ? 'Live (MEXC / Bitunix)' : 'Live (Bitunix)') : 'Live (MEXC)') : 'Live — connect an exchange first', disabled: !liveConnected }
+                      { value: 'LIVE' as const, label: liveConnected
+                          ? `Live (${[liveConnectionStatus === 'VERIFIED' && 'MEXC', bitunixConnectionStatus === 'VERIFIED' && 'Bitunix', lighterConnectionStatus === 'VERIFIED' && 'Lighter'].filter(Boolean).join(' / ')})`
+                          : 'Live — connect an exchange first',
+                        disabled: !liveConnected }
                     ]
             }
             hint={
               mode === 'LIVE'
                 ? (instrument && !isTradableExchange(instrument.exchange) && !lighterLive
-                    ? `${exchangeName(instrument.exchange)} orders are not available yet: you can select and save this pair, but the entry cannot be activated until ${exchangeName(instrument.exchange)} trading is released.`
+                    ? `You can save this ${exchangeName(instrument.exchange)} Live entry now; it stays paused and can be activated once your ${exchangeName(instrument.exchange)} account is approved for Live and the contract is on the Live allowlist (see the reason above).`
                     : lighterLive
                       ? 'Live sends real orders to your own Lighter account (USDC) with a linked native stop loss.'
                       : `Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'} Futures account with the stop loss in the same request.`)

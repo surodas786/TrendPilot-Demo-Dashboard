@@ -36,7 +36,7 @@ export const isPaperExchange = (v: unknown): v is PaperExchangeId => typeof v ==
 /** Why an exchange cannot be connected or traded LIVE yet, or null when it can. */
 export function exchangeUnavailableReason(exchange: string | null | undefined): string | null {
   if (isTradableExchange(exchange)) return null;
-  if (exchange === 'LIGHTER') return 'Lighter Live trading is not available yet: Lighter pairs trade in Paper (simulated, USDC). You can connect and check a Lighter account; real Lighter orders come in a later release.';
+  if (exchange === 'LIGHTER') return 'Lighter Live is not enabled for this account yet: it needs a verified Lighter connection approved by an administrator, the Lighter contract on the Live allowlist and the deployment\'s Lighter Live settings. Lighter Paper is available.';
   return `Exchange ${exchange ?? '(none)'} is not supported.`;
 }
 

@@ -13,7 +13,7 @@ export interface MexcContractFixture extends Omit<ContractSpec, 'maxQty' | 'minN
   symbol: string;
   exchangeSymbol: string;
   base: string;
-  quote: 'USDT';
+  quote: 'USDT' | 'USDC';
   maxLeverage: number;
 }
 
@@ -31,7 +31,9 @@ export const MEXC_CONTRACT_FIXTURES: MexcContractFixture[] = [
   c('ETHUSDT', 'ETH', { contractMultiplier: '0.01', qtyStep: '1', minQty: '1', maxQty: '1000000', priceTick: '0.01', maxLeverage: 50 }),
   c('SOLUSDT', 'SOL', { contractMultiplier: '0.1', qtyStep: '1', minQty: '1', maxQty: '500000', priceTick: '0.001', maxLeverage: 20 }),
   c('XRPUSDT', 'XRP', { contractMultiplier: '10', qtyStep: '1', minQty: '1', maxQty: '500000', priceTick: '0.0001', maxLeverage: 10 }),
-  c('DOGEUSDT', 'DOGE', { contractMultiplier: '100', qtyStep: '1', minQty: '1', maxQty: '500000', priceTick: '0.00001', maxLeverage: 10 })
+  c('DOGEUSDT', 'DOGE', { contractMultiplier: '100', qtyStep: '1', minQty: '1', maxQty: '500000', priceTick: '0.00001', maxLeverage: 10 }),
+  // USDC-settled perpetual, values as MEXC's contract/detail reported them for XAU_USDC (2026-11-18).
+  { symbol: 'XAUUSDC', exchangeSymbol: 'XAU_USDC', base: 'XAU', quote: 'USDC', takerFeeRate: '0.0002', contractMultiplier: '0.001', qtyStep: '1', minQty: '1', maxQty: '48000', priceTick: '0.01', maxLeverage: 100 }
 ];
 
 /** Fixture top-of-book used by order previews. Static, labelled, never "live". */

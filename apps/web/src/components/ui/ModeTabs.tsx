@@ -8,8 +8,15 @@ export const viewModeOf = (v: string | undefined): ViewMode => (v?.toLowerCase()
 
 export type ViewExchange = 'MEXC' | 'BITUNIX' | 'LIGHTER';
 
-/** Live is reported per exchange: ?exchange=bitunix selects the Bitunix account, anything else MEXC. */
-export const viewExchangeOf = (v: string | undefined): ViewExchange => (v?.toLowerCase() === 'bitunix' ? 'BITUNIX' : 'MEXC');
+/** Live is reported per exchange account: ?exchange=bitunix (USDT) or ?exchange=lighter (USDC); anything else MEXC (USDT). */
+export const viewExchangeOf = (v: string | undefined): ViewExchange => (v?.toLowerCase() === 'bitunix' ? 'BITUNIX' : v?.toLowerCase() === 'lighter' ? 'LIGHTER' : 'MEXC');
+
+/** Live exchange accounts an investor can view: MEXC, plus each other exchange they have a connection for. */
+export const liveViewExchanges = (c: { bitunix?: { status: string } | null; lighter?: { status: string } | null }): ViewExchange[] => [
+  'MEXC',
+  ...(c.bitunix && c.bitunix.status !== 'REVOKED' ? (['BITUNIX'] as const) : []),
+  ...(c.lighter && c.lighter.status !== 'REVOKED' ? (['LIGHTER'] as const) : [])
+];
 
 /** Paper is reported per simulator account: ?exchange=lighter selects the Lighter (USDC) account, anything else MEXC (USDT). */
 export const paperExchangeOf = (v: string | undefined): ViewExchange => (v?.toLowerCase() === 'lighter' ? 'LIGHTER' : 'MEXC');
@@ -19,8 +26,8 @@ export const paperExchangeOf = (v: string | undefined): ViewExchange => (v?.toLo
  * account). Paper: MEXC (USDT) / Lighter (USDC) simulator accounts (shown when the investor has Lighter
  * Paper activity). Accounts in different currencies are never summed.
  */
-export function ExchangeTabs({ exchange, path, params = {}, mode = 'LIVE' }: { exchange: ViewExchange; path: string; params?: Record<string, string | undefined>; mode?: ViewMode }) {
-  const options: ViewExchange[] = mode === 'LIVE' ? ['MEXC', 'BITUNIX'] : ['MEXC', 'LIGHTER'];
+export function ExchangeTabs({ exchange, path, params = {}, mode = 'LIVE', options: given }: { exchange: ViewExchange; path: string; params?: Record<string, string | undefined>; mode?: ViewMode; options?: ViewExchange[] }) {
+  const options: ViewExchange[] = given ?? (mode === 'LIVE' ? ['MEXC', 'BITUNIX'] : ['MEXC', 'LIGHTER']);
   const href = (x: ViewExchange) => {
     const q = new URLSearchParams(Object.entries({ ...params, mode: mode === 'LIVE' ? 'live' : undefined, exchange: x === 'MEXC' ? undefined : x.toLowerCase() }).filter((e): e is [string, string] => !!e[1]));
     return `${path}${q.size ? `?${q}` : ''}`;
