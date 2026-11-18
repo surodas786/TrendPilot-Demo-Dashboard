@@ -64,6 +64,8 @@ export interface LighterMarket {
   priceDecimals: number;
   minBaseAmount: string;
   minQuoteAmount: string;
+  /** Largest order value in USDC (`order_quote_limit`); null when the catalog omits it. */
+  orderQuoteLimit: string | null;
   takerFee: string;
   makerFee: string;
   /** Margin fractions in 1/10000 (docs: leverage = 10000 / fraction). Null when not reported (spot). */
@@ -118,6 +120,7 @@ function parseMarket(raw: unknown, listedAs: 'perp' | 'spot'): LighterMarket {
     priceDecimals: int(m.price_decimals ?? m.supported_price_decimals, 'price_decimals', sym),
     minBaseAmount: dec(m.min_base_amount, 'min_base_amount', sym),
     minQuoteAmount: dec(m.min_quote_amount, 'min_quote_amount', sym),
+    orderQuoteLimit: m.order_quote_limit === undefined || m.order_quote_limit === null ? null : dec(m.order_quote_limit, 'order_quote_limit', sym),
     takerFee: dec(m.taker_fee, 'taker_fee', sym),
     makerFee: dec(m.maker_fee, 'maker_fee', sym),
     minInitialMarginFraction: optInt(m.min_initial_margin_fraction, 'min_initial_margin_fraction', sym),

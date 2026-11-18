@@ -17,18 +17,26 @@ export const EXCHANGE_LABEL: Record<ExchangeId, string> = { MEXC: 'MEXC', BITUNI
 export const exchangeLabel = (exchange: string | null | undefined): string => (exchange && isExchangeId(exchange) ? EXCHANGE_LABEL[exchange] : (exchange ?? ''));
 
 /**
- * Exchanges TrendPilot can connect to and trade on. Lighter is registered for market discovery and
- * pair selection only (Step 1 of the Lighter plan): no connection, no prices, no orders. Every Live
- * and connection path refuses an exchange that is not listed here, instead of treating it as MEXC.
+ * Exchanges TrendPilot can trade Live on. Lighter is not listed: its pairs trade in Paper, and an
+ * investor can connect and verify a Lighter account (Lighter plan Step 4), but every Live ENTRY path
+ * refuses an exchange that is not listed here, instead of treating it as MEXC.
  */
 export const TRADABLE_EXCHANGES = ['MEXC', 'BITUNIX'] as const satisfies readonly ExchangeId[];
 export type TradableExchangeId = (typeof TRADABLE_EXCHANGES)[number];
 export const isTradableExchange = (v: unknown): v is TradableExchangeId => typeof v === 'string' && (TRADABLE_EXCHANGES as readonly string[]).includes(v);
 
-/** Why an exchange cannot be connected or traded yet, or null when it can. */
+/**
+ * Exchanges with a Paper simulator account: MEXC (USDT) and Lighter (USDC, isolated balance; Lighter
+ * plan Step 3). Bitunix is Live only. Paper never reaches an exchange.
+ */
+export const PAPER_EXCHANGES = ['MEXC', 'LIGHTER'] as const satisfies readonly ExchangeId[];
+export type PaperExchangeId = (typeof PAPER_EXCHANGES)[number];
+export const isPaperExchange = (v: unknown): v is PaperExchangeId => typeof v === 'string' && (PAPER_EXCHANGES as readonly string[]).includes(v);
+
+/** Why an exchange cannot be connected or traded LIVE yet, or null when it can. */
 export function exchangeUnavailableReason(exchange: string | null | undefined): string | null {
   if (isTradableExchange(exchange)) return null;
-  if (exchange === 'LIGHTER') return 'Lighter trading is not available yet: Lighter markets can be published and selected, but connecting a Lighter account, prices and orders come in a later release.';
+  if (exchange === 'LIGHTER') return 'Lighter Live trading is not available yet: Lighter pairs trade in Paper (simulated, USDC). You can connect and check a Lighter account; real Lighter orders come in a later release.';
   return `Exchange ${exchange ?? '(none)'} is not supported.`;
 }
 

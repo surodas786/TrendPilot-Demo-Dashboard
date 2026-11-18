@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm';
-import { Decimal, exchangeUnavailableReason, isTradableExchange, PAPER_POLICY } from '@trendpilot/domain';
+import { Decimal, exchangeUnavailableReason, isPaperExchange, isTradableExchange, PAPER_POLICY } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { ledgerEntries, paperAccounts } from '../schema';
 
@@ -45,29 +45,41 @@ export async function book(tx: Executor, account: Pick<PaperAccountRow, 'id' | '
 }
 
 export type AccountMode = 'PAPER' | 'LIVE';
-export type AccountExchange = 'MEXC' | 'BITUNIX';
+export type AccountExchange = 'MEXC' | 'BITUNIX' | 'LIGHTER';
 
-/** The account an order uses: Live trades on the instrument's exchange; Paper is always MEXC. */
+/**
+ * The account an order uses. Live trades on the instrument's exchange (MEXC or Bitunix). Paper uses
+ * the MEXC Paper account (USDT), except Lighter pairs, which use their own isolated Lighter Paper
+ * account (USDC). An exchange that cannot trade Live (Lighter) never maps to any Live account.
+ */
 export const accountExchangeFor = (mode: string, instrumentExchange: string | null | undefined): AccountExchange => {
-  // Never map an exchange TrendPilot cannot trade (Lighter) onto the MEXC account.
-  if (instrumentExchange && !isTradableExchange(instrumentExchange)) throw new Error(exchangeUnavailableReason(instrumentExchange) ?? 'exchange not tradable');
-  return mode === 'LIVE' && instrumentExchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+  if (mode === 'LIVE') {
+    if (instrumentExchange && !isTradableExchange(instrumentExchange)) throw new Error(exchangeUnavailableReason(instrumentExchange) ?? 'exchange not tradable');
+    return instrumentExchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+  }
+  return instrumentExchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC';
 };
+
+/** Settlement currency of an account: Lighter Paper is USDC; MEXC and Bitunix accounts are USDT. */
+export const accountCurrencyFor = (exchange: AccountExchange): 'USDT' | 'USDC' => (exchange === 'LIGHTER' ? 'USDC' : 'USDT');
 
 /**
  * Locks (creating on first use) the investor's account for a mode and exchange. All reservations go through
  * this lock. A PAPER account starts with the fixture balance; a LIVE account starts at zero and
  * follows the synced MEXC balance (`syncLiveBalance`).
  */
-export async function lockPaperAccount(tx: Executor, ownerId: string, mode: AccountMode = 'PAPER', exchange: AccountExchange = 'MEXC'): Promise<PaperAccountRow> {
-  if (mode === 'PAPER' && exchange !== 'MEXC') throw new Error('Paper accounts are MEXC accounts.');
+export async function lockPaperAccount(tx: Executor, ownerId: string, mode: AccountMode = 'PAPER', exchange: AccountExchange = 'MEXC', o: { lighterLiveLedger?: boolean } = {}): Promise<PaperAccountRow> {
+  if (mode === 'PAPER' && !isPaperExchange(exchange)) throw new Error('Paper accounts are MEXC or Lighter accounts.');
+  // A Live Lighter account (USDC) exists only to follow a VERIFIED Lighter connection's snapshot
+  // (Step 4 sync, explicit opt-in). Every other path — and every Live Lighter entry — is refused.
+  if (mode === 'LIVE' && exchange === 'LIGHTER' && !o.lighterLiveLedger) throw new Error(exchangeUnavailableReason('LIGHTER') ?? 'Lighter Live is not available');
   const inserted = await tx
     .insert(paperAccounts)
-    .values({ ownerId, mode, exchange, walletBalance: '0' })
+    .values({ ownerId, mode, exchange, walletBalance: '0', currency: accountCurrencyFor(exchange) })
     .onConflictDoNothing({ target: [paperAccounts.ownerId, paperAccounts.mode, paperAccounts.exchange] })
     .returning();
   if (inserted[0] && mode === 'PAPER') {
-    await book(tx, inserted[0], [{ kind: 'OPENING_BALANCE', bucket: 'WALLET', amount: PAPER_POLICY.startingBalanceUsdt, refType: 'paper_account', refId: inserted[0].id, memo: 'Fixture paper balance' }]);
+    await book(tx, inserted[0], [{ kind: 'OPENING_BALANCE', bucket: 'WALLET', amount: PAPER_POLICY.startingBalanceUsdt, refType: 'paper_account', refId: inserted[0].id, memo: exchange === 'LIGHTER' ? 'Fixture paper balance (USDC, Lighter Paper)' : 'Fixture paper balance' }]);
   }
   const [row] = await tx
     .select()

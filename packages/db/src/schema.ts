@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
+  pgSequence,
   primaryKey,
   check,
   index,
@@ -104,6 +106,8 @@ export const instruments = pgTable(
     exchangeMarketId: integer('exchange_market_id'),
     /** Minimum order value in the settlement currency, when the exchange reports one (Lighter `min_quote_amount`). */
     minNotional: numeric('min_notional', { precision: 28, scale: 12 }),
+    /** Maximum order value in the settlement currency, when the exchange reports one (Lighter `order_quote_limit`). */
+    maxNotional: numeric('max_notional', { precision: 28, scale: 12 }),
     leverageChoices: integer('leverage_choices').array().notNull(),
     suggestedStopPct: numeric('suggested_stop_pct', { precision: 10, scale: 4 }).notNull(),
     suggestedTakeProfitPct: numeric('suggested_take_profit_pct', { precision: 10, scale: 4 }).notNull(),
@@ -422,7 +426,7 @@ export const signalRouteTargets = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt()
   },
-  (t) => [uniqueIndex('signal_route_targets_route_exchange_key').on(t.routeId, t.exchange), check('signal_route_targets_exchange_valid', sql`${t.exchange} IN ('BITUNIX')`)]
+  (t) => [uniqueIndex('signal_route_targets_route_exchange_key').on(t.routeId, t.exchange), check('signal_route_targets_exchange_valid', sql`${t.exchange} IN ('BITUNIX', 'LIGHTER')`)]
 );
 
 export const signalEvents = pgTable(
@@ -623,7 +627,9 @@ export const paperAccounts = pgTable(
   },
   (t) => [
     uniqueIndex('paper_accounts_owner_mode_exchange_key').on(t.ownerId, t.mode, t.exchange),
-    check('paper_accounts_exchange_valid', sql`${t.exchange} IN ('MEXC', 'BITUNIX') AND (${t.mode} = 'LIVE' OR ${t.exchange} = 'MEXC')`),
+    // Live: MEXC, Bitunix or Lighter (USDC; Lighter plan Step 4 — the account follows the Lighter
+    // snapshot; Lighter Live ENTRIES stay refused in code). Paper: MEXC (USDT) or Lighter (USDC, isolated).
+    check('paper_accounts_exchange_valid', sql`(${t.mode} = 'LIVE' AND ${t.exchange} IN ('MEXC', 'BITUNIX', 'LIGHTER')) OR (${t.mode} = 'PAPER' AND ${t.exchange} IN ('MEXC', 'LIGHTER'))`),
     check('paper_accounts_nonnegative', sql`${t.walletBalance} >= 0 AND ${t.positionMargin} >= 0 AND ${t.orderReserve} >= 0`)
   ]
 );
@@ -1234,6 +1240,15 @@ export const exchangeConnections = pgTable(
     accountState: jsonb('account_state').notNull().default({}),
     /** Bitunix private WebSocket health (auth, connected, last message, reconnects). Separate from the public feed. */
     streamState: jsonb('stream_state').notNull().default({}),
+    /**
+     * Lighter only (Step 4): the account the API key signs for. Lighter has no API "key" string to
+     * fingerprint: `apiKeySealed` holds the sealed API PRIVATE key, `secretSealed` a sealed marker.
+     * Environment, account index and API key index are not secret and are queryable so one Lighter
+     * account can never be attached to two investors.
+     */
+    venueEnvironment: text('venue_environment'),
+    venueAccountIndex: bigint('venue_account_index', { mode: 'number' }),
+    venueApiKeyIndex: integer('venue_api_key_index'),
     revision: integer('revision').notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt()
@@ -1241,7 +1256,16 @@ export const exchangeConnections = pgTable(
   (t) => [
     // One connection per investor AND exchange: a Bitunix key sits next to the MEXC key.
     uniqueIndex('exchange_connections_owner_exchange_key').on(t.ownerId, t.exchange),
-    check('exchange_connections_exchange_valid', sql`${t.exchange} IN ('MEXC', 'BITUNIX')`),
+    check('exchange_connections_exchange_valid', sql`${t.exchange} IN ('MEXC', 'BITUNIX', 'LIGHTER')`),
+    check(
+      'exchange_connections_lighter_identity',
+      sql`${t.exchange} <> 'LIGHTER' OR (${t.venueEnvironment} IN ('MAINNET', 'TESTNET') AND ${t.venueAccountIndex} >= 0 AND ${t.venueApiKeyIndex} BETWEEN 4 AND 254)`
+    ),
+    // One investor per Lighter account (any API key of it). Only a VERIFIED connection (its key proven
+    // to be the account's registered key) holds the account, so nobody can squat an index they typed.
+    uniqueIndex('exchange_connections_lighter_account_key')
+      .on(t.venueEnvironment, t.venueAccountIndex)
+      .where(sql`${t.exchange} = 'LIGHTER' AND ${t.status} = 'VERIFIED'`),
     check('exchange_connections_status_valid', sql`${t.status} IN ('PENDING', 'VERIFIED', 'FAILED', 'REVOKED')`),
     check('exchange_connections_position_mode_valid', sql`${t.positionMode} IS NULL OR ${t.positionMode} IN ('ONE_WAY', 'HEDGE')`),
     check(
@@ -1384,5 +1408,82 @@ export const exchangeAccountEvents = pgTable(
     index('exchange_account_events_connection_idx').on(t.connectionId, t.createdAt),
     check('exchange_account_events_origin_valid', sql`${t.origin} IN ('EXCHANGE', 'TRENDPILOT')`),
     check('exchange_account_events_source_valid', sql`${t.source} IN ('REST', 'WS', 'HISTORY')`)
+  ]
+);
+
+/* ───────────────────────── Lighter private execution state (Lighter plan Step 4) ───────────────────────── */
+
+/**
+ * Lighter `clientOrderIndex` (uint48, unique across all markets of an account). One database
+ * sequence for every Lighter account: an index is never reused, across processes and restarts.
+ */
+export const lighterClientOrderIndexSeq = pgSequence('lighter_client_order_index_seq', { startWith: 1000, increment: 1, minValue: 1, maxValue: 281474976710655 });
+
+/**
+ * Nonce stream of one Lighter API key (nonces are per account index AND API key index). Every
+ * signed transaction is sent by the holder of this row's lease, in nonce order, so workers sharing
+ * the key never race. `next_nonce` null = unknown: read `nextNonce` from Lighter before signing.
+ */
+export const lighterNonces = pgTable(
+  'lighter_nonces',
+  {
+    environment: text('environment').notNull(),
+    accountIndex: bigint('account_index', { mode: 'number' }).notNull(),
+    apiKeyIndex: integer('api_key_index').notNull(),
+    nextNonce: bigint('next_nonce', { mode: 'number' }),
+    leaseOwner: text('lease_owner'),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    refreshedAt: timestamp('refreshed_at', { withTimezone: true }),
+    updatedAt: updatedAt()
+  },
+  (t) => [primaryKey({ columns: [t.environment, t.accountIndex, t.apiKeyIndex] }), check('lighter_nonces_next_valid', sql`${t.nextNonce} IS NULL OR ${t.nextNonce} >= 0`)]
+);
+
+/**
+ * One signed Lighter transaction per TrendPilot order action, persisted BEFORE signing. Its nonce,
+ * client order indexes and transaction hash never change once recorded, so an uncertain outcome is
+ * reconciled (transaction status, next nonce, orders) and resent only with the SAME nonce — never
+ * re-signed with a new one. The signed payload itself is never stored.
+ */
+export const lighterTxs = pgTable(
+  'lighter_txs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    ownerId: uuid('owner_id')
+      .notNull()
+      .references(() => users.id),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => exchangeConnections.id),
+    environment: text('environment').notNull(),
+    accountIndex: bigint('account_index', { mode: 'number' }).notNull(),
+    apiKeyIndex: integer('api_key_index').notNull(),
+    /** TrendPilot's order ID for this action (the intent's client order ID, or a stop-resize ID). */
+    clientOrderId: text('client_order_id').notNull(),
+    purpose: text('purpose').notNull(),
+    marketId: integer('market_id').notNull(),
+    clientOrderIndex: bigint('client_order_index', { mode: 'number' }).notNull(),
+    /** OPEN_WITH_STOP: the linked reduce-only stop's index. */
+    stopClientOrderIndex: bigint('stop_client_order_index', { mode: 'number' }),
+    nonce: bigint('nonce', { mode: 'number' }),
+    txType: integer('tx_type').notNull(),
+    txHash: text('tx_hash'),
+    state: text('state').notNull().default('PREPARED'),
+    /** The order fields as integers (no signature, no key). */
+    request: jsonb('request').notNull(),
+    /** Last Lighter answer (code, message, tx status) and reconciliation notes. */
+    response: jsonb('response').notNull().default({}),
+    attempts: integer('attempts').notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [
+    uniqueIndex('lighter_txs_client_order_id_key').on(t.connectionId, t.clientOrderId),
+    // A new order's index is never reused; a STOP_RESIZE (ModifyOrder) targets the stop's existing index.
+    uniqueIndex('lighter_txs_client_order_index_key').on(t.environment, t.accountIndex, t.clientOrderIndex).where(sql`${t.purpose} <> 'STOP_RESIZE'`),
+    index('lighter_txs_key_state_idx').on(t.environment, t.accountIndex, t.apiKeyIndex, t.state),
+    check('lighter_txs_purpose_valid', sql`${t.purpose} IN ('OPEN_WITH_STOP', 'CLOSE', 'STOP_RESIZE')`),
+    check('lighter_txs_state_valid', sql`${t.state} IN ('PREPARED', 'SENDING', 'ACCEPTED', 'API_REJECTED', 'EXECUTED', 'FAILED', 'UNKNOWN')`),
+    check('lighter_txs_client_order_index_valid', sql`${t.clientOrderIndex} BETWEEN 1 AND 281474976710655`)
   ]
 );

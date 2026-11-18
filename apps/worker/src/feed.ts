@@ -5,6 +5,11 @@ import {
   BitunixKlineSource,
   BitunixPriceStream,
   BitunixQuoteWriter,
+  LIGHTER_MAINNET_BASE_URL,
+  LIGHTER_WS_MAINNET_URL,
+  LighterKlineSource,
+  LighterPriceStream,
+  LighterQuoteWriter,
   BITUNIX_WS_PUBLIC_URL,
   createDb,
   ExchangePriceCache,
@@ -67,6 +72,12 @@ export interface FeedConfig {
    * `enabled` is true for on and auto. Quotes are stored only for Bitunix instruments.
    */
   bitunix: { enabled: boolean; mode: 'on' | 'off' | 'auto'; wsUrl: string; symbols: string[] };
+  /**
+   * Lighter public prices and candles (Ethereum mainnet only). LIGHTER_PUBLIC_WS: `auto` (default)
+   * starts once a Lighter instrument is published (or holds an open position), `on` the same from
+   * startup, `off` never. Markets are the published Lighter instruments' catalog market IDs.
+   */
+  lighter: { enabled: boolean; mode: 'on' | 'off' | 'auto'; wsUrl: string; baseUrl: string };
 }
 
 export function feedConfig(env: Record<string, string | undefined>): FeedConfig {
@@ -86,12 +97,22 @@ export function feedConfig(env: Record<string, string | undefined>): FeedConfig 
   const bxSymbols = (env.BITUNIX_WS_SYMBOLS || (bx === 'auto' ? '' : 'BTCUSDT,XAUUSDT')).split(',').map((x) => x.trim()).filter(Boolean);
   const badSymbol = bxSymbols.find((x) => !bitunixSymbolFor(x));
   if (badSymbol !== undefined) throw new Error(`BITUNIX_WS_SYMBOLS has an invalid symbol "${badSymbol}" (use e.g. BTCUSDT,XAUUSDT).`);
+  const lx = (env.LIGHTER_PUBLIC_WS || 'auto').trim().toLowerCase();
+  if (lx !== 'on' && lx !== 'off' && lx !== 'auto') throw new Error(`LIGHTER_PUBLIC_WS must be "auto", "on" or "off" (got "${lx}").`);
+  // Only the Ethereum-based mainnet (the environment Lighter markets are registered for); a local
+  // ws:// / http:// endpoint is accepted outside production for tests.
+  const local = (u: string, scheme: 'ws' | 'http') => env.NODE_ENV !== 'production' && (scheme === 'ws' ? /^ws:\/\/(127\.0\.0\.1|localhost)[:/]/ : /^http:\/\/(127\.0\.0\.1|localhost)[:/]/).test(u);
+  const lxUrl = env.LIGHTER_PUBLIC_WS_URL || LIGHTER_WS_MAINNET_URL;
+  if (lxUrl !== LIGHTER_WS_MAINNET_URL && !local(lxUrl, 'ws')) throw new Error(`LIGHTER_PUBLIC_WS_URL must be the Lighter mainnet stream ${LIGHTER_WS_MAINNET_URL} (got "${lxUrl}").`);
+  const lxBase = (env.LIGHTER_PUBLIC_BASE_URL || LIGHTER_MAINNET_BASE_URL).replace(/\/+$/, '');
+  if (lxBase !== LIGHTER_MAINNET_BASE_URL && !local(lxBase, 'http')) throw new Error(`LIGHTER_PUBLIC_BASE_URL must be ${LIGHTER_MAINNET_BASE_URL} (got "${lxBase}").`);
   return {
     tickerSource,
     wsUrl,
     restFallback: { enabled: fb === 'on', minIntervalMs },
     logTicks: env.MARKET_FEED_LOG_TICKS === '1',
     drillDisconnectAfterS: Number.isFinite(drill) && drill > 0 ? drill : null,
+    lighter: { enabled: lx !== 'off', mode: lx, wsUrl: lxUrl, baseUrl: lxBase },
     bitunix: { enabled: bx !== 'off', mode: bx, wsUrl: bxUrl, symbols: [...new Set(bxSymbols.map((x) => bitunixSymbolFor(x)!))] }
   };
 }
@@ -345,6 +366,61 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
     };
   };
 
+  // Lighter public prices (mainnet, by market ID): own socket, own cache entries (LIGHTER:MAINNET/<id>),
+  // quotes stored only on Lighter instruments as LIGHTER_PUBLIC; closed 5m/15m candles from REST.
+  const lighterQuotes = new LighterQuoteWriter(handle.db, prices, { log: (m) => log(`lighter ${m}`) });
+  let lighter: LighterPriceStream | null = null;
+  let lighterCandles: MarketFeed | null = null;
+  let lastLighterCandles = 0;
+  let lighterCandleSummary: unknown = null;
+  let warnedLighterOff = false;
+  const ensureLighter = async () => {
+    const before = lighterQuotes.markets();
+    const markets = await lighterQuotes.refresh();
+    for (const m of before) if (!markets.includes(m)) lighterQuotes.forget(m);
+    if (lighter) return lighter.setSymbols(markets);
+    if (!cfg.lighter.enabled) {
+      if (!warnedLighterOff && markets.length) {
+        warnedLighterOff = true;
+        log(`WARNING: Lighter instruments exist (markets ${markets.join(', ')}) but LIGHTER_PUBLIC_WS=off: they get no prices or candles.`);
+      }
+      return;
+    }
+    if (!markets.length) return;
+    lighterCandles = new MarketFeed(handle.db, { source: new LighterKlineSource({ baseUrl: cfg.lighter.baseUrl }), exchange: 'LIGHTER', log: (m) => log(`lighter candles: ${m}`) });
+    lighter = new LighterPriceStream({
+      url: cfg.lighter.wsUrl,
+      factory: o.wsFactory,
+      log: (m) => log(`lighter ${m}`),
+      logTicks: cfg.logTicks,
+      onTicker: (t) => {
+        if (lighterQuotes.onTicker(t)) void lighterQuotes.onUpdate(t.marketId);
+      },
+      onStats: (s) => {
+        if (lighterQuotes.onStats(s)) void lighterQuotes.onUpdate(s.marketId);
+      }
+    });
+    lighter.setSymbols(markets);
+    lighter.start();
+    log(`Lighter public prices (LIGHTER_PUBLIC_WS=${cfg.lighter.mode}): WebSocket ${cfg.lighter.wsUrl} for market(s) ${markets.join(', ')}; candles from ${cfg.lighter.baseUrl}`);
+  };
+  await ensureLighter();
+  if (!lighter && cfg.lighter.mode === 'auto') log('Lighter public prices: auto (no Lighter instrument yet; the stream starts when one is published)');
+  const lighterDetail = () => {
+    if (!lighter) return null;
+    const at = new Date();
+    return {
+      mode: cfg.lighter.mode,
+      environment: 'MAINNET',
+      stream: { ...lighter.status(), errorsReceived: lighter.errorsReceived, skippedFrames: lighter.skippedFrames },
+      quotesWritten: lighterQuotes.written,
+      quotes: lighterQuotes.markets().map((m) => {
+        const q = lighterQuotes.quote(m, at);
+        return { marketId: m, state: q.state, problem: q.problem, bid: q.bid, ask: q.ask, last: q.last, mark: q.mark, index: q.index, asOf: q.asOf?.toISOString() ?? null };
+      })
+    };
+  };
+
   let busy: Promise<void> = Promise.resolve();
   let lastLine = '';
   let lastBeat = 0;
@@ -355,6 +431,13 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
       // Subscribe newly published contracts first, so their tickers do not wait for REST backfill.
       if (stream) stream.setSymbols(await feed.refreshCoverage());
       await ensureBitunix();
+      await ensureLighter();
+      if (lighterCandles && Date.now() - lastLighterCandles >= 15_000) {
+        lastLighterCandles = Date.now();
+        const r = await lighterCandles.candleCycle();
+        lighterCandleSummary = r;
+        for (const x of r) if (x.error || x.backfilled) log(`lighter candles ${x.symbol} ${x.interval}m: written=${x.written} backfilled=${x.backfilled}${x.error ? ` error="${x.error}"` : ''}`);
+      }
       if (bitunixCandles && Date.now() - lastBitunixCandles >= 15_000) {
         lastBitunixCandles = Date.now();
         const r = await bitunixCandles.candleCycle();
@@ -376,7 +459,8 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
           restCalls: { ...(source.requestCounts ?? {}) },
           restPausedUntil: paused ? new Date(paused).toISOString() : null,
           contracts: s.instruments.map((r) => ({ symbol: r.symbol, state: r.state, error: r.error ?? null })),
-          ...(bitunix ? { bitunix: { ...bitunixDetail(), candles: bitunixCandleSummary } } : {})
+          ...(bitunix ? { bitunix: { ...bitunixDetail(), candles: bitunixCandleSummary } } : {}),
+          ...(lighter ? { lighter: { ...lighterDetail(), candles: lighterCandleSummary } } : {})
         };
         await heartbeat(handle.db, { service: 'market-feed', instance, startedAt, detail }).catch((e) => log(`heartbeat failed: ${(e as Error).message}`));
       }
@@ -412,6 +496,7 @@ export async function startFeed(o: FeedProcessOptions = {}): Promise<RunningFeed
       if (drillTimer) clearTimeout(drillTimer);
       stream?.stop();
       bitunix?.stop();
+      lighter?.stop();
       await busy;
       await queue?.settled();
       await markStopped(handle.db, 'market-feed', instance).catch(() => undefined);

@@ -5,7 +5,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, FlaskConicalIcon } from 'lucide-re
 import { exchangeLabel, type OrderPreview } from '@trendpilot/domain';
 import { StatusPill } from '../ui/StatusPill';
 
-export type PreviewResult = OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null } };
+export type PreviewResult = OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null; exchange?: string; quoteCurrency?: string } };
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -30,6 +30,8 @@ export function PreviewPanel({ preview }: { preview: PreviewResult }) {
         )}
         <span className="text-xs text-muted">
           {preview.instrument.exchangeSymbol} · bid {preview.quote.bid} · ask {preview.quote.ask} · mark {preview.quote.mark}
+          {preview.instrument.quoteCurrency ? ` ${preview.instrument.quoteCurrency}` : ''}
+          {preview.quote.asOf ? ` · price time ${new Date(preview.quote.asOf).toISOString().slice(11, 19)} UTC` : ''}
         </span>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">

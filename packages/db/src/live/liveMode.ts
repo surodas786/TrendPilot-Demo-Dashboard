@@ -31,6 +31,10 @@ import { MexcHttpTransport, MexcPrivateError, MEXC_PRIVATE_DEFAULT_BASE_URL, nor
 import { mexcVenue, POSITION_MODE_MISMATCH, positionModeOf, UncertainSubmissionError } from './mexcVenue';
 import { bitunixCredentialsOf } from './bitunixConnection';
 import { BitunixOrderTransport, bitunixVenue, type BitunixOrderRequester } from './bitunixOrders';
+import { lighterApiFor, lighterLiveInputs, lighterScopeOf, lighterSeamActive, lighterSignerFor } from './lighterConnection';
+import { openLighterOrderTransport } from './lighterPrivate';
+import { lighterVenue } from './lighterOrders';
+import { lighterMarketOf } from './lighterSync';
 
 /**
  * Live mode (OPS-01/02/03): exchange connections, the platform switch, the contract allowlist,
@@ -138,8 +142,8 @@ export async function liveEntryEligibility(
 ): Promise<LiveEligibility> {
   const control = await getLiveControl(tx);
   const [inst] = await tx.select({ liveAllowed: instruments.liveAllowed, multiplier: instruments.contractMultiplier, exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, r.instrumentId));
-  // The connection of the exchange the contract trades on (MEXC, or the investor's Bitunix key).
-  const conn = await connectionFor(tx, r.ownerId, inst?.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC');
+  // The connection of the exchange the contract trades on (MEXC, or the investor's Bitunix / Lighter key).
+  const conn = await connectionFor(tx, r.ownerId, inst?.exchange === 'BITUNIX' ? 'BITUNIX' : inst?.exchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC');
   const state = controlState(control);
   const cs = conn ? connectionState(conn) : null;
   const verdict = checkLiveEntry(state, cs, {
@@ -157,6 +161,9 @@ export async function liveEntryEligibility(
   const blockers = account.length ? account : [verdict.reason];
   return { verdict, reasonText: blockers.map((b) => LIVE_REFUSAL_TEXT[b]).join(' '), blockers };
 }
+
+/** Lighter Live approval and activation are refused in this build (Lighter plan Step 4). */
+export const LIGHTER_LIVE_DISABLED = 'Lighter Live trading is not enabled in this release: the Lighter signer and order capabilities are still being verified. Your Lighter connection is kept for verification and sync only.';
 
 /* ───────────────────────── Capabilities ───────────────────────── */
 
@@ -205,11 +212,40 @@ export async function resolveAccountVenue(
   if (!acct || acct.mode !== 'LIVE') throw new LiveVenueUnavailable('the order does not belong to a Live account');
   // IAM-02 in the worker: the order's owner must own the account (and so the connection).
   if (scope.ownerId && acct.ownerId !== scope.ownerId) throw new LiveVenueUnavailable('ownership mismatch');
-  const exchange: ExchangeId = acct.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+  const exchange: ExchangeId = acct.exchange === 'BITUNIX' ? 'BITUNIX' : acct.exchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC';
   const conn = await connectionFor(db, acct.ownerId, exchange);
   if (!conn || conn.status === 'REVOKED' || !conn.apiKeySealed) throw new LiveVenueUnavailable('no exchange connection');
   if (!conn.positionMode) throw new LiveVenueUnavailable('position mode not verified');
   const control = await getLiveControl(db);
+  if (exchange === 'LIGHTER') {
+    // Lighter (Step 4): the deployment transport AND this build's mainnet switch must allow orders
+    // (refused in this build); tests replace the API and signer through the Lighter seam.
+    if (conn.status !== 'VERIFIED') throw new LiveVenueUnavailable('the Lighter connection is not verified');
+    // Testnet connections exist only for the isolated testnet check; they never reach Live execution.
+    if (conn.venueEnvironment !== 'MAINNET') throw new LiveVenueUnavailable('a Lighter testnet connection never reaches the Live execution path');
+    if (!lighterSeamActive()) {
+      try {
+        openLighterOrderTransport('MAINNET', env);
+      } catch (e) {
+        throw new LiveVenueUnavailable((e as Error).message);
+      }
+    }
+    const inner = lighterVenue({
+      db,
+      scope: lighterScopeOf(conn),
+      api: lighterApiFor(conn, env),
+      signer: lighterSignerFor(conn),
+      inputs: lighterLiveInputs(env),
+      capabilities: capabilityStateOf(control),
+      marketFor: async (instrumentId) => {
+        const [i] = await db.select().from(instruments).where(eq(instruments.id, instrumentId));
+        if (!i || i.exchange !== 'LIGHTER' || i.exchangeMarketId === null) throw new LiveVenueUnavailable(`instrument ${instrumentId} is not a Lighter market`);
+        return lighterMarketOf(i);
+      },
+      ...(seam?.confirm ? { confirm: seam.confirm, sleep: async () => {} } : {})
+    });
+    return liveGuardedVenue(db, inner, { paperAccountId: acct.id, ownerId: acct.ownerId, env, exchange });
+  }
   if (exchange === 'BITUNIX') {
     // Bitunix: the order transport is opened with THIS connection's key; it refuses unless
     // LIVE_ORDER_TRANSPORT=enabled in production (same deployment gate as MEXC).
@@ -308,7 +344,9 @@ export function liveGuardedVenue(db: Db, inner: ExecutionVenue, o: { paperAccoun
       }
       if (result.status === 'FILLED') {
         const prot = await inner.inspectProtection(result.stop.orderId, r.instrumentId);
-        if (!prot || prot.status !== 'ACTIVE' || !prot.reduceOnly) await halt(`PROTECTION_FAILURE ${r.clientOrderId}`);
+        // Lighter: the stop must also cover exactly the confirmed filled size (partial fills).
+        const sizeOk = inner.kind !== 'LIGHTER_PRIVATE' || (!!prot && new Decimal(prot.contracts).eq(result.fill.contracts));
+        if (!prot || prot.status !== 'ACTIVE' || !prot.reduceOnly || !sizeOk) await halt(`PROTECTION_FAILURE ${r.clientOrderId}`);
       }
       return result;
     }
@@ -331,10 +369,10 @@ export async function applyExchangeBalance(
   exchange: AccountExchange = LIVE_EXCHANGE
 ): Promise<{ accountId: string; walletAdjustment: string }> {
   return db.transaction(async (tx) => {
-    const a = await lockPaperAccount(tx, ownerId, 'LIVE', exchange);
+    const a = await lockPaperAccount(tx, ownerId, 'LIVE', exchange, { lighterLiveLedger: exchange === 'LIGHTER' });
     const delta = new Decimal(usdt.equity).minus(usdt.unrealized).minus(a.walletBalance);
     if (!delta.isZero()) {
-      await book(tx, a, [{ kind: 'EXCHANGE_BALANCE_SYNC', bucket: 'WALLET', amount: delta.toFixed(), refType: 'exchange_sync', refId, memo: `Wallet matched to the ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} balance (fees, funding and P&L as booked by the exchange)` }]);
+      await book(tx, a, [{ kind: 'EXCHANGE_BALANCE_SYNC', bucket: 'WALLET', amount: delta.toFixed(), refType: 'exchange_sync', refId, memo: `Wallet matched to the ${exchange === 'BITUNIX' ? 'Bitunix' : exchange === 'LIGHTER' ? 'Lighter (USDC)' : 'MEXC'} balance (fees, funding and P&L as booked by the exchange)` }]);
     }
     await tx.update(paperAccounts).set({ exchangeEquity: usdt.equity, exchangeAvailable: usdt.availableOpen, exchangeSyncedAt: now, updatedAt: sql`now()` }).where(eq(paperAccounts.id, a.id));
     return { accountId: a.id, walletAdjustment: delta.toFixed() };
@@ -364,6 +402,8 @@ export interface ConnectionDto {
   /** Last sync that completed every MEXC query. */
   lastSyncOkAt: string | null;
   drift: unknown[];
+  /** Lighter: environment, account index and API key index (not secret). Null for MEXC / Bitunix. */
+  venue: { environment: string; accountIndex: number; apiKeyIndex: number } | null;
   revision: number;
 }
 
@@ -388,6 +428,7 @@ export const connectionDto = (c: ConnectionRow): ConnectionDto => ({
   lastSyncError: c.lastSyncError,
   lastSyncOkAt: c.lastSyncOkAt?.toISOString() ?? null,
   drift: (c.drift ?? []) as unknown[],
+  venue: c.venueEnvironment && c.venueAccountIndex !== null && c.venueApiKeyIndex !== null ? { environment: c.venueEnvironment, accountIndex: c.venueAccountIndex, apiKeyIndex: c.venueApiKeyIndex } : null,
   revision: c.revision
 });
 
@@ -533,6 +574,7 @@ export async function setLiveActivation(db: Db, ownerId: string, enabled: boolea
       .for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'No exchange connection is set up.');
     if (enabled) {
+      if (exchange === 'LIGHTER') throw new DomainError(409, ErrorCode.CONFLICT, LIGHTER_LIVE_DISABLED);
       if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Verify the exchange connection first.');
       if (!conn.approvedAt) throw new DomainError(409, ErrorCode.CONFLICT, `An administrator must approve this ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} account and set its limits first.`);
       if (exchange === 'BITUNIX' && conn.positionMode !== 'HEDGE') throw new DomainError(409, ErrorCode.CONFLICT, 'Bitunix Live trading needs the account in Hedge mode (Bitunix reports another mode). Change it in Bitunix, then check the connection again.');
@@ -567,6 +609,7 @@ export async function approveConnection(db: Db, adminId: string, connectionId: s
     const [conn] = await tx.select().from(exchangeConnections).where(eq(exchangeConnections.id, connectionId)).for('update');
     if (!conn || conn.status === 'REVOKED') throw new DomainError(404, ErrorCode.NOT_FOUND, 'Exchange connection not found.');
     if (conn.status !== 'VERIFIED') throw new DomainError(409, ErrorCode.CONFLICT, 'Only a verified connection can be approved.');
+    if (conn.exchange === 'LIGHTER') throw new DomainError(409, ErrorCode.CONFLICT, LIGHTER_LIVE_DISABLED);
     const before = limitsOf(conn);
     const [u] = await tx
       .update(exchangeConnections)

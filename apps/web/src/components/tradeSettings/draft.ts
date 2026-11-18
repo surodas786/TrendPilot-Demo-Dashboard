@@ -90,8 +90,8 @@ export const pairOptionLabel = (i: Pick<InstrumentDto, 'base' | 'quote' | 'excha
 /** Currency of order cost and money amounts for a pair: its settlement/quote currency (USDT on MEXC and Bitunix, USDC on Lighter). */
 export const costCurrency = (i: Pick<InstrumentDto, 'quote'> | undefined) => i?.quote || 'USDT';
 
-/** Paper simulates MEXC contracts only; Bitunix pairs are Live only. */
-export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => mode === 'LIVE' || i.exchange === 'MEXC';
+/** Paper simulates MEXC (USDT) and Lighter (USDC) contracts; Bitunix pairs are Live only. Lighter Live is not available. */
+export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => (mode === 'LIVE' ? i.exchange !== 'LIGHTER' : i.exchange === 'MEXC' || i.exchange === 'LIGHTER');
 
 /**
  * Exit fields prefilled from the administrator's published pair suggestions (CFG-05).

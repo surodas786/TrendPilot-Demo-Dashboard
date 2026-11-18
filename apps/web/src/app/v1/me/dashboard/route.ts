@@ -21,6 +21,8 @@ export const GET = route(async (req, { correlationId }) => {
   const mode = (q.get('mode') ?? 'PAPER').toUpperCase();
   if (mode !== 'PAPER' && mode !== 'LIVE') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'mode must be PAPER or LIVE.');
   const exchange = (q.get('exchange') ?? 'MEXC').toUpperCase();
-  if (exchange !== 'MEXC' && exchange !== 'BITUNIX') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'exchange must be MEXC or BITUNIX.');
+  if (exchange !== 'MEXC' && exchange !== 'BITUNIX' && exchange !== 'LIGHTER') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'exchange must be MEXC, BITUNIX or LIGHTER.');
+  if (exchange === 'LIGHTER' && mode !== 'PAPER') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'Lighter is reported in Paper only.');
+  if (exchange === 'BITUNIX' && mode !== 'LIVE') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'Bitunix is reported in Live only.');
   return json(correlationId, await getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: now(), date, mode, exchange }));
 });

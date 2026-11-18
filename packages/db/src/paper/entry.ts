@@ -12,6 +12,9 @@ import {
   type EntryEvaluation,
   localTime,
   type TradingWindow,
+  exchangeLabel,
+  isForeignPublicSource,
+  isPaperExchange,
   isTradableExchange,
   PAPER_POLICY,
   type EntryReason,
@@ -22,6 +25,7 @@ import { enqueueJob, completeJob, type JobRow } from '../jobs';
 import { fills, instruments, marketQuotes, orderBlocks, orderIntents, positions, positionTargets, signalDecisions, signalEvents, strategyVersions } from '../schema';
 import { accountExchangeFor, availableOf, book, lockPaperAccount, type PaperAccountRow } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
+import { instrumentSpec, lighterSpecGap } from './spec';
 import type { SimResult } from './simulator';
 import { liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
@@ -110,16 +114,17 @@ export interface EntryAssessment {
  */
 export async function assessEntry(
   tx: Executor,
-  input: { event: Pick<EventRow, 'interval' | 'barOpenAt' | 'referencePrice'>; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; account: PaperAccountRow }
+  input: { event: Pick<EventRow, 'interval' | 'barOpenAt' | 'referencePrice'> & Partial<Pick<EventRow, 'instrumentId' | 'sourceExchange' | 'sourceSymbol'>>; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; account: PaperAccountRow }
 ): Promise<EntryAssessment> {
   const { event, block, version, side, now, account } = input;
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
-  if (!isTradableExchange(inst!.exchange)) {
+  // Live only on exchanges TrendPilot can trade Live (Lighter is Paper only in this release).
+  if (block.mode === 'LIVE' && !isTradableExchange(inst!.exchange)) {
     return { result: { ok: false, reason: 'EXCHANGE_NOT_ENABLED', detail: { exchange: inst!.exchange, reasonText: ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED } }, live: null, availableUsdt: availableOf(account) };
   }
-  // Paper simulates MEXC contracts only (one MEXC Paper account). A Paper block on a Bitunix
-  // contract (created before this check existed) is refused instead of filling in the MEXC wallet.
-  if (block.mode === 'PAPER' && inst!.exchange !== 'MEXC') {
+  // Paper simulates MEXC (USDT account) and Lighter (isolated USDC account) contracts. A Paper block
+  // on a Bitunix contract (created before this check existed) is refused.
+  if (block.mode === 'PAPER' && !isPaperExchange(inst!.exchange)) {
     return {
       result: { ok: false, reason: 'PAPER_EXCHANGE_UNSUPPORTED', detail: { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, reasonText: ENTRY_REASON_TEXT.PAPER_EXCHANGE_UNSUPPORTED } },
       live: null,
@@ -136,10 +141,24 @@ export async function assessEntry(
     .where(and(eq(orderIntents.paperAccountId, account.id), eq(orderIntents.instrumentId, block.instrumentId), eq(orderIntents.mode, block.mode), inArray(orderIntents.state, [...UNRESOLVED])));
   const [openForOwner] = await tx.select({ n: count() }).from(positions).where(and(eq(positions.ownerId, block.ownerId), eq(positions.mode, block.mode), eq(positions.status, 'OPEN')));
 
+  const gap = lighterSpecGap(inst!);
+  if (gap) return { result: { ok: false, reason: 'SIZE_BELOW_MINIMUM', detail: { cause: 'MAX_ORDER_SIZE_UNKNOWN', exchange: inst!.exchange, reasonText: gap } }, live: null, availableUsdt: availableOf(account) };
   const availableUsdt = availableOf(account);
+  // The contract's own exchange prices only (latestQuote refuses another exchange's public quote).
   const quote = await latestQuote(tx, block.instrumentId, now);
+  // EMA 200: consecutive closed candles of THIS contract's own exchange through the signal bar; a
+  // candle from another exchange's feed is dropped, so a gap blocks the filtered entry.
   const ema =
-    version.emaFilter === 'EMA200' ? emaAtSignalBar(await loadClosedCandles(tx, block.instrumentId, event.interval, event.barOpenAt), event.barOpenAt, Number(event.interval) * 60_000) : null;
+    version.emaFilter === 'EMA200'
+      ? emaAtSignalBar((await loadClosedCandles(tx, block.instrumentId, event.interval, event.barOpenAt)).filter((c) => !isForeignPublicSource(inst!.exchange, c.source ?? '')), event.barOpenAt, Number(event.interval) * 60_000)
+      : null;
+  // Currency of the TradingView reference: that of the route's own (primary) contract, which the
+  // source chart is configured for. Without the route's contract (preflight), the block's own.
+  let referenceCurrency: string | null = inst!.quote;
+  if (event.instrumentId && event.instrumentId !== inst!.id) {
+    const [primary] = await tx.select({ quote: instruments.quote }).from(instruments).where(eq(instruments.id, event.instrumentId));
+    referenceCurrency = primary?.quote ?? null;
+  }
 
   const result = evaluatePaperEntry({
     side,
@@ -157,7 +176,8 @@ export async function assessEntry(
     referencePrice: event.referencePrice,
     quote,
     ema,
-    spec: { contractMultiplier: inst!.contractMultiplier, qtyStep: inst!.qtyStep, minQty: inst!.minQty, maxQty: inst!.maxQty, priceTick: inst!.priceTick, takerFeeRate: inst!.takerFeeRate },
+    spec: instrumentSpec(inst!),
+    priceComparison: { referenceCurrency, venueCurrency: inst!.quote, mode: block.mode === 'LIVE' ? 'LIVE' : 'PAPER' },
     account: { availableUsdt },
     exposure: { openPositionInScope: Number(openInScope!.n) > 0, unresolvedIntentInScope: Number(unresolved!.n) > 0, openPositionsForOwner: Number(openForOwner!.n) },
     trailingConversionRequired: block.trailingConversionRequired,
@@ -166,7 +186,7 @@ export async function assessEntry(
   // Signal logs: which exchange, contract and price source the decision used, and for feed problems
   // whether a price never arrived (feed off / not covering this contract) or is only stale.
   if (!result.ok && (result.reason === 'FEED_STALE' || result.reason === 'PRICE_DEVIATION')) {
-    const venueLabel = inst!.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
+    const venueLabel = exchangeLabel(inst!.exchange);
     const ctx: Record<string, unknown> = { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, priceSource: quote?.source ?? null };
     if (result.reason === 'FEED_STALE') {
       const [any] = quote ? [{ n: 1 }] : await tx.select({ n: count() }).from(marketQuotes).where(eq(marketQuotes.instrumentId, block.instrumentId));
@@ -205,9 +225,9 @@ export async function evaluateAndReserveEntry(
   // ARC-02: the account lock serialises reservations and scope checks for this investor. Live
   // trades on the instrument's exchange (MEXC or Bitunix), each with its own account.
   const [instEx] = await tx.select({ exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, block.instrumentId));
-  // An exchange registered for pair selection only (Lighter) never reaches an account, a venue or
-  // an order, in Paper or Live: the entry is skipped before any account is locked or created.
-  if (!isTradableExchange(instEx?.exchange)) {
+  // Lighter is Paper only: a Lighter Live entry never reaches an account, a venue or an order (it is
+  // skipped before any account is locked or created). Paper Lighter uses its own USDC account.
+  if (block.mode === 'LIVE' ? !isTradableExchange(instEx?.exchange) : !isTradableExchange(instEx?.exchange) && !isPaperExchange(instEx?.exchange)) {
     await tx
       .insert(signalDecisions)
       .values({ eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId, status: 'SKIPPED', reason: 'EXCHANGE_NOT_ENABLED', detail: { side, reasonText: ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED, exchange: instEx?.exchange ?? null, strategyVersion: version.version, blockRevision: block.revision, ...extra } })

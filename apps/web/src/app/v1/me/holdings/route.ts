@@ -19,12 +19,13 @@ export const GET = route(async (req, { correlationId }) => {
   if (q && q !== 'PAPER' && q !== 'LIVE') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'mode must be PAPER or LIVE.');
   const mode = (q || undefined) as 'PAPER' | 'LIVE' | undefined;
   const x = (new URL(req.url).searchParams.get('exchange') ?? '').toUpperCase();
-  if (x && x !== 'MEXC' && x !== 'BITUNIX') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'exchange must be MEXC or BITUNIX.');
-  const exchange = (x || undefined) as 'MEXC' | 'BITUNIX' | undefined;
+  if (x && x !== 'MEXC' && x !== 'BITUNIX' && x !== 'LIGHTER') throw new DomainError(422, ErrorCode.VALIDATION_FAILED, 'exchange must be MEXC, BITUNIX or LIGHTER.');
+  const exchange = (x || undefined) as 'MEXC' | 'BITUNIX' | 'LIGHTER' | undefined;
   const db = getDb();
   const at = now();
-  const [paper, live, bitunixLive, positions, orders] = await Promise.all([
+  const [paper, lighterPaper, live, bitunixLive, positions, orders] = await Promise.all([
     getMyPaperAccount(db, user.id, 'PAPER'),
+    getMyPaperAccount(db, user.id, 'PAPER', 'LIGHTER'),
     getMyPaperAccount(db, user.id, 'LIVE'),
     getMyPaperAccount(db, user.id, 'LIVE', 'BITUNIX'),
     listMyHoldings(db, user.id, at, mode, exchange),
@@ -36,9 +37,9 @@ export const GET = route(async (req, { correlationId }) => {
     asOf: at.toISOString(),
     account: paper,
     exchange: exchange ?? 'ALL',
-    accounts: { paper, live, bitunixLive },
+    accounts: { paper, lighterPaper, live, bitunixLive },
     positions,
     activeOrders: orders.filter((o) => unresolved.includes(o.state) && (!mode || o.mode === mode) && (!exchange || o.exchange === exchange)),
-    dataSource: 'PAPER_SIMULATOR, MEXC (Live) and Bitunix (Live)'
+    dataSource: 'PAPER_SIMULATOR (MEXC USDT and Lighter USDC accounts), MEXC (Live) and Bitunix (Live)'
   });
 });

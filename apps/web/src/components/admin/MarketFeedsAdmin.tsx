@@ -22,6 +22,8 @@ const toLive = (items: FeedHealthDto[]): LiveQuoteDto[] =>
   items.map((i) => ({
     instrumentId: i.instrumentId,
     exchange: i.exchange,
+    marketId: i.marketId,
+    quoteCurrency: i.quoteCurrency,
     symbol: i.symbol,
     exchangeSymbol: i.exchangeSymbol,
     quote: i.latestQuote ? { bid: trim(i.latestQuote.bid), ask: trim(i.latestQuote.ask), mark: trim(i.latestQuote.mark), last: trim(i.latestQuote.last), source: i.latestQuote.source, channel: i.latestQuote.channel, sourceLabel: i.latestQuote.sourceLabel, asOf: i.latestQuote.asOf } : null
@@ -116,7 +118,7 @@ export function MarketFeedsAdmin({
                 <td className="px-4 py-3">
                   <div className="font-medium text-ink">{i.symbol}</div>
                   <div className="text-xs text-subtle">
-                    {exchangeLabel(i.exchange)} {i.exchangeSymbol || 'no exchange symbol'} · {i.instrumentStatus === 'PUBLISHED' ? 'Published' : 'Disabled'}
+                    {exchangeLabel(i.exchange)} {i.exchangeSymbol || 'no exchange symbol'}{i.marketId !== null ? ` (market ${i.marketId})` : ''} · {i.quoteCurrency} · {i.instrumentStatus === 'PUBLISHED' ? 'Published' : 'Disabled'}
                   </div>
                 </td>
                 <td className="px-4 py-3">

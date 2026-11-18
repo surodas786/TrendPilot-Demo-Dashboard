@@ -222,7 +222,7 @@ export async function setBlockStatus(owner: PublicUser, id: string, revision: nu
           ? 'This pair is no longer available.'
           : !version?.published
             ? 'This strategy version is not published.'
-            : notTradable
+            : current.mode === 'LIVE' && notTradable
               ? notTradable
             : current.mode === 'PAPER' && paperUnsupportedReason(current.exchange)
               ? paperUnsupportedReason(current.exchange)!
@@ -272,27 +272,51 @@ async function previewQuote(instrument: InstrumentDto): Promise<Quote | undefine
   return fixtureQuote(instrument.symbol);
 }
 
-async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettings): Promise<OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null } }> {
+async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettings, mode: BlockMode = 'PAPER'): Promise<OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null; exchange: string; quoteCurrency: string } }> {
   const quote = await previewQuote(instrument);
   if (!quote)
     throw new DomainError(
       422,
       ErrorCode.VALIDATION_FAILED,
-      !isTradableExchange(instrument.exchange)
-        ? `No ${exchangeLabel(instrument.exchange)} price is available for ${instrument.exchangeSymbol}: ${exchangeLabel(instrument.exchange)} prices come in a later release, so this pair cannot be previewed yet. Nothing from another exchange is used in its place.`
+      instrument.exchange === 'LIGHTER'
+        ? `No fresh Lighter price is available for ${instrument.exchangeSymbol} (market ${instrument.marketId}): the preview needs a fresh Lighter bid/ask. Nothing from another exchange is used in its place.`
+        : !isTradableExchange(instrument.exchange)
+        ? `No ${exchangeLabel(instrument.exchange)} price is available for ${instrument.exchangeSymbol}. Nothing from another exchange is used in its place.`
         : instrument.isFixture
         ? `No fixture quote is available for ${instrument.symbol}.`
         : `No fresh public ${exchangeLabel(instrument.exchange)} price for ${instrument.symbol} (${instrument.exchangeSymbol}) yet. The market feed picks up a newly published pair within seconds; if it stays unavailable, check Admin → Market Data Feed (the contract may not be trading).`
     );
+  const lighter = instrument.exchange === 'LIGHTER';
+  // Lighter: base step and minimum, USDC order-value limits; no base-unit maximum (see paper/spec.ts).
   const spec = {
     contractMultiplier: instrument.contract.multiplier,
     qtyStep: instrument.contract.qtyStep,
     minQty: instrument.contract.minQty,
-    maxQty: instrument.contract.maxQty,
+    maxQty: lighter ? null : instrument.contract.maxQty,
     priceTick: instrument.contract.priceTick,
-    takerFeeRate: instrument.contract.takerFeeRate
+    takerFeeRate: instrument.contract.takerFeeRate,
+    ...(lighter ? { minNotional: instrument.contract.minNotional, maxNotional: instrument.contract.maxNotional, quoteCurrency: instrument.quote } : {})
   };
-  return { ...previewOrder(settings, spec, quote), instrument: { symbol: instrument.symbol, exchangeSymbol: instrument.exchangeSymbol, fixtureLabel: instrument.fixtureLabel } };
+  const inst = { symbol: instrument.symbol, exchangeSymbol: instrument.exchangeSymbol, fixtureLabel: instrument.fixtureLabel, exchange: instrument.exchange, quoteCurrency: instrument.quote };
+  // Lighter Live is not available: its own fresh public price only, no Live estimates.
+  if (mode === 'LIVE' && !isTradableExchange(instrument.exchange)) {
+    return { quote, sides: [], notes: [`${exchangeLabel(instrument.exchange)} public price only: Live order estimates are not available until ${exchangeLabel(instrument.exchange)} Live trading is released. Paper is available.`], instrument: inst };
+  }
+  if (lighter) {
+    if (!instrument.contract.maxNotional) throw new DomainError(422, ErrorCode.VALIDATION_FAILED, `No verified maximum order value is stored for Lighter ${instrument.exchangeSymbol}. An administrator must refresh it from the Lighter catalog (Admin → Trading Pairs).`);
+    const p = previewOrder(settings, spec, quote);
+    return {
+      ...p,
+      notes: [
+        `Paper simulation on Lighter public prices (USDC): bid/ask ${quote.asOf ? `at ${quote.asOf}` : ''}. Nothing is sent to Lighter.`,
+        `Lighter rules: size step ${instrument.contract.qtyStep} ${instrument.base}, minimum ${instrument.contract.minQty} ${instrument.base} and ${instrument.contract.minNotional ?? '?'} USDC, maximum ${instrument.contract.maxNotional} USDC per order (catalog market ${instrument.marketId}).`,
+        'Simulated fee: Lighter Standard account 0% (per Lighter docs); your real Lighter account tier may differ.',
+        'Market entry estimate before slippage. A preview is not a guarantee of fill price.'
+      ],
+      instrument: inst
+    };
+  }
+  return { ...previewOrder(settings, spec, quote), instrument: inst };
 }
 
 /** Preview unsaved settings (the editor). Validates exactly like create; persists nothing. */
@@ -302,7 +326,7 @@ export async function previewDraft(raw: unknown) {
   const db = getDb();
   const issues = await catalogCheck(db, parsed.value.instrumentId, parsed.value);
   if (issues.length) throw validationError(issues);
-  return previewWith((await getInstrument(db, parsed.value.instrumentId))!, parsed.value);
+  return previewWith((await getInstrument(db, parsed.value.instrumentId))!, parsed.value, parsed.value.mode as BlockMode);
 }
 
 /** Preview a saved block. Owner-scoped: an unowned ID is 404. */
@@ -311,5 +335,5 @@ export async function previewSaved(owner: PublicUser, id: string) {
   if (!block) throw notFound();
   const instrument = await getInstrument(getDb(), block.instrumentId);
   if (!instrument) throw notFound();
-  return previewWith(instrument, block);
+  return previewWith(instrument, block, block.mode as BlockMode);
 }

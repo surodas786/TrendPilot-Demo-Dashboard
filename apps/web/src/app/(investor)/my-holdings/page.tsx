@@ -1,8 +1,8 @@
-import { connectionFor, getDb, listBitunixExchangeOnlyLegs, listLatestQuotes, listMyHoldings, listMyPositions } from '@trendpilot/db';
+import { connectionFor, getDb, getMyPaperAccount, listBitunixExchangeOnlyLegs, listLatestQuotes, listMyHoldings, listMyPositions } from '@trendpilot/db';
 import { HoldingsClient } from '@/components/holdings/HoldingsClient';
 import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
 import { PageContainer } from '@/components/layout/PageContainer';
-import { ExchangeTabs, ModeTabs, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
 import { now } from '@/server/clock';
 import { requirePageRole } from '@/server/pageSession';
 
@@ -13,29 +13,30 @@ export default async function MyHoldingsPage({ searchParams }: { searchParams: P
   const { user } = await requirePageRole('INVESTOR');
   const sp = await searchParams;
   const mode = viewModeOf(sp.mode);
-  // Live is per exchange (its own account and connection); Paper is the MEXC simulator.
-  const exchange = mode === 'LIVE' ? viewExchangeOf(sp.exchange) : 'MEXC';
+  // Live is per exchange (its own account and connection); Paper per simulator account (MEXC USDT, Lighter USDC).
+  const exchange = mode === 'LIVE' ? viewExchangeOf(sp.exchange) : paperExchangeOf(sp.exchange);
   const db = getDb();
   const at = now();
-  const [open, all, quotes, connection, bitunix] = await Promise.all([
-    listMyHoldings(db, user.id, at, mode, mode === 'LIVE' ? exchange : undefined),
+  const [open, all, quotes, connection, bitunix, lighterPaper] = await Promise.all([
+    listMyHoldings(db, user.id, at, mode, exchange),
     listMyPositions(db, user.id),
     listLatestQuotes(db, at, { publishedOnly: true }),
     mode === 'LIVE' ? connectionFor(db, user.id, exchange) : null,
-    connectionFor(db, user.id, 'BITUNIX')
+    connectionFor(db, user.id, 'BITUNIX'),
+    getMyPaperAccount(db, user.id, 'PAPER', 'LIGHTER')
   ]);
-  const closed = all.filter((p) => p.status === 'CLOSED' && p.mode === mode && (mode !== 'LIVE' || p.exchange === exchange)).sort((a, b) => Date.parse(b.closedAt ?? b.openedAt) - Date.parse(a.closedAt ?? a.openedAt));
-  const showExchanges = mode === 'LIVE' && (!!bitunix && bitunix.status !== 'REVOKED');
+  const closed = all.filter((p) => p.status === 'CLOSED' && p.mode === mode && p.exchange === exchange).sort((a, b) => Date.parse(b.closedAt ?? b.openedAt) - Date.parse(a.closedAt ?? a.openedAt));
+  const showExchanges = mode === 'LIVE' ? !!bitunix && bitunix.status !== 'REVOKED' : !!lighterPaper || exchange === 'LIGHTER';
   // Bitunix Hedge legs TrendPilot does not manage (the other leg, or opened on Bitunix): read-only.
   const otherLegs = mode === 'LIVE' && exchange === 'BITUNIX' ? await listBitunixExchangeOnlyLegs(db, user.id) : [];
   return (
     <PageContainer
       title="My Holdings"
       description="Your positions with live prices, unrealized P&L and stop protection. Select a holding for its fills and chart."
-      scope={`${user.name} · My Account · ${mode === 'LIVE' ? `Live — your ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} Futures account` : 'Paper — simulated'}`}
+      scope={`${user.name} · My Account · ${mode === 'LIVE' ? `Live — your ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} Futures account` : exchange === 'LIGHTER' ? 'Paper (Lighter, USDC) — simulated on Lighter public prices' : 'Paper — simulated'}`}
       actions={
         <div className="flex flex-wrap gap-2">
-          {showExchanges && <ExchangeTabs exchange={exchange} path="/my-holdings" />}
+          {showExchanges && <ExchangeTabs exchange={exchange} path="/my-holdings" mode={mode} />}
           <ModeTabs mode={mode} path="/my-holdings" />
         </div>
       }
@@ -55,7 +56,7 @@ export default async function MyHoldingsPage({ searchParams }: { searchParams: P
           timezone={user.timezone}
         />
       )}
-      <HoldingsClient open={open} closed={closed} quotes={quotes} timezone={user.timezone} mode={mode} />
+      <HoldingsClient open={open} closed={closed} quotes={quotes} timezone={user.timezone} mode={mode} currency={exchange === 'LIGHTER' ? 'USDC' : 'USDT'} />
       {mode === 'LIVE' && exchange === 'BITUNIX' && (
         <section className="mt-6 rounded-xl border border-line bg-surface" data-testid="bitunix-other-legs">
           <h3 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">Other Bitunix legs (not managed by TrendPilot)</h3>

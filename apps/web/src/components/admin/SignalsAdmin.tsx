@@ -155,6 +155,49 @@ function BitunixTargetControl({ route, instruments, onSet }: { route: SignalRout
   );
 }
 
+/**
+ * Link, pause or remove an EXPLICITLY chosen Lighter market as a target of a route (Paper only). The
+ * administrator picks the Lighter market by name and market ID: nothing is matched from the
+ * TradingView ticker (Lighter XAU is not "XAUUSDT"), so no market is pre-selected.
+ */
+function LighterTargetControl({ route, instruments, onSet }: { route: SignalRouteDto; instruments: InstrumentDto[]; onSet: (instrumentId: string | null, enabled: boolean) => void }) {
+  const current = route.targets.find((t) => t.exchange === 'LIGHTER');
+  const candidates = instruments.filter((i) => i.exchange === 'LIGHTER' && i.status === 'PUBLISHED');
+  const [choice, setChoice] = useState('');
+  if (!current && !candidates.length) return null;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5" data-testid={`route-lighter-${route.sourceSymbol}-${route.interval}-${route.action}`}>
+      {!current ? (
+        <>
+          <select aria-label="Lighter market for this route" value={choice} onChange={(e) => setChoice(e.target.value)} className="h-8 rounded-md border border-line bg-inset px-2 text-xs text-ink">
+            <option value="">Route to a Lighter market (Paper)…</option>
+            {candidates.map((i) => (
+              <option key={i.id} value={i.id}>
+                Lighter {i.exchangeSymbol} (market {i.marketId}) · {i.base}/{i.quote}
+              </option>
+            ))}
+          </select>
+          <Button size="sm" variant="ghost" disabled={!choice} onClick={() => onSet(choice, true)}>
+            Add Lighter target
+          </Button>
+        </>
+      ) : (
+        <>
+          <span className="text-[11px] text-subtle">
+            Lighter {current.exchangeSymbol} · Paper{current.enabled ? '' : ' · paused'}
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => onSet(current.instrumentId, !current.enabled)}>
+            {current.enabled ? 'Pause Lighter routing' : 'Resume Lighter routing'}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => onSet(null, false)}>
+            Remove Lighter
+          </Button>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function SignalsAdmin({ ingress, routes, instruments, packages, events, rejections, timezone }: Props) {
   const router = useRouter();
   const [revealed, setRevealed] = useState<string | null>(null);
@@ -215,6 +258,14 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     const r = await request('PUT', `/v1/admin/signal-routes/${route.id}/bitunix-target`, { body: { instrumentId, enabled } });
     if (!r.ok) toast.error(r.message, { duration: 10_000 });
     else toast.success(instrumentId ? (enabled ? 'Bitunix routing on for this route' : 'Bitunix routing paused for this route') : 'Bitunix routing removed from this route');
+    router.refresh();
+  };
+
+  /** Lighter plan Step 3: an explicitly chosen Lighter market as a Paper target of this route. */
+  const setLighterTarget = async (route: SignalRouteDto, instrumentId: string | null, enabled = true) => {
+    const r = await request('PUT', `/v1/admin/signal-routes/${route.id}/lighter-target`, { body: { instrumentId, enabled } });
+    if (!r.ok) toast.error(r.message, { duration: 10_000 });
+    else toast.success(instrumentId ? (enabled ? 'Lighter (Paper) routing on for this route' : 'Lighter routing paused for this route') : 'Lighter routing removed from this route');
     router.refresh();
   };
 
@@ -332,6 +383,7 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
                       ))}
                     </div>
                     <BitunixTargetControl route={r} instruments={instruments} onSet={(id, enabled) => setBitunixTarget(r, id, enabled)} />
+                    <LighterTargetControl route={r} instruments={instruments} onSet={(id, enabled) => setLighterTarget(r, id, enabled)} />
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <TimeframeTag latest={r.package.latest} interval={r.interval} />
                       {r.openPositions > 0 && <span className="text-[11px] text-subtle">{r.openPositions} open position(s)</span>}

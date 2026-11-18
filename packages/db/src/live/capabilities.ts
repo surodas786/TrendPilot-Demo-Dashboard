@@ -40,7 +40,21 @@ export type CapabilityId =
   | 'ACCOUNT_ELIGIBILITY'
   | 'BITUNIX_OPEN_WITH_ATTACHED_STOP'
   | 'BITUNIX_HEDGE_CLOSE_BY_POSITION'
-  | 'BITUNIX_TPSL_RESIZE';
+  | 'BITUNIX_TPSL_RESIZE'
+  | LighterCapabilityId;
+
+export type LighterCapabilityId =
+  | 'LIGHTER_SIGNER'
+  | 'LIGHTER_KEY_MATCH'
+  | 'LIGHTER_ACCOUNT_SETTINGS'
+  | 'LIGHTER_OPEN_WITH_LINKED_STOP'
+  | 'LIGHTER_REDUCE_ONLY_CLOSE'
+  | 'LIGHTER_STOP_RESIZE'
+  | 'LIGHTER_ORDER_LOOKUP'
+  | 'LIGHTER_FILL_FEES'
+  | 'LIGHTER_FUNDING'
+  | 'LIGHTER_XAU_EXECUTION'
+  | 'LIGHTER_STOP_RENEW';
 
 const DOC = 'https://www.mexc.com/api-docs/futures/account-and-trading-endpoints/';
 
@@ -219,6 +233,144 @@ export const BITUNIX_CAPABILITIES: Capability[] = [
   }
 ];
 
+const LIGHTER_DOC = 'https://docs.lighter.xyz';
+
+/**
+ * Lighter capabilities (Lighter plan Step 4). Documented from docs.lighter.xyz and the official
+ * SDK sources (lighter-python signer_client.py, lighter-go v1.0.12), exercised against a mocked
+ * signer and exchange only. No authorized testnet account is configured and mainnet order
+ * submission is disabled, so NOTHING here is observed on Lighter: `readOnly` / `livePilot` stay
+ * PENDING and the Lighter entry path refuses until an operator records live evidence.
+ */
+export const LIGHTER_CAPABILITIES: Capability[] = [
+  {
+    id: 'LIGHTER_SIGNER',
+    summary: 'Server-side signing of CreateGroupedOrders / CreateOrder / ModifyOrder / CancelOrder and auth tokens with the investor API key (official lighter-go signer)',
+    docs: `${LIGHTER_DOC}/developers/integration-guides/signing-transactions`,
+    documented: 'YES',
+    mock: 'VERIFIED',
+    readOnly: 'PENDING',
+    livePilot: 'PENDING',
+    gaps: [
+      'No signer runtime is installed in this Node service. The official signer exists only as a Go C shared library (Python ctypes) or a WASM build; using either is a new dependency awaiting approval',
+      'WASM signer: Go networking is unavailable, so nonces must be passed explicitly (TrendPilot does) and CheckClient cannot be used'
+    ]
+  },
+  {
+    id: 'LIGHTER_KEY_MATCH',
+    summary: 'The saved API private key is the key registered at (account index, API key index): its public key equals GET /api/v1/apikeys public_key, or an auth token it signs is accepted by /api/v1/accountLimits',
+    docs: `${LIGHTER_DOC}/developers/reference/wasm-signer`,
+    documented: 'YES',
+    mock: 'VERIFIED',
+    readOnly: 'PENDING',
+    livePilot: 'PENDING',
+    gaps: ['Deriving the public key needs the signer; until then a connection proves only that the account exists and the API key index is registered']
+  },
+  {
+    id: 'LIGHTER_ACCOUNT_SETTINGS',
+    summary: 'Margin mode (0 cross / 1 isolated) and leverage per market from GET /api/v1/account positions[]; TrendPilot never changes them',
+    docs: `${LIGHTER_DOC}/api/account/account`,
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'PENDING',
+    livePilot: 'PENDING',
+    gaps: [
+      'The unit of positions[].initial_margin_fraction is not documented (the catalog uses 1/10000); TrendPilot reads it as percent until verified',
+      'A market never traded may have no settings row; entries are then refused rather than assuming defaults'
+    ]
+  },
+  {
+    id: 'LIGHTER_OPEN_WITH_LINKED_STOP',
+    summary: 'CreateGroupedOrders OTO: MARKET IOC entry (worst price) + STOP_LOSS IOC reduce-only child (mark-price trigger, 28-day expiry), one transaction, one nonce',
+    docs: `${LIGHTER_DOC}/developers/integration-guides/signing-transactions`,
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: [
+      'Child stop size after a PARTIAL fill of the IOC parent is not documented (parent size, filled size, or cancelled); TrendPilot verifies coverage against the confirmed filled size and resizes or emergency-closes',
+      'Child activation: trigger_status moves from parent-order to mark-price — timing after the parent fill is not documented',
+      'Stop expiry: max 30 days (docs); renewal before expiry is not implemented (Step 5 decision)',
+      'Whether the reduce-only child is cancelled (canceled-child) when the parent IOC fills nothing'
+    ]
+  },
+  {
+    id: 'LIGHTER_REDUCE_ONLY_CLOSE',
+    summary: 'CreateOrder MARKET IOC reduce-only, sized at the confirmed position, worst-price bound from the fresh book; Lighter refuses a wrong-direction reduce-only (21738)',
+    docs: `${LIGHTER_DOC}/trading/order-types-and-matching`,
+    documented: 'YES',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: ['Lighter holds one net position per market: a close and a native stop racing each other are both reduce-only and cannot reverse, but the observed fill/cancel sequence is unverified']
+  },
+  {
+    id: 'LIGHTER_STOP_RESIZE',
+    summary: 'ModifyOrder of the reduce-only stop (by client order index) to the remaining size at the SAME trigger; confirmed by re-reading the order',
+    docs: `${LIGHTER_DOC}/developers/integration-guides/signing-transactions`,
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: ['Whether ModifyOrder on a triggered-pending stop keeps its trigger state and expiry is not documented', 'Whether a reduce-only stop larger than the position shrinks automatically']
+  },
+  {
+    id: 'LIGHTER_ORDER_LOOKUP',
+    summary: 'GET /api/v1/accountOrders?client_order_indexes= (auth) for status, filled base/quote, trigger state; GET /api/v1/tx?by=hash and /api/v1/nextNonce for uncertain sends',
+    docs: `${LIGHTER_DOC}/api/orders/accountorders`,
+    documented: 'YES',
+    mock: 'VERIFIED',
+    readOnly: 'PENDING',
+    livePilot: 'PENDING',
+    gaps: ['Needs an auth token (signer)', 'Read-after-write delay between sendTx acceptance and the order becoming visible is not documented']
+  },
+  {
+    id: 'LIGHTER_FILL_FEES',
+    summary: 'Actual fills and fees from GET /api/v1/trades?order_index= (auth): size, price, taker_fee/maker_fee, realized P&L',
+    docs: `${LIGHTER_DOC}/api/orders/trades`,
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'PENDING',
+    livePilot: 'PENDING',
+    gaps: ['The unit of trades[].taker_fee / maker_fee is not documented (integrator fees are in millionths); fees are not booked from this record until verified', 'accountOrderFills has no fee field']
+  },
+  {
+    id: 'LIGHTER_FUNDING',
+    summary: 'Applied funding from GET /api/v1/positionFunding (auth); positions[].total_funding_paid_out in the public snapshot',
+    docs: `${LIGHTER_DOC}/api/account/positionfunding`,
+    documented: 'PARTIAL',
+    mock: 'NOT_APPLICABLE',
+    readOnly: 'PENDING',
+    livePilot: 'PENDING',
+    gaps: ['Not read in this step (needs an auth token); the snapshot total is shown, never booked or simulated']
+  },
+  {
+    id: 'LIGHTER_STOP_RENEW',
+    summary: 'Renew an expiring native stop without a gap: place a new reduce-only STOP_LOSS for the position, confirm it is armed, then cancel the old one (ModifyOrder cannot change order_expiry)',
+    docs: `${LIGHTER_DOC}/developers/integration-guides/signing-transactions`,
+    documented: 'PARTIAL',
+    mock: 'NOT_APPLICABLE',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: [
+      'Not implemented in this build: expiry is detected and alerted (entries halted); no renewal is sent',
+      'Two reduce-only stops overlapping on one position: fill/cancel sequence when both trigger is not documented',
+      'lighter-go v1.0.12 L2ModifyOrderTxInfo has no OrderExpiry field (ExpiredAt is the transaction validity)'
+    ]
+  },
+  {
+    id: 'LIGHTER_XAU_EXECUTION',
+    summary: 'Mainnet XAU perp (market_id 92, size 4 dp, price 2 dp, min 0.0015 XAU / 10 USDC): orders, linked stop and reduce-only close on this market',
+    docs: `${LIGHTER_DOC}/api/orders/orderbookdetails`,
+    documented: 'PARTIAL',
+    mock: 'VERIFIED',
+    readOnly: 'NOT_APPLICABLE',
+    livePilot: 'PENDING',
+    gaps: ['Market IDs differ per environment and no authorized testnet account is configured: XAU order and native-stop behaviour can only be observed on mainnet, which stays disabled in this step']
+  }
+];
+
+
 export class CapabilityNotVerified extends Error {
   constructor(readonly capability: CapabilityId) {
     super(`MEXC capability ${capability} is not verified on a live pilot account`);
@@ -230,6 +382,6 @@ export class CapabilityNotVerified extends Error {
 export type CapabilityState = Partial<Record<CapabilityId, Evidence>>;
 
 export function livePilotVerified(id: CapabilityId, override?: CapabilityState): boolean {
-  const v = override?.[id] ?? [...MEXC_CAPABILITIES, ...BITUNIX_CAPABILITIES].find((c) => c.id === id)?.livePilot;
+  const v = override?.[id] ?? [...MEXC_CAPABILITIES, ...BITUNIX_CAPABILITIES, ...LIGHTER_CAPABILITIES].find((c) => c.id === id)?.livePilot;
   return v === 'VERIFIED';
 }

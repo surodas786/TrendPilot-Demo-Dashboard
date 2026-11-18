@@ -1,5 +1,6 @@
 import { PageContainer } from '@/components/layout/PageContainer';
 import { BitunixConnectionCard } from '@/components/live/BitunixConnectionCard';
+import { LighterConnectionCard } from '@/components/live/LighterConnectionCard';
 import { LiveTradingClient } from '@/components/live/LiveTradingClient';
 import { liveStatusFor } from '@/server/live';
 import { requirePageRole } from '@/server/pageSession';
@@ -19,6 +20,9 @@ export default async function LiveTradingPage() {
       <LiveTradingClient initial={status} />
       <div className="mt-4">
         <BitunixConnectionCard initial={status.bitunix} account={status.bitunixAccount} />
+      </div>
+      <div className="mt-4">
+        <LighterConnectionCard initial={status.lighter} account={status.lighterAccount} trade={status.lighterTrade} />
       </div>
     </PageContainer>
   );

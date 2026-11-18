@@ -1,3 +1,4 @@
+import { lighterConnectionsToSync } from './live/lighterSync';
 import { and, desc, eq, inArray, lt, ne, sql } from 'drizzle-orm';
 import { assertLiveTransportAllowed } from '@trendpilot/domain';
 import type { Db, Executor } from './client';
@@ -53,7 +54,7 @@ export interface OperationsDto {
     platformEnabled: boolean;
     entriesHalted: boolean;
     haltReason: string | null;
-    connections: { ownerEmail: string; exchange: string; status: string; approved: boolean; liveEnabled: boolean; entriesHalted: boolean; haltReason: string | null; lastSyncAt: string | null; lastSyncError: string | null; drift: number }[];
+    connections: { ownerEmail: string; exchange: string; status: string; approved: boolean; liveEnabled: boolean; entriesHalted: boolean; haltReason: string | null; lastSyncAt: string | null; lastSyncError: string | null; drift: number; lastSyncOkAt?: string | null; scheduledSync?: boolean }[];
     openPositions: number;
     unprotectedPositions: number;
     unresolvedOrders: number;
@@ -93,6 +94,8 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
   }
   const control = await getLiveControl(db);
   const conns = await db.select({ c: exchangeConnections, email: users.email }).from(exchangeConnections).innerJoin(users, eq(users.id, exchangeConnections.ownerId)).where(ne(exchangeConnections.status, 'REVOKED'));
+  // Lighter connections the worker reconciles on its schedule (Step 4C): their sync health is always reported.
+  const lighterScheduled = new Set(await lighterConnectionsToSync(db).catch(() => [] as string[]));
   const [lp] = (
     await db.execute<{ open: string; unprotected: string; unresolved: string }>(sql`
       SELECT
@@ -114,7 +117,8 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
       haltReason: c.haltReason,
       lastSyncAt: c.lastSyncAt?.toISOString() ?? null,
       lastSyncError: c.lastSyncError,
-      drift: (c.drift as unknown[]).length
+      drift: (c.drift as unknown[]).length,
+      ...(c.exchange === 'LIGHTER' ? { lastSyncOkAt: c.lastSyncOkAt?.toISOString() ?? null, scheduledSync: lighterScheduled.has(c.id) } : {})
     })),
     openPositions: Number(lp!.open),
     unprotectedPositions: Number(lp!.unprotected),
@@ -173,7 +177,20 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
   if (liveOrderTransport === 'MISCONFIGURED') alerts.push({ level: 'ERROR', message: 'LIVE_ORDER_TRANSPORT has an invalid value, or "enabled" outside a production process.' });
   if (live.openPositions > 0 && liveOrderTransport !== 'enabled') alerts.push({ level: 'ERROR', message: `${live.openPositions} Live position(s) are open but LIVE_ORDER_TRANSPORT is not enabled: TrendPilot cannot close them. Their MEXC stops still protect them; see the runbook.` });
   if (live.unprotectedPositions > 0) alerts.push({ level: 'ERROR', message: `${live.unprotectedPositions} Live position(s) are not verified as protected by a MEXC stop.` });
+  const lighterStaleMs = 3 * Number(env.LIGHTER_SYNC_MS ?? 60_000);
   for (const c of live.connections) {
+    if (c.exchange === 'LIGHTER') {
+      // Lighter: drift, a failed run and a stale sync are reported whenever the account is scheduled
+      // (Live on or exposure TrendPilot manages), even with Live off.
+      if (c.drift) alerts.push({ level: 'ERROR', message: `Lighter account ${c.ownerEmail}: Lighter and TrendPilot disagree (${c.drift} item(s)); new Lighter entries halted.` });
+      if (c.scheduledSync || c.liveEnabled) {
+        const failed = !!c.lastSyncError && (!c.lastSyncOkAt || (!!c.lastSyncAt && c.lastSyncAt > c.lastSyncOkAt));
+        if (failed) alerts.push({ level: 'WARN', message: `Lighter account ${c.ownerEmail}: sync failed (${c.lastSyncError}); positions keep their last confirmed state.` });
+        const okAge = c.lastSyncOkAt ? now.getTime() - Date.parse(c.lastSyncOkAt) : null;
+        if (okAge === null || okAge > lighterStaleMs) alerts.push({ level: 'WARN', message: `Lighter account ${c.ownerEmail}: no successful sync ${okAge === null ? 'yet' : `for ${Math.round(okAge / 1000)} s`}.` });
+      }
+      continue;
+    }
     if (c.drift) alerts.push({ level: 'ERROR', message: `Live account ${c.ownerEmail}: MEXC and TrendPilot disagree (${c.drift} item(s)); new entries halted.` });
     else if (c.entriesHalted && c.liveEnabled) alerts.push({ level: 'WARN', message: `Live account ${c.ownerEmail}: new entries halted (${c.haltReason ?? 'no reason'}).` });
     if (c.lastSyncError && c.liveEnabled) alerts.push({ level: 'WARN', message: `Live account ${c.ownerEmail}: private sync failed (${c.lastSyncError}).` });

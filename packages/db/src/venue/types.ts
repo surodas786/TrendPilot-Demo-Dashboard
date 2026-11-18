@@ -17,6 +17,8 @@ export interface ProtectionState {
   triggerPrice: string | null;
   basis: string | null;
   reduceOnly: boolean;
+  /** When the venue's stop expires (ISO), where the venue reports it (Lighter); absent otherwise. */
+  expiresAt?: string | null;
 }
 
 export interface CloseRequest {
@@ -34,7 +36,7 @@ export interface CloseRequest {
 }
 
 export interface ExecutionVenue {
-  readonly kind: 'PAPER_SIMULATOR' | 'MEXC_PRIVATE' | 'BITUNIX_PRIVATE';
+  readonly kind: 'PAPER_SIMULATOR' | 'MEXC_PRIVATE' | 'BITUNIX_PRIVATE' | 'LIGHTER_PRIVATE';
   /** EXE-02: opening market order with its stop loss in the same request. */
   placeOpeningOrderWithStop(r: OpeningRequest): Promise<SimResult>;
   /** EXE-04: what the venue knows about this client order ID (null = no such order). */

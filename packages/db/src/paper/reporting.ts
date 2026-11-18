@@ -1,6 +1,7 @@
 import { and, eq, gte, inArray, isNull, lt, lte, gt, or, sql } from 'drizzle-orm';
 import {
   Decimal,
+  exchangeLabel,
   FUNDING_STATUS_TEXT,
   fundingSettlementsBetween,
   fundingStatus,
@@ -74,7 +75,7 @@ async function priceFor(db: Executor, instrumentId: string, now: Date): Promise<
 
 export type ReportMode = 'PAPER' | 'LIVE';
 /** Live is reported per exchange (each has its own account); Paper is always MEXC. */
-export type ReportExchange = 'MEXC' | 'BITUNIX';
+export type ReportExchange = 'MEXC' | 'BITUNIX' | 'LIGHTER';
 
 /** Open positions of the owner, priced from the newest quote at `now`. `mode` limits to Paper or Live. */
 export async function listMyHoldings(db: Executor, ownerId: string, now: Date, mode?: ReportMode, exchange?: ReportExchange): Promise<HoldingDto[]> {
@@ -108,7 +109,7 @@ export async function listMyHoldings(db: Executor, ownerId: string, now: Date, m
       liquidation:
         p.mode === 'LIVE'
           ? p.venueSync?.liquidationPrice
-            ? { price: p.venueSync.liquidationPrice, label: `${p.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} liquidation price (as reported, last sync)` }
+            ? { price: p.venueSync.liquidationPrice, label: `${exchangeLabel(p.exchange)} liquidation price (as reported, last sync)` }
             : null
           : p.marginMode === 'ISOLATED' && p.liquidationEstimate
             ? { price: p.liquidationEstimate, label: 'Estimated (isolated margin, paper simulator)' }
@@ -168,7 +169,7 @@ export interface Reconciliation {
  * Lifetime identity checks for one account (Paper or Live): account columns vs ledger, and ledger
  * vs fills, exits and funding. Live wallet adjustments to the MEXC balance appear as "other".
  */
-export async function reconcileMyAccount(db: Executor, ownerId: string, mode: ReportMode = 'PAPER', exchange: 'MEXC' | 'BITUNIX' = 'MEXC'): Promise<Reconciliation | null> {
+export async function reconcileMyAccount(db: Executor, ownerId: string, mode: ReportMode = 'PAPER', exchange: ReportExchange = 'MEXC'): Promise<Reconciliation | null> {
   const [a] = await db.select().from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)));
   if (!a) return null;
   const kinds = await db
@@ -237,15 +238,16 @@ export async function getMyDashboard(db: Executor, user: { id: string; timezone:
   const w = reportingDayWindow(o.date ?? today, tz);
   const ownerId = user.id;
   const mode: ReportMode = o.mode ?? 'PAPER';
-  // One account per mode AND exchange: Paper is MEXC; Live is the MEXC or the Bitunix account.
-  const exchange: ReportExchange = mode === 'LIVE' && o.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC';
+  // One account per mode AND exchange, never summed: Paper is the MEXC (USDT) or the Lighter (USDC)
+  // simulator account; Live is the MEXC or the Bitunix account.
+  const exchange: ReportExchange = mode === 'LIVE' ? (o.exchange === 'BITUNIX' ? 'BITUNIX' : 'MEXC') : o.exchange === 'LIGHTER' ? 'LIGHTER' : 'MEXC';
   const [acct] = await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, mode), eq(paperAccounts.exchange, exchange)));
   // No account for this mode yet: every figure below is zero (an impossible ID matches nothing).
   const acctId = acct?.id ?? '00000000-0000-0000-0000-000000000000';
 
   const [account, holdings, reconciliation] = await Promise.all([
     getMyPaperAccount(db, ownerId, mode, exchange),
-    listMyHoldings(db, ownerId, o.now, mode, mode === 'LIVE' ? exchange : undefined),
+    listMyHoldings(db, ownerId, o.now, mode, exchange),
     reconcileMyAccount(db, ownerId, mode, exchange)
   ]);
 

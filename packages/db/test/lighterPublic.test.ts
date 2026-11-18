@@ -104,9 +104,9 @@ describe('environment and transport', () => {
 });
 
 describe('an exchange registered for selection only never maps onto a MEXC account', () => {
-  it('accountExchangeFor refuses Lighter in both modes; MEXC and Bitunix are unchanged', () => {
-    expect(() => accountExchangeFor('LIVE', 'LIGHTER')).toThrow(/Lighter trading is not available yet/);
-    expect(() => accountExchangeFor('PAPER', 'LIGHTER')).toThrow(/Lighter trading is not available yet/);
+  it('accountExchangeFor refuses Lighter Live and maps Lighter Paper to its own Lighter account (Step 3); MEXC and Bitunix are unchanged', () => {
+    expect(() => accountExchangeFor('LIVE', 'LIGHTER')).toThrow(/Lighter Live trading is not available yet/);
+    expect(accountExchangeFor('PAPER', 'LIGHTER')).toBe('LIGHTER');
     expect(accountExchangeFor('LIVE', 'BITUNIX')).toBe('BITUNIX');
     expect(accountExchangeFor('LIVE', 'MEXC')).toBe('MEXC');
     expect(accountExchangeFor('PAPER', 'BITUNIX')).toBe('MEXC');

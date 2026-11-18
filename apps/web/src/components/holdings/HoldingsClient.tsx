@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LayersIcon, RefreshCwIcon } from 'lucide-react';
 import type { HoldingDto, LiveQuoteDto, PositionDto } from '@trendpilot/db';
-import { Decimal, FEED_POLICY, unrealizedPnl } from '@trendpilot/domain';
+import { Decimal, exchangeLabel, FEED_POLICY, unrealizedPnl } from '@trendpilot/domain';
 import { request } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { EXIT_LABEL, signedUsdt } from '@/lib/exitLabels';
@@ -24,6 +24,8 @@ type Tab = 'open' | 'closed';
 export interface LivePrice {
   mark: string | null;
   sourceLabel: string | null;
+  /** Quote currency of the contract (USDT, USDC), when the live quote list knows it. */
+  currency: string | null;
   asOf: string | null;
   /** No price, or older than the feed's freshness limit. */
   stale: boolean;
@@ -31,19 +33,20 @@ export interface LivePrice {
 
 /** Current price for a contract: the newest pushed or refreshed quote, else the server snapshot. */
 export function livePriceFor(instrumentId: string, rows: LiveQuoteRow[], fallback: HoldingDto['price'] | null, nowMs: number | null): LivePrice {
-  const q = rows.find((r) => r.instrumentId === instrumentId)?.quote;
+  const row = rows.find((r) => r.instrumentId === instrumentId);
+  const q = row?.quote;
   const mark = q?.mark ?? fallback?.mark ?? null;
   const asOf = q?.asOf ?? fallback?.asOf ?? null;
   const sourceLabel = q?.sourceLabel ?? fallback?.sourceLabel ?? null;
   const stale = !asOf || (nowMs !== null ? nowMs - Date.parse(asOf) > FEED_POLICY.maxQuoteAgeMs : fallback?.freshness === 'STALE');
-  return { mark, asOf, sourceLabel, stale };
+  return { mark, asOf, sourceLabel, currency: row?.quoteCurrency ?? null, stale };
 }
 
 export const unrealizedAt = (h: Pick<PositionDto, 'side' | 'avgEntryPrice' | 'contracts' | 'contractMultiplier'>, mark: string | null) =>
   mark ? unrealizedPnl(h.side as 'LONG' | 'SHORT', h.avgEntryPrice, mark, h.contracts, h.contractMultiplier) : null;
 
 /** Display name of the position's exchange (Live positions trade on their contract's exchange). */
-const venueName = (p: { exchange?: string }) => (p.exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC');
+const venueName = (p: { exchange?: string }) => exchangeLabel(p.exchange ?? 'MEXC');
 
 /** The exchange confirms the position is gone, its closing fills are not listed yet (nothing booked). */
 export const closedOnMexc = (h: Pick<PositionDto, 'venueSync'>) => h.venueSync?.closeState === 'FILLS_PENDING' && h.venueSync.contracts !== null && new Decimal(h.venueSync.contracts).isZero();
@@ -67,7 +70,10 @@ const clockTime = (iso: string, tz: string) => new Intl.DateTimeFormat('en-GB', 
 export function PriceCell({ price, timezone }: { price: LivePrice; timezone: string }) {
   return (
     <div className="text-right" data-testid="holding-price" data-stale={price.stale ? 'true' : 'false'}>
-      <span className="text-ink">{priceOrUnavailable(price.mark)}</span>
+      <span className="text-ink">
+        {priceOrUnavailable(price.mark)}
+        {price.mark && price.currency ? <span className="text-[11px] text-subtle" data-testid="holding-price-currency">{` ${price.currency}`}</span> : null}
+      </span>
       <span className="block text-[11px] text-subtle">
         {price.sourceLabel ?? 'No price'}
         {price.asOf ? ` · ${clockTime(price.asOf, timezone)}` : ''}
@@ -86,7 +92,7 @@ export function PriceCell({ price, timezone }: { price: LivePrice; timezone: str
  * Prices stream from TrendPilot (SSE of the stored market feed); if the stream is not live or
  * stays silent, prices and positions are re-read from TrendPilot every 60 seconds.
  */
-export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mode = 'PAPER' }: { open: HoldingDto[]; closed: PositionDto[]; quotes: LiveQuoteDto[]; timezone: string; mode?: 'PAPER' | 'LIVE' }) {
+export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mode = 'PAPER', currency = 'USDT' }: { open: HoldingDto[]; closed: PositionDto[]; quotes: LiveQuoteDto[]; timezone: string; mode?: 'PAPER' | 'LIVE'; /** The viewed account's currency (one account per view, never mixed). */ currency?: string }) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('open');
   const [open, setOpen] = useState(initialOpen);
@@ -131,7 +137,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
           <div>
             <dt className="text-xs text-subtle">Unrealized P&amp;L (mark)</dt>
             <dd className={cn('mt-0.5 text-2xl font-semibold tabular-nums', pnlTone(total))} data-testid="holdings-unrealized">
-              {total === null ? 'Unavailable' : signedUsdt(total)}
+              {total === null ? 'Unavailable' : signedUsdt(total, currency)}
             </dd>
           </div>
         </dl>
@@ -224,7 +230,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                       <PriceCell price={price} timezone={timezone} />
                     </td>
                     <td className={cn('px-3 py-2.5 text-right', pnlTone(unrealized))} data-testid="holding-unrealized">
-                      {gone ? <span className="text-subtle">Closed on {venueName(h)}</span> : unrealized === null ? 'Unavailable' : signedUsdt(unrealized)}
+                      {gone ? <span className="text-subtle">Closed on {venueName(h)}</span> : unrealized === null ? 'Unavailable' : signedUsdt(unrealized, currency)}
                     </td>
                     <td className="px-3 py-2.5 text-right text-ink">
                       {priceOrUnavailable(h.stop.price)}
@@ -287,7 +293,7 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                       </span>
                     )}
                   </td>
-                  <td className={cn('px-3 py-2.5 text-right', pnlTone(p.netRealizedUsdt))}>{p.venueSync?.closeState === 'FILLS_PENDING' ? <span className="text-subtle">Pending</span> : signedUsdt(p.netRealizedUsdt)}</td>
+                  <td className={cn('px-3 py-2.5 text-right', pnlTone(p.netRealizedUsdt))}>{p.venueSync?.closeState === 'FILLS_PENDING' ? <span className="text-subtle">Pending</span> : signedUsdt(p.netRealizedUsdt, currency)}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-muted">{fmtTime(p.closedAt, timezone)}</td>
                 </tr>
               ))}

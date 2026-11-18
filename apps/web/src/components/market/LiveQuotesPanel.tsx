@@ -64,6 +64,8 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
                     <td className="py-2 pr-4 font-medium text-ink">{i.symbol}</td>
                     <td className="py-2 pr-4 text-xs text-muted" data-testid="exchange">
                       {exchangeLabel(i.exchange)} · <span className="font-mono">{i.exchangeSymbol}</span>
+                      {i.marketId !== null ? <span className="font-mono">{` (market ${i.marketId})`}</span> : null}
+                      <span data-testid="quote-currency">{` · ${i.quoteCurrency}`}</span>
                     </td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="bid">{q?.bid ?? '—'}</td>
                     <td className="py-2 pr-4 text-right font-mono text-xs text-ink" data-testid="ask">{q?.ask ?? '—'}</td>
@@ -89,7 +91,7 @@ export function LiveQuotesPanel({ initial, timezone }: { initial: LiveQuoteDto[]
           </table>
         </div>
       )}
-      <p className="mt-2 text-[11px] text-subtle">Each contract shows prices from its own exchange&apos;s public feed (MEXC or Bitunix; never mixed) and updates automatically. Refresh re-reads TrendPilot&apos;s latest stored price; it does not contact the exchange.</p>
+      <p className="mt-2 text-[11px] text-subtle">Each contract shows prices from its own exchange&apos;s public feed (MEXC, Bitunix or Lighter; never mixed), in its quote currency and updates automatically. Refresh re-reads TrendPilot&apos;s latest stored price; it does not contact the exchange.</p>
     </section>
   );
 }

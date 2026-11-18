@@ -20,7 +20,10 @@ export function takeProfitPlanLabel(plan: { side: 'LONG' | 'SHORT' | null; mode:
   return `${side === 'LONG' ? 'Long' : 'Short'} take profit · ${mode}${plan.side ? '' : ' (shared settings at entry)'} · targets ${side === 'LONG' ? 'above' : 'below'} entry`;
 }
 
-export const signedUsdt = (v: string) => `${Number(v) > 0 ? '+' : ''}${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT`;
+export const signedUsdt = (v: string, currency = 'USDT') => `${Number(v) > 0 ? '+' : ''}${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${currency}`;
+
+/** Settlement currency of a position or account by exchange: Lighter is USDC; MEXC and Bitunix are USDT. */
+export const currencyOfExchange = (exchange: string | null | undefined) => (exchange === 'LIGHTER' ? 'USDC' : 'USDT');
 
 export const TARGET_STATUS_LABEL: Record<string, string> = {
   PENDING: 'Waiting',

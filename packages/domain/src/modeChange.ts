@@ -3,7 +3,7 @@
  * Shared by the Trade Settings editor (New Entry and Edit) and the server, so the reason the
  * investor sees is the one the server enforces.
  */
-import { exchangeLabel, exchangeUnavailableReason } from './exchange';
+import { exchangeLabel, exchangeUnavailableReason, isPaperExchange } from './exchange';
 
 export type BlockMode = 'PAPER' | 'LIVE';
 
@@ -35,7 +35,7 @@ export function liveUnavailableReason(connectionStatus: string | null | undefine
  * Live-only until a Bitunix Paper simulator exists. Null when Paper is available for the exchange.
  */
 export function paperUnsupportedReason(exchange: string | null | undefined): string | null {
-  return exchange && exchange !== 'MEXC' ? `Paper trading simulates MEXC contracts only. ${exchangeLabel(exchange)} pairs are Live only: choose Live, or pick the MEXC pair for Paper.` : null;
+  return exchange && !isPaperExchange(exchange) ? `Paper trading simulates MEXC and Lighter contracts only. ${exchangeLabel(exchange)} pairs are Live only: choose Live, or pick the MEXC or Lighter pair for Paper.` : null;
 }
 
 export type ModeChangeBlocker =

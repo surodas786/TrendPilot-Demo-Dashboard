@@ -1,9 +1,10 @@
 /** Display helpers for reporting values. A null value is always "Unavailable", never 0. */
-export const usdtOrUnavailable = (v: string | null | undefined, signed = false) => {
+/** Money in an account's currency (USDT by default; Lighter Paper accounts are USDC). */
+export const usdtOrUnavailable = (v: string | null | undefined, signed = false, currency = 'USDT') => {
   if (v === null || v === undefined) return 'Unavailable';
   const n = Number(v);
   const txt = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
-  return `${signed && n > 0 ? '+' : ''}${txt} USDT`;
+  return `${signed && n > 0 ? '+' : ''}${txt} ${currency}`;
 };
 
 export const priceOrUnavailable = (v: string | null | undefined) => (v === null || v === undefined ? 'Unavailable' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 8 }));

@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { sql } from 'drizzle-orm';
-import { BitunixAccountSupervisor, codeRevision, createDb, emailDeliveryMode, heartbeat, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
+import { BitunixAccountSupervisor, codeRevision, createDb, emailDeliveryMode, heartbeat, lighterTestnetEnabled, markStopped, processNextEmailJob, processNextJob, pruneRetention, requireEnv, RETENTION_DEFAULTS, signalClockFromEnv, syncAllLighterConnections, syncAllLiveAccounts, type DbHandle, type ProcessResult } from '@trendpilot/db';
 import { assertLiveTransportAllowed } from '@trendpilot/domain';
 
 /**
@@ -65,6 +65,9 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
 
   // OPS-02 / AT-11: checked before any connection is opened.
   const transport = assertLiveTransportAllowed(env);
+  // Lighter: an invalid LIGHTER_SYNC switch, or LIGHTER_TESTNET=enabled outside an isolated test setup, refuses to start.
+  const lighterMode = lighterPrivateSyncMode(env);
+  const lighterTestnet = lighterTestnetEnabled(env);
 
   const url = env.DATABASE_URL ?? requireEnv('DATABASE_URL');
   const handle: DbHandle = createDb(url, 4);
@@ -174,6 +177,25 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
     log('Bitunix account sync: on (read-only; private WebSocket + REST reconciliation per verified connection)');
     bitunixBusy = bitunixBusy.then(bitunixTick);
   }
+  // Lighter: scheduled reconciliation = the manual Sync service, for eligible verified mainnet
+  // connections (Live on, or exposure TrendPilot manages). Reads, plus a stop resize only behind the
+  // execution gates. Shares the per-connection lease with manual Sync; failures wait for the next tick.
+  let lighterBusy: Promise<void> = Promise.resolve();
+  const syncLighter = async () => {
+    if (stopping) return;
+    try {
+      for (const r of await syncAllLighterConnections(handle.db, clock(), { env })) {
+        if (r.busy) log(`lighter sync ${r.connectionId}: skipped (a sync is already running)`);
+        else if (!r.ok) log(`lighter sync ${r.connectionId}: failed (${r.error})`);
+        else if (r.closedOnLighter.length || r.stopFillsBooked || r.drift.length)
+          log(`lighter sync ${r.connectionId}: stopFillsBooked=${r.stopFillsBooked} closedOnLighter=${r.closedOnLighter.map((c) => c.result).join(',') || 'none'} drift=${r.drift.map((d) => `${d.kind} ${d.symbol}`).join(', ') || 'none'}`);
+      }
+    } catch (e) {
+      log(`lighter sync failed: ${(e as Error).message}`);
+    }
+  };
+  const lighterTimer = opts.processJobs === false || lighterMode === 'off' ? null : setInterval(() => (lighterBusy = lighterBusy.then(syncLighter)), Number(env.LIGHTER_SYNC_MS ?? 60_000));
+  if (lighterTimer) log(`Lighter account sync: on (verified mainnet connections with Live on or managed exposure)${lighterTestnet ? '; LIGHTER_TESTNET enabled (isolated test setup; testnet is never scheduled)' : ''}`);
   const pruneStart = opts.processJobs === false ? null : setTimeout(() => void prune(), 60_000);
   const pruneTimer = opts.processJobs === false ? null : setInterval(() => void prune(), 3_600_000);
 
@@ -185,6 +207,7 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       if (mailTimer) clearInterval(mailTimer);
       if (syncTimer) clearInterval(syncTimer);
       if (bitunixTimer) clearInterval(bitunixTimer);
+      if (lighterTimer) clearInterval(lighterTimer);
       clearInterval(beatTimer);
       if (pruneStart) clearTimeout(pruneStart);
       if (pruneTimer) clearInterval(pruneTimer);
@@ -192,12 +215,20 @@ export async function startWorker(opts: WorkerOptions = {}): Promise<RunningWork
       await mailBusy;
       await syncBusy;
       await bitunixBusy;
+      await lighterBusy;
       await bitunix?.stop();
       await markStopped(handle.db, 'worker', workerId).catch(() => undefined);
       await handle.close();
       log('stopped');
     }
   };
+}
+
+/** LIGHTER_PRIVATE_SYNC: "on" (default, like Bitunix) or "off". Anything else is a configuration error. */
+export function lighterPrivateSyncMode(env: Record<string, string | undefined>): 'on' | 'off' {
+  const v = (env.LIGHTER_PRIVATE_SYNC || 'on').trim().toLowerCase();
+  if (v !== 'on' && v !== 'off') throw new Error(`LIGHTER_PRIVATE_SYNC must be "on" or "off" (got "${v}").`);
+  return v;
 }
 
 /** BITUNIX_PRIVATE_SYNC: "on" (default) or "off". Anything else is a configuration error. */
