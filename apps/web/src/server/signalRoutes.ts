@@ -3,6 +3,7 @@ import {
   deleteSignalRoute,
   getDb,
   getInstrument,
+  listAllInstruments,
   lockSignalRoute,
   recordAudit,
   routeHistory,
@@ -12,7 +13,7 @@ import {
   type PublicUser,
   type SignalRouteRow
 } from '@trendpilot/db';
-import { DomainError, ErrorCode, notFound, type SignalRouteCreate } from '@trendpilot/domain';
+import { DomainError, ErrorCode, notFound, signalContractIssue, type SignalRouteCreate } from '@trendpilot/domain';
 import { validationError } from './http';
 import { assertPackageActive } from './strategyPackages';
 
@@ -45,7 +46,8 @@ async function denied(admin: PublicUser, action: string, id: string, reason: str
 }
 
 /**
- * The route's own contract identifies the TradingView chart's exchange contract (signal source). It
+ * The route's own contract IS the TradingView chart's exchange contract (signal source), checked
+ * against the route's source exchange and ticker. It
  * may be DISABLED: a disabled contract takes no entries (decided per destination at entry), but its
  * chart can still deliver signals to the route's explicit targets. Actionable routes must match
  * their strategy.
@@ -53,7 +55,11 @@ async function denied(admin: PublicUser, action: string, id: string, reason: str
 export async function checkRouteTarget(input: SignalRouteCreate): Promise<void> {
   const db = getDb();
   const inst = await getInstrument(db, input.instrumentId);
-  if (!inst) throw validationError([{ path: 'instrumentId', message: 'Select a pair.' }]);
+  // The signal contract is the TradingView chart's own contract: same exchange as {{exchange}},
+  // same contract as {{ticker}}. A BITUNIX:XAUUSDT.P route can never name MEXC BTC_USDT.
+  const mismatch = signalContractIssue(inst, await listAllInstruments(db), input.sourceExchange, input.sourceSymbol);
+  if (mismatch) throw validationError([{ path: 'instrumentId', message: mismatch }]);
+  if (!inst || inst.exchange === 'LIGHTER') throw validationError([{ path: 'instrumentId', message: 'A Lighter market cannot be a signal contract; add it as the route’s Lighter target instead.' }]);
   await assertPackageActive(input.packageId);
   const issues = await routeStrategyIssues(db, input);
   if (issues.length) throw validationError(issues);

@@ -130,9 +130,13 @@ describe('edit, duplicate, delete and history on a fresh deployment', () => {
     const keep15 = await call(routeById.PUT, { method: 'PUT', path: '/x', cookie: admin, params: { id: fixture.id }, ifMatch: fixture.revision, body: bodyOf(fixture, { name: 'BTC bullish' }) });
     expect(keep15.status).toBe(400);
     expect(keep15.body.issues).toEqual([{ path: 'interval', message: expect.stringMatching(/v2 uses 5m, but this route is 15m/) }]);
-    const eth = await call(routeById.PUT, { method: 'PUT', path: '/x', cookie: admin, params: { id: fixture.id }, ifMatch: fixture.revision, body: bodyOf(fixture, { interval: '5', instrumentId: ETH }) });
+    const eth = await call(routeById.PUT, { method: 'PUT', path: '/x', cookie: admin, params: { id: fixture.id }, ifMatch: fixture.revision, body: bodyOf(fixture, { interval: '5', sourceSymbol: 'ETHUSDT.P', instrumentId: ETH }) });
     expect(eth.status).toBe(400);
     expect(eth.body.issues).toEqual([{ path: 'instrumentId', message: expect.stringMatching(/v2 does not approve ETHUSDT/) }]);
+    // The signal contract must be the chart's own contract: ETH for a BTCUSDT.P chart is refused.
+    const mismatch = await call(routeById.PUT, { method: 'PUT', path: '/x', cookie: admin, params: { id: fixture.id }, ifMatch: fixture.revision, body: bodyOf(fixture, { interval: '5', instrumentId: ETH }) });
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.issues).toEqual([{ path: 'instrumentId', message: 'MEXC ETH_USDT is not the contract of the MEXC:BTCUSDT.P chart. Select MEXC BTC_USDT.' }]);
     expect(await routeRow(fixture.id)).toMatchObject({ interval: '15', revision: fixture.revision });
   });
 
@@ -164,14 +168,14 @@ describe('edit, duplicate, delete and history on a fresh deployment', () => {
   });
 
   it('an unused route is deleted permanently after confirmation, and audited', async () => {
-    const created = await call(routes.POST, { method: 'POST', path: '/x', cookie: admin, body: { ...bodyOf(fixture), name: 'Typo route', sourceSymbol: 'BTCUSTD.P', interval: '5' } });
+    const created = await call(routes.POST, { method: 'POST', path: '/x', cookie: admin, body: { ...bodyOf(fixture), name: 'Typo route', sourceSymbol: 'BTC_USDT', interval: '5' } });
     const row = (await routeRow(created.body.id))!;
     expect((await call(routeById.DELETE, { method: 'DELETE', path: '/x', cookie: admin, params: { id: row.id } })).status).toBe(428); // revision required
     const del = await call(routeById.DELETE, { method: 'DELETE', path: '/x', cookie: admin, params: { id: row.id }, ifMatch: row.revision });
     expect(del.status).toBe(204);
     expect(await routeRow(row.id)).toBeUndefined();
     const [a] = await audits('ADMIN_SIGNAL_ROUTE_DELETE', row.id);
-    expect(a).toMatchObject({ result: 'SUCCESS', before: { sourceSymbol: 'BTCUSTD.P', name: 'Typo route' } });
+    expect(a).toMatchObject({ result: 'SUCCESS', before: { sourceSymbol: 'BTC_USDT', name: 'Typo route' } });
   });
 
   it('a fresh 5m BTCUSDT.P alert matches the enabled 5m route after the change', async () => {
