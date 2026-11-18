@@ -38,11 +38,13 @@ export type EntryReason =
   | 'LIVE_NOT_ELIGIBLE'
   | 'PAPER_EXCHANGE_UNSUPPORTED'
   | 'EXCHANGE_NOT_ENABLED'
+  | 'CONTRACT_DISABLED'
   | 'PRICE_COMPARISON_UNAVAILABLE';
 
 export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
   PRICE_COMPARISON_UNAVAILABLE: "The TradingView reference price and this exchange's price are in different currencies and no approved comparison exists for this mode, so the price-deviation check cannot run. The entry was not opened.",
-  EXCHANGE_NOT_ENABLED: 'This order block is on an exchange TrendPilot cannot trade in this mode yet (Lighter is Paper only; Lighter Live orders come in a later release). No order was placed.',
+  EXCHANGE_NOT_ENABLED: 'This order block is on an exchange TrendPilot cannot trade in this mode (Lighter Live needs the Lighter Live scope for this account, market and route). No order was placed.',
+  CONTRACT_DISABLED: 'The contract this order block trades has been disabled by the administrator. New entries are refused; open positions keep their stops and exits. No order was placed.',
   PAPER_EXCHANGE_UNSUPPORTED: 'Paper trading simulates MEXC contracts only. This order block is on a Bitunix contract: switch it to Live (Bitunix) or use the MEXC pair for Paper.',
   TRAILING_CONVERSION_REQUIRED:
     'This order block still uses the old Trailing Stop. New entries are held until you open Trade Settings, enter Activate after profit (%) for Trailing Take Profit (or turn it off) and save.',

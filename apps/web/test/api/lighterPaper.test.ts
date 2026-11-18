@@ -366,6 +366,26 @@ describe('entry checks on Lighter data only', () => {
   });
 });
 
+describe('signal validation and execution-contract eligibility are independent', () => {
+  it('a DISABLED route contract (MEXC XAU) does not block the Lighter target; the MEXC block takes no new entry', async () => {
+    const [mx] = await direct.db.select().from(schema.instruments).where(eq(schema.instruments.id, mexcXau));
+    await direct.db.update(schema.instruments).set({ status: 'DISABLED' }).where(eq(schema.instruments.id, mexcXau));
+    try {
+      const r = await alert('BULLISH_FLIP');
+      expect(r.status).toBeLessThan(300); // accepted: the route itself is valid
+      expect(r.event.targetInstrumentIds).toContain(lighterXau);
+      expect((await entryDecision(r.event.id, blockOf.aMexc!))).toMatchObject({ status: 'SKIPPED', reason: 'CONTRACT_DISABLED' });
+      const lt = await entryDecision(r.event.id, blockOf.aLighter!);
+      expect(lt).toBeDefined();
+      expect(lt!.reason).not.toBe('CONTRACT_DISABLED');
+      // Evaluated by the strategy on Lighter (approved, or held only by its own open position).
+      expect(lt!.status === 'ENTRY_APPROVED' || lt!.reason === 'POSITION_NOT_FLAT', JSON.stringify(lt)).toBe(true);
+    } finally {
+      await direct.db.update(schema.instruments).set({ status: mx!.status }).where(eq(schema.instruments.id, mexcXau));
+    }
+  });
+});
+
 describe('Lighter Live stays unreachable', () => {
   it('a Lighter Live block cannot be activated, Live evaluation refuses it, and no Live order exists', async () => {
     const c = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.b, body: blockBody({ instrumentId: lighterXau, strategyVersionId: version, mode: 'LIVE', weekdays: ALL_DAYS }) });
