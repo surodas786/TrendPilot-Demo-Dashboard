@@ -8,6 +8,7 @@ import { LIGHTER_CAPABILITIES, livePilotVerified, type CapabilityState } from '.
 import { LighterHttpApi, LighterPrivateError, LighterSignerUnavailable, lighterTestnetEnabled, type LighterApi, type LighterSigner } from './lighterPrivate';
 import { LighterSignerError, scrubLighterSignerAccount, wasmLighterSigner } from './lighterWasmSigner';
 import type { LighterScope } from './lighterOrders';
+import { lighterLiveRefusal, lighterLiveScope } from './lighterLiveScope';
 import { connectionFor, type ConnectionRow } from './liveMode';
 
 /**
@@ -96,15 +97,20 @@ export function lighterLiveInputs(env: Record<string, string | undefined> = proc
   };
 }
 
-/** Why this investor may not trade Lighter Live now (shown next to, not inside, the connection check). */
-export function lighterTradePermission(conn: ConnectionRow | null, capabilities: CapabilityState = {}, env: Record<string, string | undefined> = process.env): { allowed: false; reasons: string[] } {
-  const reasons = ['Lighter Live trading is not enabled in this release: Lighter orders are verified in an isolated environment first.'];
-  if (!conn || conn.status !== 'VERIFIED') reasons.push('The Lighter connection is not verified (the API key must be proven to be the account’s registered key).');
+/**
+ * Whether this investor may trade Lighter Live now (shown next to, not inside, the connection
+ * check): the Lighter Live scope at account level (lighterLiveScope.ts). Off by default.
+ */
+export function lighterTradePermission(conn: ConnectionRow | null, capabilities: CapabilityState = {}, env: Record<string, string | undefined> = process.env): { allowed: boolean; reasons: string[] } {
+  const target = { connection: conn && conn.status !== 'REVOKED' ? { id: conn.id, status: conn.status, venueEnvironment: conn.venueEnvironment } : null };
+  const refusal = lighterLiveRefusal(lighterLiveScope(env), capabilities, lighterLiveInputs(env), target, 'ACCOUNT');
+  if (!refusal) return { allowed: true, reasons: [] };
+  const reasons = [refusal];
   const unverified = LIGHTER_CAPABILITIES.filter((c) => !livePilotVerified(c.id, capabilities)).map((c) => c.id);
-  if (unverified.length) reasons.push(`Lighter capabilities not verified on a live pilot: ${unverified.join(', ')}.`);
+  if (unverified.length) reasons.push(`Lighter capabilities not yet recorded as verified: ${unverified.join(', ')}.`);
   const inputs = [...new Set([...missingLiveInputs(lighterLiveInputs(env), 'OPEN'), ...missingLiveInputs(lighterLiveInputs(env), 'CLOSE')])];
   if (inputs.length) reasons.push(`Live inputs not configured: ${inputs.join(', ')}.`);
-  return { allowed: false, reasons };
+  return { allowed: false, reasons: [...new Set(reasons)] };
 }
 
 const describe = (e: unknown): string => (e instanceof LighterPrivateError ? `${e.kind}${e.code !== undefined ? ` ${e.code}` : ''}: ${e.message}`.slice(0, 300) : 'Verification failed.');

@@ -10,6 +10,7 @@ import {
   installLighterTestSeam,
   installLiveTestSeam,
   lighterScopeOf,
+  lighterLiveRefusalFor,
   lighterVenue,
   lockPaperAccount,
   book,
@@ -40,6 +41,7 @@ import * as conn from '@/app/v1/me/exchange-connection/route';
 import * as verify from '@/app/v1/me/exchange-connection/verify/route';
 import * as syncRoute from '@/app/v1/me/exchange-connection/sync/route';
 import * as activate from '@/app/v1/me/live/activate/route';
+import * as contracts from '@/app/v1/admin/live/contracts/[id]/route';
 import * as approve from '@/app/v1/admin/live/connections/[id]/approve/route';
 import * as capabilities from '@/app/v1/admin/live/capabilities/route';
 import * as platform from '@/app/v1/admin/live/platform/route';
@@ -131,6 +133,12 @@ async function openGatesForA() {
     .set({ approvedAt: new Date(), approvedBy: adminId, maxOrderContracts: '1', maxOrderNotionalUsdt: '500', maxLeverage: 10, maxExposureUsdt: '1000', liveEnabled: true, entriesHalted: false, haltReason: null })
     .where(eq(schema.exchangeConnections.id, c.id));
   await direct.db.update(schema.instruments).set({ liveAllowed: true }).where(eq(schema.instruments.id, xau));
+  inScopeFor(c.id);
+}
+
+/** The Lighter Live scope (deployment settings) for one connection on XAU (market 92); reset after each test. */
+function inScopeFor(connectionId: string) {
+  Object.assign(process.env, { LIGHTER_MAINNET_ORDERS: 'enabled', LIGHTER_LIVE_CONNECTIONS: connectionId, LIGHTER_LIVE_MARKETS: '92' });
 }
 
 const settle = async () => {
@@ -187,18 +195,34 @@ describe('Lighter connection (investor-owned, verify only)', () => {
     const status = await liveStatusFor(idA);
     expect(status.lighter).toMatchObject({ status: 'VERIFIED' });
     expect(status.lighterTrade.allowed).toBe(false);
-    expect(status.lighterTrade.reasons.join(' ')).toMatch(/not enabled in this release/);
+    expect(status.lighterTrade.reasons.join(' ')).toMatch(/disabled on this deployment \(LIGHTER_MAINNET_ORDERS/);
     expect(status.connection).toBeNull(); // no MEXC needed
   });
 
-  it('activation, approval and the Live allowlist stay refused for Lighter', async () => {
+  it('outside the Lighter Live scope (the default) activation, approval and the Live allowlist are refused', async () => {
+    const limits = { maxOrderContracts: '1', maxOrderNotionalUsdt: '500', maxLeverage: 10, maxExposureUsdt: '1000' };
     const a = await call(activate.POST, { method: 'POST', path: '/v1/me/live/activate?exchange=LIGHTER', cookie: cookies.a });
-    expect(a.status).toBe(400);
-    expect(a.body.message).toMatch(/Lighter Live trading is not available yet/);
+    expect(a.status).toBe(409);
+    expect(a.body.message).toMatch(/LIGHTER_MAINNET_ORDERS is not enabled/);
     await expect(setLiveActivation(direct.db, idA, true, 't', 'LIGHTER')).rejects.toMatchObject({ status: 409 });
-    const ap = await call(approve.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: (await ltConn(idA)).id }, body: { maxOrderContracts: '1', maxOrderNotionalUsdt: '500', maxLeverage: 10, maxExposureUsdt: '1000' } });
+    const ap = await call(approve.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: (await ltConn(idA)).id }, body: limits });
     expect(ap.status).toBe(409);
+    const allow = await call(contracts.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: xau }, body: { allowed: true } });
+    expect(allow.status).toBe(409);
+    // Orders switched on, but this connection is not listed: still refused.
+    Object.assign(process.env, { LIGHTER_MAINNET_ORDERS: 'enabled', LIGHTER_LIVE_MARKETS: '92', LIGHTER_LIVE_CONNECTIONS: '00000000-0000-4000-8000-000000000000' });
+    const ap2 = await call(approve.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: (await ltConn(idA)).id }, body: limits });
+    expect(ap2.status).toBe(409);
+    expect(ap2.body.message).toMatch(/LIGHTER_LIVE_CONNECTIONS/);
+    // Listed, but no capability recorded: still refused.
+    process.env.LIGHTER_LIVE_CONNECTIONS = (await ltConn(idA)).id;
+    const ap3 = await call(approve.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: (await ltConn(idA)).id }, body: limits });
+    expect(ap3.body.message).toMatch(/capability LIGHTER_SIGNER is not recorded/);
+    // Another market: the allowlist refuses it.
+    process.env.LIGHTER_LIVE_MARKETS = '1';
+    expect((await call(contracts.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: xau }, body: { allowed: true } })).body.message).toMatch(/LIGHTER_LIVE_MARKETS/);
     expect((await ltConn(idA)).approvedAt).toBeNull();
+    expect((await ltConn(idA)).liveEnabled).toBe(false);
   });
 
   it('refuses invalid input (reserved key index, a seed phrase) without storing anything or echoing it', async () => {
@@ -275,10 +299,10 @@ describe('gated order adapter (mocked Lighter)', () => {
     await quote();
   });
 
-  it('every capability unverified (this build): nothing is signed or sent', async () => {
+  it('every capability unverified: the Lighter Live scope refuses before the venue; nothing is signed or sent', async () => {
     const i = await openIntent('LONG');
     await drain(clock.now);
-    expect(await intentRow(i.id)).toMatchObject({ state: 'REJECTED', stateReason: expect.stringMatching(/^CAPABILITY_UNVERIFIED:LIGHTER_SIGNER/) });
+    expect(await intentRow(i.id)).toMatchObject({ state: 'REJECTED', stateReason: 'LIVE_REFUSED:LIGHTER_SCOPE' });
     expect(ex.sent).toHaveLength(0);
     expect(signer.signed).toBe(0);
     expect((await ltAccount(idA)).orderReserve).toBe('0.00000000');
@@ -289,12 +313,61 @@ describe('gated order adapter (mocked Lighter)', () => {
     delete process.env.LIGHTER_TAKER_FEE_RATE;
     const i = await openIntent('LONG');
     await drain(clock.now);
-    expect((await intentRow(i.id)).stateReason).toBe('LIVE_INPUT_UNRESOLVED:takerFeeRate');
+    expect((await intentRow(i.id)).stateReason).toBe('LIVE_REFUSED:LIGHTER_SCOPE'); // the scope requires every input
     Object.assign(process.env, INPUTS);
     const j = await openIntent('LONG', { basis: 'LAST' });
     await drain(clock.now);
     expect((await intentRow(j.id)).stateReason).toMatch(/^STOP_BASIS_UNSUPPORTED:LAST/);
     expect(ex.sent).toHaveLength(0);
+  });
+
+  it('Lighter Live scope: the configured account can be approved and activated on the configured market; another account, market or route cannot use the path', async () => {
+    await verifyCaps(ALL_LIGHTER);
+    const a = await ltConn(idA);
+    await direct.db.update(schema.exchangeConnections).set({ approvedAt: null, approvedBy: null, liveEnabled: false }).where(eq(schema.exchangeConnections.id, a.id));
+    const limits = { maxOrderContracts: '1', maxOrderNotionalUsdt: '500', maxLeverage: 10, maxExposureUsdt: '1000' };
+    expect((await call(approve.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: a.id }, body: limits })).status).toBe(200);
+    expect((await call(activate.POST, { method: 'POST', path: '/v1/me/live/activate?exchange=LIGHTER', cookie: cookies.a })).status).toBe(200);
+    expect((await call(contracts.POST, { method: 'POST', path: '/x', cookie: cookies.admin, params: { id: xau }, body: { allowed: true } })).status).toBe(200);
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau }, 'SEND')).toBeNull();
+    // Route scope: only listed TradingView routes may open Lighter positions.
+    const route = '11111111-1111-4111-8111-111111111111';
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau, routeId: route }, 'ENTRY')).toMatch(/LIGHTER_LIVE_ROUTES/);
+    process.env.LIGHTER_LIVE_ROUTES = route;
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau, routeId: route }, 'ENTRY')).toBeNull();
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau, routeId: '22222222-2222-4222-8222-222222222222' }, 'ENTRY')).toMatch(/LIGHTER_LIVE_ROUTES/);
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau, routeId: null }, 'ENTRY')).toMatch(/LIGHTER_LIVE_ROUTES/);
+    // Another investor (no connection in the scope) is refused at every level.
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idB, instrumentId: xau, routeId: route }, 'ENTRY')).not.toBeNull();
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idB }, 'ACCOUNT')).not.toBeNull();
+    // Another market: refused before sending, even for the configured account.
+    process.env.LIGHTER_LIVE_MARKETS = '1';
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau }, 'SEND')).toMatch(/LIGHTER_LIVE_MARKETS/);
+    const i = await openIntent('LONG');
+    await drain(clock.now);
+    expect(await intentRow(i.id)).toMatchObject({ state: 'REJECTED', stateReason: 'LIVE_REFUSED:LIGHTER_SCOPE' });
+    expect(ex.sent).toHaveLength(0);
+    // Orders switched off for the deployment: refused again.
+    process.env.LIGHTER_LIVE_MARKETS = '92';
+    delete process.env.LIGHTER_MAINNET_ORDERS;
+    expect(await lighterLiveRefusalFor(direct.db, { ownerId: idA, instrumentId: xau }, 'SEND')).toMatch(/LIGHTER_MAINNET_ORDERS/);
+  });
+
+  it('a Lighter capability is VERIFIED only by a Lighter mainnet transaction TrendPilot recorded as EXECUTED, of the matching kind', async () => {
+    const post = (capability: string, evidence: string) => call(capabilities.POST, { method: 'POST', path: '/x', cookie: cookies.admin, body: { capability, state: 'VERIFIED', evidence } });
+    expect((await post('LIGHTER_OPEN_WITH_LINKED_STOP', 'operator says it works')).status).toBe(400);
+    const hash = 'ab'.repeat(32);
+    expect((await post('LIGHTER_OPEN_WITH_LINKED_STOP', `lighter-tx:${hash}`)).status).toBe(400); // not recorded
+    const a = await ltConn(idA);
+    const base = { ownerId: idA, connectionId: a.id, accountIndex: 4242, apiKeyIndex: 5, marketId: 92, txType: 28, request: {}, txHash: hash };
+    await direct.db.insert(schema.lighterTxs).values({ ...base, environment: 'TESTNET', clientOrderId: 'ev-testnet', purpose: 'OPEN_WITH_STOP', clientOrderIndex: 900001, state: 'EXECUTED' });
+    expect((await post('LIGHTER_OPEN_WITH_LINKED_STOP', `lighter-tx:${hash}`)).status).toBe(400); // testnet is not mainnet evidence
+    const hash2 = 'cd'.repeat(32);
+    await direct.db.insert(schema.lighterTxs).values({ ...base, txHash: hash2, environment: 'MAINNET', clientOrderId: 'ev-open', purpose: 'OPEN_WITH_STOP', clientOrderIndex: 900002, state: 'ACCEPTED' });
+    expect((await post('LIGHTER_OPEN_WITH_LINKED_STOP', `lighter-tx:${hash2}`)).status).toBe(400); // accepted is not executed
+    await direct.db.update(schema.lighterTxs).set({ state: 'EXECUTED' }).where(eq(schema.lighterTxs.txHash, hash2));
+    expect((await post('LIGHTER_OPEN_WITH_LINKED_STOP', `lighter-tx:${hash2}`)).status).toBe(200);
+    expect((await post('LIGHTER_REDUCE_ONLY_CLOSE', `lighter-tx:${hash2}`)).status).toBe(400); // an open is not close evidence
   });
 
   it.each(['LONG', 'SHORT'] as const)('%s: one linked OTO transaction; the native reduce-only stop covers the confirmed fill; fees from Lighter fills', async (side) => {
@@ -872,6 +945,25 @@ describe('release gaps: stop expiry, key lifecycle, halt, Operations', () => {
     const r = await syncLighterConnection(direct.db, (await ltConn(idA)).id, clock.now);
     expect(r.protection).toEqual([expect.objectContaining({ status: 'UNPROTECTED', detail: expect.stringMatching(/EXPIRED/) })]);
     expect(r.drift.map((d) => d.kind)).toContain('STOP_MISSING');
+  });
+
+  it('leaving the Lighter Live scope stops new entries only: protection, the reduce-only close and sync keep running', async () => {
+    const i = await openIntent('LONG');
+    await drain(clock.now);
+    expect((await positionOf(i.id))!).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
+    delete process.env.LIGHTER_LIVE_CONNECTIONS; // the account leaves the scope (orders stay switched on)
+    const j = await openIntent('LONG');
+    await drain(clock.now);
+    expect(await intentRow(j.id)).toMatchObject({ state: 'REJECTED', stateReason: 'LIVE_REFUSED:LIGHTER_SCOPE' });
+    expect(await lighterConnectionsToSync(direct.db)).toContain((await ltConn(idA)).id);
+    const s = await syncLighterConnection(direct.db, (await ltConn(idA)).id, clock.now);
+    expect(s.ok).toBe(true);
+    const p = (await positionOf(i.id))!;
+    expect(s.protection.find((x) => x.positionId === p.id)?.status).toBe('PROTECTED');
+    await direct.db.transaction((tx) => requestExit(tx, { position: p, reason: 'MANUAL_CLOSE', now: clock.now }));
+    await drain(clock.now);
+    expect((await positionOf(i.id))!.status).toBe('CLOSED');
+    expect((await txRows()).filter((t) => t.purpose === 'CLOSE')).toHaveLength(1);
   });
 
   it('halting new entries keeps reconciliation and closes running', async () => {

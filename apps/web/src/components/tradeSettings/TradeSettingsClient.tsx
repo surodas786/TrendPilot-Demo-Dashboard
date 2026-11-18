@@ -25,10 +25,13 @@ interface Props {
   liveConnectionStatus: string | null;
   /** The investor's Bitunix connection (Live on Bitunix contracts needs it verified). */
   bitunixConnectionStatus?: string | null;
+  /** The investor's Lighter connection, and the Lighter markets in their Lighter Live scope (server-decided). */
+  lighterConnectionStatus?: string | null;
+  lighterLiveIds?: string[];
 }
 
 /** UI-03 Trade Settings for the signed-in investor only. All data arrives owner-scoped from the server. */
-export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus, bitunixConnectionStatus = null }: Props) {
+export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [] }: Props) {
   const router = useRouter();
   /** A saved block id, 'new', or a new block prefilled from a saved one in the other mode. */
   const [editing, setEditing] = useState<string | 'new' | { copyFrom: OrderBlockDto; mode: BlockMode } | null>(null);
@@ -38,7 +41,8 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
   const copy = editing && typeof editing === 'object' ? editing : undefined;
   const takenByMode = { PAPER: blocks.filter((b) => b.mode === 'PAPER').map((b) => b.instrumentId), LIVE: blocks.filter((b) => b.mode === 'LIVE').map((b) => b.instrumentId) };
   const tradable = (i: InstrumentDto) => versions.some((v) => v.isLatest && v.instrumentIds.includes(i.id));
-  const liveFor = (i: InstrumentDto) => liveUnavailableReason(i.exchange === 'BITUNIX' ? bitunixConnectionStatus : i.exchange === 'MEXC' ? liveConnectionStatus : null, i.exchange) === null;
+  const liveFor = (i: InstrumentDto) =>
+    liveUnavailableReason(i.exchange === 'BITUNIX' ? bitunixConnectionStatus : i.exchange === 'MEXC' ? liveConnectionStatus : i.exchange === 'LIGHTER' ? lighterConnectionStatus : null, i.exchange, { lighterLive: lighterLiveIds.includes(i.id) }) === null;
   const canAdd = instruments.some((i) => tradable(i) && ((supportsMode(i, 'PAPER') && !takenByMode.PAPER.includes(i.id)) || (liveFor(i) && !takenByMode.LIVE.includes(i.id))));
   const contractOf = (b: OrderBlockDto) => {
     const i = instruments.find((x) => x.id === b.instrumentId);
@@ -112,6 +116,8 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
             takenByMode={takenByMode}
             liveConnectionStatus={liveConnectionStatus}
             bitunixConnectionStatus={bitunixConnectionStatus}
+            lighterConnectionStatus={lighterConnectionStatus}
+            lighterLiveIds={lighterLiveIds}
             timezone={timezone}
             onDone={(saved) => {
               setEditing(null);

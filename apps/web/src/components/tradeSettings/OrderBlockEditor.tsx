@@ -84,6 +84,9 @@ interface Props {
   /** Status of the investor's MEXC connection (null = none). Live needs VERIFIED (liveUnavailableReason). */
   liveConnectionStatus: string | null;
   bitunixConnectionStatus?: string | null;
+  /** Lighter connection status and the Lighter markets in this investor's Lighter Live scope. */
+  lighterConnectionStatus?: string | null;
+  lighterLiveIds?: string[];
   /** New entry prefilled from a saved block's settings, in `mode` (same pair). */
   copyFrom?: { block: OrderBlockDto; mode: BlockMode };
   timezone: string;
@@ -95,7 +98,7 @@ interface Props {
 }
 
 /** Adapted from the MagicPatterns TokenBlockEditor; persists through /v1/me/order-blocks. */
-export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, bitunixConnectionStatus = null, copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
+export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [], copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
   /** The same rule as the server: Live needs a verified connection to the pair's exchange. */
   const anyLive = liveUnavailableReason(liveConnectionStatus) === null || liveUnavailableReason(bitunixConnectionStatus, 'BITUNIX') === null;
   let liveReason = liveUnavailableReason(liveConnectionStatus);
@@ -138,8 +141,14 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
 
   const instrument = instruments.find((i) => i.id === draft.instrumentId);
   // Once a pair is chosen, Live follows THAT exchange's connection.
-  // Lighter (selection only) is never Live-ready: liveUnavailableReason explains why, whatever the status.
-  if (instrument) liveReason = liveUnavailableReason(instrument.exchange === 'BITUNIX' ? bitunixConnectionStatus : instrument.exchange === 'MEXC' ? liveConnectionStatus : null, instrument.exchange);
+  // Lighter is Live-ready only inside the server-decided Lighter Live scope (none by default).
+  const lighterLive = !!instrument && instrument.exchange === 'LIGHTER' && lighterLiveIds.includes(instrument.id);
+  if (instrument)
+    liveReason = liveUnavailableReason(
+      instrument.exchange === 'BITUNIX' ? bitunixConnectionStatus : instrument.exchange === 'MEXC' ? liveConnectionStatus : instrument.exchange === 'LIGHTER' ? lighterConnectionStatus : null,
+      instrument.exchange,
+      { lighterLive }
+    );
   /** Order cost and money amounts are in the pair's settlement currency (USDC on Lighter). */
   const ccy = costCurrency(instrument);
   const version = versions.find((v) => v.id === draft.strategyVersionId);
@@ -352,9 +361,11 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             }
             hint={
               mode === 'LIVE'
-                ? (instrument && !isTradableExchange(instrument.exchange)
+                ? (instrument && !isTradableExchange(instrument.exchange) && !lighterLive
                     ? `${exchangeName(instrument.exchange)} orders are not available yet: you can select and save this pair, but the entry cannot be activated until ${exchangeName(instrument.exchange)} trading is released.`
-                    : `Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'} Futures account with the stop loss in the same request.`)
+                    : lighterLive
+                      ? 'Live sends real orders to your own Lighter account (USDC) with a linked native stop loss.'
+                      : `Live sends real orders to your own ${instrument?.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'} Futures account with the stop loss in the same request.`)
                   + ' Entries also need the platform switch, administrator approval of your account and limits, your own activation (Live Trading page) and a contract on the Live allowlist. Same strategy rules and prices as Paper; separate balance, orders and positions.'
                 : 'Paper uses the simulator with an isolated paper balance. Same strategy rules and public prices as Live.'
             }

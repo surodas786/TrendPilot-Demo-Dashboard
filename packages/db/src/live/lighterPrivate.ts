@@ -1,4 +1,5 @@
 import { Decimal, LIGHTER_ENVIRONMENTS, type LighterEnvironment, type LighterOrderReq } from '@trendpilot/domain';
+import { lighterMainnetOrdersEnabled } from './lighterLiveScope';
 import { LiveOrderTransportRefused, openLiveOrderTransport } from './mexcPrivate';
 
 /**
@@ -245,11 +246,12 @@ export function parseLighterOrders(body: unknown): LighterOrder[] {
 
 const READ_PATHS = [/^\/$/, /^\/info$/, /^\/api\/v1\/account$/, /^\/api\/v1\/apikeys$/, /^\/api\/v1\/nextNonce$/, /^\/api\/v1\/tx$/, /^\/api\/v1\/orderBookOrders$/, /^\/api\/v1\/accountOrders$/, /^\/api\/v1\/trades$/];
 
-/**
- * Lighter's mainnet ORDER submission is disabled in this build (Lighter plan Step 4: no signer
- * runtime approved, capabilities unverified). Reads stay available.
+/*
+ * Lighter's mainnet ORDER submission is a deployment switch, off by default: LIGHTER_MAINNET_ORDERS
+ * must be "enabled" (lighterMainnetOrdersEnabled, lighterLiveScope.ts). Reads stay available either
+ * way. It is a kill switch for ALL Lighter orders (closes included); to stop only new entries, halt
+ * entries instead.
  */
-export const LIGHTER_MAINNET_ORDERS_ENABLED = false;
 
 /** Configuration error for the Lighter testnet switch. */
 export class LighterTestnetConfigError extends Error {
@@ -263,7 +265,7 @@ export class LighterTestnetConfigError extends Error {
  * LIGHTER_TESTNET: "" / "off" (default) or "enabled". "enabled" is accepted ONLY in an isolated
  * local test setup: never with NODE_ENV=production, and only when DATABASE_URL names a database
  * ending in `_test` or `_testnet`. Testnet never touches mainnet gates: it neither opens nor
- * requires LIVE_ORDER_TRANSPORT, and mainnet stays refused by LIGHTER_MAINNET_ORDERS_ENABLED.
+ * requires LIVE_ORDER_TRANSPORT, and mainnet stays governed by LIGHTER_MAINNET_ORDERS.
  */
 export function lighterTestnetEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const v = (env.LIGHTER_TESTNET ?? '').trim().toLowerCase();
@@ -281,8 +283,8 @@ export function lighterTestnetEnabled(env: Record<string, string | undefined> = 
 }
 
 /**
- * The Lighter order gate. MAINNET: the deployment transport (LIVE_ORDER_TRANSPORT) AND this build's
- * mainnet switch (off). TESTNET: only the explicit isolated testnet setting; it can never grant mainnet.
+ * The Lighter order gate. MAINNET: the deployment transport (LIVE_ORDER_TRANSPORT) AND the Lighter
+ * mainnet switch (LIGHTER_MAINNET_ORDERS, off by default). TESTNET: only the explicit isolated testnet setting; it can never grant mainnet.
  */
 export function openLighterOrderTransport(environment: LighterEnvironment, env: Record<string, string | undefined> = process.env): { readonly granted: true } {
   if (environment === 'TESTNET') {
@@ -290,7 +292,7 @@ export function openLighterOrderTransport(environment: LighterEnvironment, env: 
     return { granted: true };
   }
   const g = openLiveOrderTransport(env); // refuses unless LIVE_ORDER_TRANSPORT=enabled in production
-  if (!LIGHTER_MAINNET_ORDERS_ENABLED) throw new LiveOrderTransportRefused('Lighter mainnet order submission is disabled in this build (Lighter plan Step 4)');
+  if (!lighterMainnetOrdersEnabled(env)) throw new LiveOrderTransportRefused('Lighter mainnet order submission is disabled on this deployment (LIGHTER_MAINNET_ORDERS is not enabled)');
   return g;
 }
 

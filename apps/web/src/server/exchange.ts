@@ -23,7 +23,7 @@ export type ConnectableExchangeId = TradableExchangeId | 'LIGHTER';
 /**
  * The exchange of a CONNECTION request (save, check, sync, remove). Like `exchangeOf`, but Lighter
  * is accepted: an investor can connect and verify a Lighter account — with or without MEXC or
- * Bitunix — while Lighter Live trading stays refused (activation uses `exchangeOf`).
+ * Bitunix. Lighter Live activation is decided by the Lighter Live scope (setLiveActivation).
  */
 export function connectionExchangeOf(req: Request, body?: Record<string, unknown>): ConnectableExchangeId {
   const fromQuery = new URL(req.url).searchParams.get('exchange');

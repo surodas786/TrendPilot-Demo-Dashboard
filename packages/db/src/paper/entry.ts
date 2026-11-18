@@ -27,7 +27,7 @@ import { accountExchangeFor, availableOf, book, lockPaperAccount, type PaperAcco
 import { latestQuote, loadClosedCandles } from './market';
 import { instrumentSpec, lighterSpecGap } from './spec';
 import type { SimResult } from './simulator';
-import { liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
+import { lighterLiveRefusalFor, liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { requestExit } from './exits';
 import { newClientOrderId } from './clientOrderId';
@@ -114,13 +114,15 @@ export interface EntryAssessment {
  */
 export async function assessEntry(
   tx: Executor,
-  input: { event: Pick<EventRow, 'interval' | 'barOpenAt' | 'referencePrice'> & Partial<Pick<EventRow, 'instrumentId' | 'sourceExchange' | 'sourceSymbol'>>; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; account: PaperAccountRow }
+  input: { event: Pick<EventRow, 'interval' | 'barOpenAt' | 'referencePrice'> & Partial<Pick<EventRow, 'instrumentId' | 'sourceExchange' | 'sourceSymbol' | 'routeId'>>; block: BlockRow; version: VersionRow; side: 'LONG' | 'SHORT'; now: Date; account: PaperAccountRow }
 ): Promise<EntryAssessment> {
   const { event, block, version, side, now, account } = input;
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
-  // Live only on exchanges TrendPilot can trade Live (Lighter is Paper only in this release).
+  // Live only on exchanges TrendPilot can trade Live; Lighter only inside the Lighter Live scope
+  // (account, market and route; lighterLiveScope.ts), refused by default.
   if (block.mode === 'LIVE' && !isTradableExchange(inst!.exchange)) {
-    return { result: { ok: false, reason: 'EXCHANGE_NOT_ENABLED', detail: { exchange: inst!.exchange, reasonText: ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED } }, live: null, availableUsdt: availableOf(account) };
+    const lighter = inst!.exchange === 'LIGHTER' ? await lighterLiveRefusalFor(tx, { ownerId: block.ownerId, instrumentId: block.instrumentId, routeId: event.routeId ?? null }, 'ENTRY') : ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED;
+    if (lighter) return { result: { ok: false, reason: 'EXCHANGE_NOT_ENABLED', detail: { exchange: inst!.exchange, reasonText: lighter } }, live: null, availableUsdt: availableOf(account) };
   }
   // Paper simulates MEXC (USDT account) and Lighter (isolated USDC account) contracts. A Paper block
   // on a Bitunix contract (created before this check existed) is refused.
@@ -225,16 +227,23 @@ export async function evaluateAndReserveEntry(
   // ARC-02: the account lock serialises reservations and scope checks for this investor. Live
   // trades on the instrument's exchange (MEXC or Bitunix), each with its own account.
   const [instEx] = await tx.select({ exchange: instruments.exchange }).from(instruments).where(eq(instruments.id, block.instrumentId));
-  // Lighter is Paper only: a Lighter Live entry never reaches an account, a venue or an order (it is
-  // skipped before any account is locked or created). Paper Lighter uses its own USDC account.
-  if (block.mode === 'LIVE' ? !isTradableExchange(instEx?.exchange) : !isTradableExchange(instEx?.exchange) && !isPaperExchange(instEx?.exchange)) {
+  // A Lighter Live entry outside the Lighter Live scope (the default: no scope) never reaches an
+  // account, a venue or an order: it is skipped before any account is locked or created. Paper
+  // Lighter uses its own USDC account.
+  const lighterLive = block.mode === 'LIVE' && instEx?.exchange === 'LIGHTER';
+  const refusal = lighterLive
+    ? await lighterLiveRefusalFor(tx, { ownerId: block.ownerId, instrumentId: block.instrumentId, routeId: event.routeId }, 'ENTRY')
+    : (block.mode === 'LIVE' ? !isTradableExchange(instEx?.exchange) : !isTradableExchange(instEx?.exchange) && !isPaperExchange(instEx?.exchange))
+      ? ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED
+      : null;
+  if (refusal) {
     await tx
       .insert(signalDecisions)
-      .values({ eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId, status: 'SKIPPED', reason: 'EXCHANGE_NOT_ENABLED', detail: { side, reasonText: ENTRY_REASON_TEXT.EXCHANGE_NOT_ENABLED, exchange: instEx?.exchange ?? null, strategyVersion: version.version, blockRevision: block.revision, ...extra } })
+      .values({ eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId, status: 'SKIPPED', reason: 'EXCHANGE_NOT_ENABLED', detail: { side, reasonText: refusal, exchange: instEx?.exchange ?? null, strategyVersion: version.version, blockRevision: block.revision, ...extra } })
       .onConflictDoNothing();
     return { status: 'SKIPPED', reason: 'EXCHANGE_NOT_ENABLED' };
   }
-  const account = await lockPaperAccount(tx, block.ownerId, block.mode, accountExchangeFor(block.mode, instEx?.exchange));
+  const account = await lockPaperAccount(tx, block.ownerId, block.mode, accountExchangeFor(block.mode, instEx?.exchange, { lighterLive }), { lighterLiveLedger: lighterLive });
   const { result, live } = await assessEntry(tx, { event, block, version, side, now, account });
 
   const base = { eventId: event.id, ownerId: block.ownerId, orderBlockId: block.id, strategyVersionId: block.strategyVersionId, step: ENTRY_STEP, evaluatedAt: now, correlationId: event.correlationId };

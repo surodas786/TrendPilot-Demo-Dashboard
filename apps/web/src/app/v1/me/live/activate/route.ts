@@ -1,6 +1,6 @@
 import { connectionDto, getDb, setLiveActivation } from '@trendpilot/db';
 import { json, route } from '@/server/http';
-import { exchangeOf } from '@/server/exchange';
+import { connectionExchangeOf } from '@/server/exchange';
 import { requireInvestor } from '@/server/session';
 
 export const dynamic = 'force-dynamic';
@@ -8,5 +8,5 @@ export const dynamic = 'force-dynamic';
 /** POST: the investor switches Live trading on (needs a verified, approved connection). */
 export const POST = route(async (req, { correlationId }) => {
   const { user } = await requireInvestor(req);
-  return json(correlationId, { connection: connectionDto(await setLiveActivation(getDb(), user.id, true, correlationId, exchangeOf(req))) });
+  return json(correlationId, { connection: connectionDto(await setLiveActivation(getDb(), user.id, true, correlationId, connectionExchangeOf(req))) });
 });
