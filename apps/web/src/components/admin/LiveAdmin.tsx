@@ -14,7 +14,18 @@ type Cap = { state: 'VERIFIED' | 'PILOT_ACCEPTED' | 'PENDING'; evidence: string;
 type Limits = { maxOrderContracts: string; maxOrderNotionalUsdt: string; maxLeverage: number; maxExposureUsdt: string };
 export interface LiveAdminData {
   control: { transportEnabled: boolean; liveEnabled: boolean; entriesHalted: boolean; haltReason: string | null; capabilities: Record<string, Cap>; note: string | null };
-  capabilities: { id: string; summary: string; documented: string; mock: string; readOnly: string; gaps: string[] }[];
+  capabilities: { id: string; exchange: string; summary: string; documented: string; mock: string; readOnly: string; gaps: string[] }[];
+  /** Per exchange: what blocks regular (signal-driven) Live entries there, with capability records as recorded. */
+  exchanges: {
+    exchange: string;
+    label: string;
+    capabilities: { id: string; state: 'VERIFIED' | 'PILOT_ACCEPTED' | 'PENDING' }[];
+    pilotAccepted: string[];
+    allowlisted: string[];
+    readyAccounts: number;
+    accounts: number;
+    blocking: { reason: string; text: string }[];
+  }[];
   connections: {
     id: string;
     exchange: string;
@@ -31,6 +42,8 @@ export interface LiveAdminData {
     lastSyncAt: string | null;
     lastSyncError: string | null;
     drift: { kind: string; symbol: string; detail: string }[];
+    /** Every condition blocking a regular Live entry on this account's exchange (empty = ready). */
+    blockers: { reason: string; text: string }[];
   }[];
   contracts: { id: string; exchange: string; symbol: string; exchangeSymbol: string; status: string; isFixture: boolean; liveAllowed: boolean }[];
 }
@@ -106,72 +119,132 @@ export function LiveAdmin({ initial }: { initial: LiveAdminData }) {
         </div>
         <p className="mt-3 text-xs text-subtle">
           Halting or switching Live off stops new Live entries only; stop losses, take profits, trailing take profit, close-on-signal, manual and emergency closes keep running. Setting LIVE_ORDER_TRANSPORT=disabled stops all order traffic, including closes — use it only as a last resort (runbook §6).
-          {!capsReady && ' Switching Live on needs the four order capabilities below recorded as VERIFIED or PILOT_ACCEPTED.'}
+          {!capsReady && ' Switching Live on (for every exchange) needs the four MEXC order capabilities below recorded as VERIFIED or PILOT_ACCEPTED.'}
         </p>
       </Card>
 
-      <Card title="MEXC order capabilities (evidence)" testId="live-capabilities">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[860px] text-sm">
-            <thead className="text-left text-xs text-subtle">
-              <tr>
-                <th className="py-2 pr-3 font-medium">Capability</th>
-                <th className="py-2 pr-3 font-medium">Docs</th>
-                <th className="py-2 pr-3 font-medium">Mock</th>
-                <th className="py-2 pr-3 font-medium">Operator record</th>
-                <th className="py-2 font-medium" />
-              </tr>
-            </thead>
-            <tbody>
-              {d.capabilities.map((cap) => {
-                const rec = c.capabilities[cap.id];
-                return (
-                  <tr key={cap.id} className="border-t border-line align-top">
-                    <td className="py-2 pr-3">
-                      <div className="font-mono text-xs text-ink">{cap.id}</div>
-                      <div className="text-xs text-subtle">{cap.summary}</div>
-                    </td>
-                    <td className="py-2 pr-3 text-xs">{cap.documented}</td>
-                    <td className="py-2 pr-3 text-xs">{cap.mock}</td>
-                    <td className="py-2 pr-3 text-xs">{rec ? `${rec.state} — ${rec.evidence}` : 'PENDING'}</td>
-                    <td className="py-2 text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button size="sm" loading={busy === `cap-v-${cap.id}`} onClick={() => needNote() && post(`cap-v-${cap.id}`, '/v1/admin/live/capabilities', { capability: cap.id, state: 'VERIFIED', evidence: note }, `${cap.id}: VERIFIED`)}>
-                          Verified
-                        </Button>
-                        <Button size="sm" loading={busy === `cap-p-${cap.id}`} onClick={() => needNote() && post(`cap-p-${cap.id}`, '/v1/admin/live/capabilities', { capability: cap.id, state: 'PILOT_ACCEPTED', evidence: note }, `${cap.id}: accepted for the supervised pilot`)}>
-                          Pilot
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      <Card title="Live readiness by exchange" testId="live-readiness">
+        <div className="grid gap-3 lg:grid-cols-3">
+          {d.exchanges.map((x) => (
+            <div key={x.exchange} className="rounded-lg border border-line p-3" data-testid={`live-readiness-${x.exchange}`}>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="font-semibold text-ink">{x.label}</span>
+                <StatusPill tone={x.blocking.length ? 'loss' : 'gain'}>{x.blocking.length ? 'Regular Live use blocked' : 'Ready for Live entries'}</StatusPill>
+              </div>
+              <p className="mt-1 text-xs text-subtle">
+                Allowlisted: {x.allowlisted.length ? x.allowlisted.join(', ') : 'none'} · accounts ready {x.readyAccounts}/{x.accounts}
+              </p>
+              <p className="mt-1 text-xs text-subtle">Capabilities: {x.capabilities.map((cap) => `${cap.id.replace(/^(BITUNIX|LIGHTER)_/, '')} ${cap.state}`).join(' · ')}</p>
+              {x.pilotAccepted.length > 0 && (
+                <p className="mt-1 text-xs text-warn" data-testid={`live-pilot-${x.exchange}`}>
+                  {x.pilotAccepted.length} {x.pilotAccepted.length === 1 ? 'capability is' : 'capabilities are'} PILOT_ACCEPTED, not VERIFIED. The adapter sends these order types, so this status alone does not block entries.
+                </p>
+              )}
+              {x.blocking.length > 0 && (
+                <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-loss" data-testid={`live-blocking-${x.exchange}`}>
+                  {x.blocking.map((b, i) => (
+                    <li key={i} data-reason={b.reason}>
+                      {b.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
         </div>
-        <p className="mt-2 text-xs text-subtle">VERIFIED: observed on a real MEXC account (record the order IDs). Pilot: accepted for the supervised first trades, which are themselves the evidence.</p>
       </Card>
 
-      <Card title="Investor MEXC accounts" testId="live-connections">
+      {d.exchanges.map((ex) => {
+        const rows = d.capabilities.filter((cap) => cap.exchange === ex.exchange);
+        if (!rows.length) return null;
+        return (
+          <Card key={ex.exchange} title={`${ex.label} order capabilities (evidence)`} testId={`live-capabilities-${ex.exchange}`}>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[860px] text-sm">
+                <thead className="text-left text-xs text-subtle">
+                  <tr>
+                    <th className="py-2 pr-3 font-medium">Capability</th>
+                    <th className="py-2 pr-3 font-medium">Docs</th>
+                    <th className="py-2 pr-3 font-medium">Mock</th>
+                    <th className="py-2 pr-3 font-medium">Operator record</th>
+                    <th className="py-2 font-medium" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((cap) => {
+                    const rec = c.capabilities[cap.id];
+                    return (
+                      <tr key={cap.id} className="border-t border-line align-top" data-testid={`cap-${cap.id}`}>
+                        <td className="py-2 pr-3">
+                          <div className="font-mono text-xs text-ink">{cap.id}</div>
+                          <div className="text-xs text-subtle">{cap.summary}</div>
+                        </td>
+                        <td className="py-2 pr-3 text-xs">{cap.documented}</td>
+                        <td className="py-2 pr-3 text-xs">{cap.mock}</td>
+                        <td className="py-2 pr-3 text-xs">
+                          <StatusPill tone={rec?.state === 'VERIFIED' ? 'gain' : rec?.state === 'PILOT_ACCEPTED' ? 'warn' : 'neutral'}>{rec?.state ?? 'PENDING'}</StatusPill>
+                          {rec && <div className="mt-1 text-subtle">{rec.evidence}</div>}
+                        </td>
+                        <td className="py-2 text-right">
+                          <div className="flex justify-end gap-1">
+                            <Button size="sm" loading={busy === `cap-v-${cap.id}`} onClick={() => needNote() && post(`cap-v-${cap.id}`, '/v1/admin/live/capabilities', { capability: cap.id, state: 'VERIFIED', evidence: note }, `${cap.id}: VERIFIED`)}>
+                              Verified
+                            </Button>
+                            <Button size="sm" loading={busy === `cap-p-${cap.id}`} onClick={() => needNote() && post(`cap-p-${cap.id}`, '/v1/admin/live/capabilities', { capability: cap.id, state: 'PILOT_ACCEPTED', evidence: note }, `${cap.id}: accepted for the supervised pilot`)}>
+                              Pilot
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-2 text-xs text-subtle">
+              VERIFIED: observed on a real {ex.label} account
+              {ex.exchange === 'BITUNIX' ? ' (cite bitunix-pilot:<sha256> from ops:bitunix-pilot --execute)' : ex.exchange === 'LIGHTER' ? ' (cite lighter-tx:<hash>)' : ' (record the order IDs)'}. Pilot: accepted for the supervised first trades, which are themselves
+              the evidence.
+            </p>
+          </Card>
+        );
+      })}
+
+      <Card title="Investor exchange accounts" testId="live-connections">
         {d.connections.length === 0 ? (
-          <p className="text-sm text-muted">No investor has connected a MEXC account yet.</p>
+          <p className="text-sm text-muted">No investor has connected an exchange account yet.</p>
         ) : (
           <div className="space-y-4">
             {d.connections.map((x) => {
               const l = limits[x.id] ?? { maxOrderContracts: '', maxOrderNotionalUsdt: '', maxLeverage: 3, maxExposureUsdt: '' };
               const setL = (patch: Partial<Limits>) => setLimits({ ...limits, [x.id]: { ...l, ...patch } });
               return (
-                <div key={x.id} className="rounded-lg border border-line p-4" data-testid="live-connection">
+                <div key={x.id} className="rounded-lg border border-line p-4" data-testid="live-connection" data-exchange={x.exchange}>
                   <div className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="font-semibold text-ink">{x.owner.name}</span>
                     <span className="text-subtle">{x.owner.email}</span>
-                    <StatusPill tone="neutral">{x.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : 'MEXC'}</StatusPill>
+                    <StatusPill tone="neutral">{x.exchange === 'BITUNIX' ? 'Bitunix (Hedge mode)' : exchangeLabel(x.exchange)}</StatusPill>
                     <span className="text-subtle">· {x.accountRef} · key {x.keyFingerprint} · {x.positionMode ?? 'mode unknown'}</span>
                     <StatusPill tone={x.status === 'VERIFIED' ? 'gain' : x.status === 'FAILED' ? 'loss' : 'neutral'}>{x.status}</StatusPill>
                     <StatusPill tone={x.approved ? 'gain' : 'neutral'}>{x.approved ? 'Approved' : 'Not approved'}</StatusPill>
                     <StatusPill tone={x.liveEnabled ? 'warn' : 'neutral'}>{x.liveEnabled ? 'Investor: Live on' : 'Investor: Live off'}</StatusPill>
                     {x.entriesHalted && <StatusPill tone="loss">Halted: {x.haltReason}</StatusPill>}
+                  </div>
+                  <div className="mt-2 text-xs" data-testid="live-connection-blockers">
+                    {x.blockers.length === 0 ? (
+                      <span className="text-gain">{exchangeLabel(x.exchange)} Live entries: no blocking condition.</span>
+                    ) : (
+                      <>
+                        <span className="font-medium text-loss">{exchangeLabel(x.exchange)} Live entries blocked by:</span>
+                        <ul className="mt-0.5 list-disc pl-5 text-loss">
+                          {x.blockers.map((b, i) => (
+                            <li key={i} data-reason={b.reason}>
+                              {b.text}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
                   </div>
                   {x.drift.length > 0 && (
                     <ul className="mt-2 list-disc pl-5 text-xs text-loss">

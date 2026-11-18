@@ -70,7 +70,7 @@ test('admin: Live Trading page with the switch Off and not switchable before cap
   await expect(platform).toContainText('Disabled (LIVE_ORDER_TRANSPORT)');
   await expect(platform).toContainText('Off');
   await expect(platform.getByRole('button', { name: 'Switch Live on' })).toBeDisabled();
-  await expect(page.getByTestId('live-capabilities')).toContainText('OPEN_WITH_ATTACHED_STOP');
+  await expect(page.getByTestId('live-capabilities-MEXC')).toContainText('OPEN_WITH_ATTACHED_STOP');
   await expect(page.getByTestId('live-connections')).toContainText('No investor has connected');
   await expect(page.getByTestId('live-contracts')).toContainText('Paper only');
 });

@@ -300,12 +300,19 @@ export const orderBlocks = pgTable(
      * until the investor saves trailing settings again with an explicit activation value.
      */
     trailingConversionRequired: boolean('trailing_conversion_required').notNull().default(false),
+    /**
+     * Removed by the investor (Trade Settings → Remove) while trade or signal history still
+     * references it: kept for that history, hidden from Trade Settings and never dispatched.
+     * Reversible (clear the column). A block without any history is deleted instead.
+     */
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
     revision: integer('revision').notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt()
   },
   (t) => [
-    uniqueIndex('order_blocks_owner_instrument_mode_key').on(t.ownerId, t.instrumentId, t.mode),
+    // One live (not archived) block per pair and mode; archived blocks keep their history.
+    uniqueIndex('order_blocks_owner_instrument_mode_key').on(t.ownerId, t.instrumentId, t.mode).where(sql`${t.archivedAt} IS NULL`),
     index('order_blocks_owner_id_idx').on(t.ownerId),
     check('order_blocks_order_cost_positive', sql`${t.orderCostUsdt} > 0`),
     check('order_blocks_leverage_positive', sql`${t.leverage} > 0`),

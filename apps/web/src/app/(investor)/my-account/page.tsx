@@ -111,21 +111,31 @@ export default async function MyAccountPage() {
               <p className="text-sm text-muted">No Bitunix account is connected. Connect one on the Live Trading page (Bitunix Futures connection).</p>
             )}
           </div>
-          <div className="mt-3 text-sm" data-testid="account-live-entries">
-            {live.entries.allowed ? (
-              <p className="text-gain">New Live entries are allowed within your limits.</p>
-            ) : (
-              <>
-                <p className="text-muted">New Live entries are not possible now:</p>
-                <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-muted">
-                  {live.entries.blockers.map((b) => (
-                    <li key={b.reason} data-reason={b.reason}>
-                      {b.text}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
+          <div className="mt-4 space-y-3 border-t border-line pt-3" data-testid="account-live-by-exchange">
+            <p className="text-xs font-medium text-subtle">Live entries by exchange — a verified connection alone does not allow Live entries</p>
+            {live.exchanges.map((e) => (
+              <div key={e.exchange} className="text-sm" data-testid={e.exchange === 'MEXC' ? 'account-live-entries' : `account-live-entries-${e.exchange}`} data-exchange={e.exchange} data-allowed={e.entries.allowed}>
+                <p className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-ink">{e.label}</span>
+                  <StatusPill tone={e.connection.status === 'VERIFIED' ? 'gain' : e.connection.status === 'FAILED' ? 'loss' : 'neutral'}>Connection: {e.connection.text}</StatusPill>
+                  <StatusPill tone={e.entries.allowed ? 'gain' : 'neutral'}>{e.entries.allowed ? 'Live entries: allowed' : 'Live entries: not available'}</StatusPill>
+                </p>
+                {e.entries.allowed ? (
+                  <p className="mt-1 text-xs text-gain">
+                    New {e.label} Live entries are allowed on {e.liveContracts.join(', ')}, within your {e.label} limits.
+                  </p>
+                ) : (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-muted">
+                    {e.entries.blockers.map((b) => (
+                      <li key={b.reason} data-reason={b.reason}>
+                        {b.text}
+                        {b.next && <span className="block text-subtle">Next: {b.next}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
           </div>
           <Link href="/live-trading" className="mt-3 inline-block text-xs font-semibold text-accent hover:underline">
             Manage on the Live Trading page

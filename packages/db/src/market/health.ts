@@ -53,6 +53,8 @@ export interface FeedHealthDto {
 export interface FeedEventDto {
   id: string;
   symbol: string;
+  /** Exchange of the contract the event belongs to (the same symbol exists on several exchanges). */
+  exchange: string;
   kind: string;
   message: string;
   windowFrom: string | null;
@@ -77,7 +79,10 @@ export async function listFeedHealth(db: Executor, now = new Date()): Promise<Fe
     // by the candle sync only and never carries a quote state. Their state is therefore judged from
     // the newest stored quote of their OWN public source, with the existing freshness limit.
     let state = (f?.state ?? 'STARTING') as FeedState;
-    if (f && i.exchange !== 'MEXC') {
+    // Same rule when the candle sync has not written a status row yet: a healthy Bitunix stream
+    // must not read "not started" just because no candle was synced for the contract.
+    const ownStream = i.exchange !== 'MEXC' && !!q && q.source === `${i.exchange}_PUBLIC`;
+    if ((f || ownStream) && i.exchange !== 'MEXC') {
       const own = q && q.source === `${i.exchange}_PUBLIC` && asOf ? asOf : null;
       state = own ? (quoteAgeState(own, now) === 'FRESH' ? 'HEALTHY' : 'STALE') : 'STARTING';
       reporting = state === 'HEALTHY';
@@ -125,19 +130,39 @@ export async function listFeedHealth(db: Executor, now = new Date()): Promise<Fe
             contractCheckedAt: iso(f.contractCheckedAt),
             updatedAt: f.updatedAt.toISOString()
           }
-        : null
+        : ownStream && asOf
+          ? {
+              source: i.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : 'LIGHTER_PUBLIC',
+              state,
+              stateText: FEED_STATE_TEXT[state] ?? state,
+              reporting,
+              stateSince: null,
+              lastQuoteAt: asOf.toISOString(),
+              lastSuccessAt: asOf.toISOString(),
+              consecutiveFailures: 0,
+              nextRetryAt: null,
+              lastError: null,
+              clockOffsetMs: null,
+              quoteChannel: q!.channel,
+              lastStreamAt: asOf.toISOString(),
+              lastCandleOpen: {},
+              contractMismatches: [],
+              contractCheckedAt: null,
+              updatedAt: asOf.toISOString()
+            }
+          : null
     };
   });
 }
 
 export async function listFeedEvents(db: Executor, limit = 50): Promise<FeedEventDto[]> {
   const rows = await db
-    .select({ e: marketFeedEvents, symbol: instruments.symbol })
+    .select({ e: marketFeedEvents, symbol: instruments.symbol, exchange: instruments.exchange })
     .from(marketFeedEvents)
     .innerJoin(instruments, eq(instruments.id, marketFeedEvents.instrumentId))
     .orderBy(desc(marketFeedEvents.createdAt), desc(marketFeedEvents.id))
     .limit(Math.min(Math.max(limit, 1), 200));
-  return rows.map(({ e, symbol }) => ({ id: e.id, symbol, kind: e.kind, message: e.message, windowFrom: iso(e.windowFrom), windowTo: iso(e.windowTo), createdAt: e.createdAt.toISOString() }));
+  return rows.map(({ e, symbol, exchange }) => ({ id: e.id, symbol, exchange, kind: e.kind, message: e.message, windowFrom: iso(e.windowFrom), windowTo: iso(e.windowTo), createdAt: e.createdAt.toISOString() }));
 }
 
 type QuoteRow = { instrument_id: string; as_of: Date | string; bid: string; ask: string; mark: string; last: string; source: string; channel: string | null };
