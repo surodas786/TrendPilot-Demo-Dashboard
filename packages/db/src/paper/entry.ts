@@ -118,6 +118,12 @@ export async function assessEntry(
 ): Promise<EntryAssessment> {
   const { event, block, version, side, now, account } = input;
   const [inst] = await tx.select().from(instruments).where(eq(instruments.id, block.instrumentId));
+  // The EXECUTION contract must be published: a disabled contract takes no new entries (Paper or
+  // Live), whatever route delivered the signal. Signal validation (the route and its own primary
+  // contract) is checked separately at intake and never decides another contract's eligibility.
+  if (inst!.status !== 'PUBLISHED') {
+    return { result: { ok: false, reason: 'CONTRACT_DISABLED', detail: { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, reasonText: ENTRY_REASON_TEXT.CONTRACT_DISABLED } }, live: null, availableUsdt: availableOf(account) };
+  }
   // Live only on exchanges TrendPilot can trade Live; Lighter only inside the Lighter Live scope
   // (account, market and route; lighterLiveScope.ts), refused by default.
   if (block.mode === 'LIVE' && !isTradableExchange(inst!.exchange)) {
