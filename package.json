@@ -37,6 +37,7 @@
     "ops:mexc-readonly-check": "npm run mexc-readonly-check -w @trendpilot/db --",
     "ops:bitunix-check": "npm run bitunix-check -w @trendpilot/db --",
     "ops:bitunix-pilot": "npm run bitunix-pilot -w @trendpilot/db --",
+    "ops:lighter-testnet-check": "npm run lighter-testnet-check -w @trendpilot/db --",
     "ops:live-preflight": "npm run live-preflight -w @trendpilot/db --",
     "ops:alert-trace": "npm run alert-trace -w @trendpilot/db --",
     "ops:live-position-check": "npm run live-position-check -w @trendpilot/db --",

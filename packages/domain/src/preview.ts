@@ -12,9 +12,16 @@ export interface ContractSpec {
   contractMultiplier: string;
   qtyStep: string;
   minQty: string;
-  maxQty: string;
+  /** Largest quantity per order; null when the exchange reports no base-unit maximum (Lighter: see maxNotional). */
+  maxQty: string | null;
   priceTick: string;
   takerFeeRate: string;
+  /** Smallest order value in the quote currency (Lighter `min_quote_amount`); absent where not reported. */
+  minNotional?: string | null;
+  /** Largest order value in the quote currency (Lighter `order_quote_limit`); absent where not reported. */
+  maxNotional?: string | null;
+  /** Currency of notional, margin, fees and caps (USDT on MEXC / Bitunix, USDC on Lighter). Default USDT. */
+  quoteCurrency?: string;
 }
 
 export interface Quote {
@@ -100,19 +107,24 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
   const exitFeeAtStop = qty.times(stop).times(fee);
   const lossToStop = qty.times(stopDistance).plus(entryFee).plus(exitFeeAtStop);
 
+  const ccy = spec.quoteCurrency ?? 'USDT';
   const reasons: SidePreview['reasons'] = [];
   if (contracts.lt(D(spec.minQty))) {
     reasons.push({ code: 'SIZE_BELOW_MINIMUM', message: `Order cost and leverage buy ${fmt(contracts)} contracts; the minimum is ${spec.minQty}. Size is never increased automatically.` });
   }
-  if (contracts.gt(D(spec.maxQty))) reasons.push({ code: 'SIZE_ABOVE_MAXIMUM', message: `Exceeds the contract maximum of ${spec.maxQty}.` });
+  if (spec.maxQty !== null && contracts.gt(D(spec.maxQty))) reasons.push({ code: 'SIZE_ABOVE_MAXIMUM', message: `Exceeds the contract maximum of ${spec.maxQty}.` });
+  if (spec.minNotional && notional.lt(D(spec.minNotional))) {
+    reasons.push({ code: 'SIZE_BELOW_MINIMUM', message: `Order value ${fmt(notional, 2)} ${ccy} is below the exchange minimum of ${spec.minNotional} ${ccy}. Size is never increased automatically.` });
+  }
+  if (spec.maxNotional && notional.gt(D(spec.maxNotional))) reasons.push({ code: 'SIZE_ABOVE_MAXIMUM', message: `Order value ${fmt(notional, 2)} ${ccy} exceeds the exchange maximum of ${spec.maxNotional} ${ccy} per order.` });
   if ((long && stop.gte(p)) || (!long && stop.lte(p))) {
     reasons.push({ code: 'STOP_WRONG_SIDE', message: long ? 'A long stop must be below the entry price.' : 'A short stop must be above the entry price.' });
   }
   if (s.risk.maxNotionalUsdt && notional.gt(D(s.risk.maxNotionalUsdt))) {
-    reasons.push({ code: 'RISK_LIMIT', message: `Notional ${fmt(notional, 2)} USDT exceeds your cap of ${s.risk.maxNotionalUsdt} USDT.` });
+    reasons.push({ code: 'RISK_LIMIT', message: `Notional ${fmt(notional, 2)} ${ccy} exceeds your cap of ${s.risk.maxNotionalUsdt} ${ccy}.` });
   }
   if (s.risk.maxStopRiskUsdt && lossToStop.gt(D(s.risk.maxStopRiskUsdt))) {
-    reasons.push({ code: 'RISK_LIMIT', message: `Loss to stop ${fmt(lossToStop, 2)} USDT exceeds your cap of ${s.risk.maxStopRiskUsdt} USDT.` });
+    reasons.push({ code: 'RISK_LIMIT', message: `Loss to stop ${fmt(lossToStop, 2)} ${ccy} exceeds your cap of ${s.risk.maxStopRiskUsdt} ${ccy}.` });
   }
 
   const exits = { takeProfit: takeProfitFor(s, dir), trailing: s.trailing };

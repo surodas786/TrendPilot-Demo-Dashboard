@@ -14,16 +14,20 @@ export interface ContractMismatch {
 
 export interface FeedHealthDto {
   instrumentId: string;
-  /** MEXC or BITUNIX: the venue this contract trades on (BTCUSDT exists once per exchange). */
+  /** MEXC, BITUNIX or LIGHTER: the venue this contract trades on (BTCUSDT exists once per exchange). */
   exchange: string;
   symbol: string;
   exchangeSymbol: string;
+  /** The exchange's numeric market ID (Lighter); null for symbol-addressed exchanges. */
+  marketId: number | null;
+  /** Currency prices are quoted in (USDT, USDC). */
+  quoteCurrency: string;
   instrumentStatus: string;
   /** Source of the newest stored quote for this contract (whatever wrote it). */
   latestQuote: { source: string; channel: string | null; sourceLabel: string; asOf: string; ageSeconds: number; bid: string; ask: string; mark: string; last: string; freshness: 'FRESH' | 'STALE' } | null;
   feed: {
     /** The instrument's own public feed: MEXC_PUBLIC for MEXC pairs, BITUNIX_PUBLIC for Bitunix pairs. */
-    source: 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC';
+    source: 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC' | 'LIGHTER_PUBLIC';
     state: FeedState;
     stateText: string;
     /** The stored state can lag when the feed process is stopped; this flags that case. */
@@ -68,12 +72,23 @@ export async function listFeedHealth(db: Executor, now = new Date()): Promise<Fe
   return rows.map(({ i, f }) => {
     const q = byInst.get(i.id);
     const asOf = q ? new Date(q.as_of) : null;
-    const reporting = f ? now.getTime() - f.updatedAt.getTime() <= Math.max(FEED_POLICY.maxQuoteAgeMs, 30_000) : false;
+    let reporting = f ? now.getTime() - f.updatedAt.getTime() <= Math.max(FEED_POLICY.maxQuoteAgeMs, 30_000) : false;
+    // Bitunix and Lighter prices arrive on their own WebSocket streams; their status row is written
+    // by the candle sync only and never carries a quote state. Their state is therefore judged from
+    // the newest stored quote of their OWN public source, with the existing freshness limit.
+    let state = (f?.state ?? 'STARTING') as FeedState;
+    if (f && i.exchange !== 'MEXC') {
+      const own = q && q.source === `${i.exchange}_PUBLIC` && asOf ? asOf : null;
+      state = own ? (quoteAgeState(own, now) === 'FRESH' ? 'HEALTHY' : 'STALE') : 'STARTING';
+      reporting = state === 'HEALTHY';
+    }
     return {
       instrumentId: i.id,
       exchange: i.exchange,
       symbol: i.symbol,
       exchangeSymbol: i.exchangeSymbol,
+      marketId: i.exchangeMarketId ?? null,
+      quoteCurrency: i.quote,
       instrumentStatus: i.status,
       latestQuote:
         q && asOf
@@ -92,9 +107,9 @@ export async function listFeedHealth(db: Executor, now = new Date()): Promise<Fe
           : null,
       feed: f
         ? {
-            source: i.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : 'MEXC_PUBLIC',
-            state: f.state as FeedState,
-            stateText: FEED_STATE_TEXT[f.state as FeedState] ?? f.state,
+            source: i.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : i.exchange === 'LIGHTER' ? 'LIGHTER_PUBLIC' : 'MEXC_PUBLIC',
+            state,
+            stateText: FEED_STATE_TEXT[state] ?? state,
             reporting,
             stateSince: iso(f.stateSince),
             lastQuoteAt: iso(f.lastQuoteAt),
@@ -147,8 +162,12 @@ const num = (v: string) => new Decimal(v).toFixed();
 /** One contract's newest stored quote, as shown to investors and admins (live via the quote stream). */
 export interface LiveQuoteDto {
   instrumentId: string;
-  /** MEXC or BITUNIX. The quote below always comes from this exchange's own feed. */
+  /** MEXC, BITUNIX or LIGHTER. The quote below always comes from this exchange's own feed. */
   exchange: string;
+  /** The exchange's numeric market ID (Lighter); null for symbol-addressed exchanges. */
+  marketId: number | null;
+  /** Currency the prices are quoted in (USDT, USDC). */
+  quoteCurrency: string;
   symbol: string;
   exchangeSymbol: string;
   quote: { bid: string; ask: string; mark: string; last: string; source: string; channel: string | null; sourceLabel: string; asOf: string } | null;
@@ -160,7 +179,7 @@ export interface LiveQuoteDto {
  */
 export async function listLatestQuotes(db: Executor, now = new Date(), o: { publishedOnly?: boolean } = {}): Promise<LiveQuoteDto[]> {
   const rows = await db
-    .select({ id: instruments.id, exchange: instruments.exchange, symbol: instruments.symbol, exchangeSymbol: instruments.exchangeSymbol, status: instruments.status })
+    .select({ id: instruments.id, exchange: instruments.exchange, symbol: instruments.symbol, exchangeSymbol: instruments.exchangeSymbol, marketId: instruments.exchangeMarketId, quote: instruments.quote, status: instruments.status })
     .from(instruments)
     .orderBy(instruments.symbol, instruments.exchange);
   const byInst = await latestQuoteRows(db, now);
@@ -174,6 +193,8 @@ export async function listLatestQuotes(db: Executor, now = new Date(), o: { publ
       return {
         instrumentId: r.id,
         exchange: r.exchange,
+        marketId: r.marketId ?? null,
+        quoteCurrency: r.quote,
         symbol: r.symbol,
         exchangeSymbol: r.exchangeSymbol,
         quote: q ? { bid: num(q.bid), ask: num(q.ask), mark: num(q.mark), last: num(q.last), source: q.source, channel: q.channel, sourceLabel: quoteSourceLabel(q.source, q.channel), asOf: new Date(q.as_of).toISOString() } : null

@@ -27,7 +27,7 @@ export interface FundingSummary {
 }
 
 /** Stores a settled rate and queues its booking. Idempotent per (contract, settlement). */
-export async function recordFundingRate(db: Db, r: { instrumentId: string; settledAt: Date; rate: string; source: 'FIXTURE' | 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC' }): Promise<{ created: boolean }> {
+export async function recordFundingRate(db: Db, r: { instrumentId: string; settledAt: Date; rate: string; source: 'FIXTURE' | 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC' | 'LIGHTER_PUBLIC' }): Promise<{ created: boolean }> {
   return db.transaction(async (tx) => {
     const rows = await tx
       .insert(fundingRates)

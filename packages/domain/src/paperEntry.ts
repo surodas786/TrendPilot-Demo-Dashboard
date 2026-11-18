@@ -37,10 +37,12 @@ export type EntryReason =
   | 'INSUFFICIENT_MARGIN'
   | 'LIVE_NOT_ELIGIBLE'
   | 'PAPER_EXCHANGE_UNSUPPORTED'
-  | 'EXCHANGE_NOT_ENABLED';
+  | 'EXCHANGE_NOT_ENABLED'
+  | 'PRICE_COMPARISON_UNAVAILABLE';
 
 export const ENTRY_REASON_TEXT: Record<EntryReason, string> = {
-  EXCHANGE_NOT_ENABLED: 'This order block is on an exchange TrendPilot cannot trade yet (Lighter markets can be selected, but Lighter prices and orders come in a later release). No order was placed.',
+  PRICE_COMPARISON_UNAVAILABLE: "The TradingView reference price and this exchange's price are in different currencies and no approved comparison exists for this mode, so the price-deviation check cannot run. The entry was not opened.",
+  EXCHANGE_NOT_ENABLED: 'This order block is on an exchange TrendPilot cannot trade in this mode yet (Lighter is Paper only; Lighter Live orders come in a later release). No order was placed.',
   PAPER_EXCHANGE_UNSUPPORTED: 'Paper trading simulates MEXC contracts only. This order block is on a Bitunix contract: switch it to Live (Bitunix) or use the MEXC pair for Paper.',
   TRAILING_CONVERSION_REQUIRED:
     'This order block still uses the old Trailing Stop. New entries are held until you open Trade Settings, enter Activate after profit (%) for Trailing Take Profit (or turn it off) and save.',
@@ -79,8 +81,18 @@ export interface EntryInput {
   exposure: { openPositionInScope: boolean; unresolvedIntentInScope: boolean; openPositionsForOwner: number };
   /** The block still holds unconverted legacy trailing-stop settings: entries are held. */
   trailingConversionRequired?: boolean;
+  /**
+   * Currencies of the TradingView reference price and of the venue quote. Equal (or absent: the
+   * historical USDT/USDT case) → the deviation check compares them directly. A USDT reference against
+   * a USDC venue in PAPER → compared 1:1 under the approved, labelled Paper-only parity assumption
+   * (Lighter plan Step 3 decision, 2026-11-17). Anything else → the entry is refused.
+   */
+  priceComparison?: { referenceCurrency: string | null; venueCurrency: string; mode: 'PAPER' | 'LIVE' };
   now: Date;
 }
+
+/** Approved Paper-only convention for a USDT TradingView reference against a USDC venue price. */
+export const PAPER_USDT_USDC_PARITY = 'ASSUMED_USDT_USDC_PARITY_PAPER_ONLY' as const;
 
 export interface ApprovedEntry {
   ok: true;
@@ -117,9 +129,19 @@ export function evaluatePaperEntry(i: EntryInput): EntryEvaluation {
   if (ageMs > PAPER_POLICY.maxQuoteAgeSeconds * 1000 || ageMs < -PAPER_POLICY.quoteClockToleranceSeconds * 1000) {
     return { ok: false, reason: 'FEED_STALE', detail: { quoteAsOf: i.quote.asOf.toISOString(), ageSeconds: Math.round(ageMs / 1000) } };
   }
-  // Keep the exchange the price came from (MEXC_PUBLIC or BITUNIX_PUBLIC); anything else is a fixture.
-  const source: MarketSource = i.quote.source === 'MEXC_PUBLIC' || i.quote.source === 'BITUNIX_PUBLIC' ? i.quote.source : 'FIXTURE';
-  checks.quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString(), source };
+  // Keep the exchange the price came from (MEXC_PUBLIC, BITUNIX_PUBLIC or LIGHTER_PUBLIC); anything else is a fixture.
+  const source: MarketSource = i.quote.source === 'MEXC_PUBLIC' || i.quote.source === 'BITUNIX_PUBLIC' || i.quote.source === 'LIGHTER_PUBLIC' ? i.quote.source : 'FIXTURE';
+  const venueCurrency = i.priceComparison?.venueCurrency ?? i.spec.quoteCurrency ?? 'USDT';
+  checks.quote = { bid: i.quote.bid, ask: i.quote.ask, mark: i.quote.mark, asOf: i.quote.asOf.toISOString(), source, currency: venueCurrency, priceTypes: 'bid/ask (executable side) · mid for spread and deviation · mark' };
+
+  // The TradingView reference and the venue price must be comparable before the deviation check.
+  const refCcy = i.priceComparison ? i.priceComparison.referenceCurrency : 'USDT';
+  let comparison: string;
+  if (refCcy !== null && refCcy === venueCurrency) comparison = 'SAME_CURRENCY';
+  else if (refCcy === 'USDT' && venueCurrency === 'USDC' && i.priceComparison?.mode === 'PAPER') comparison = PAPER_USDT_USDC_PARITY;
+  else return { ok: false, reason: 'PRICE_COMPARISON_UNAVAILABLE', detail: { referenceCurrency: refCcy, venueCurrency, mode: i.priceComparison?.mode ?? null } };
+  checks.reference = { price: i.referencePrice, currency: refCcy };
+  checks.comparison = comparison === PAPER_USDT_USDC_PARITY ? { policy: comparison, note: 'USDT reference compared 1:1 with the USDC price: an assumption approved for Paper only, not for Live.' } : { policy: comparison };
 
   // Spread and price deviation (investor caps never exceed platform ceilings).
   const mid = D(i.quote.bid).plus(i.quote.ask).div(2);

@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gte } from 'drizzle-orm';
-import { Decimal } from '@trendpilot/domain';
+import { Decimal, isForeignPublicSource } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { exchangeConnections, instruments, marketCandles, marketQuotes, orderIntents, positions, signalEvents } from '../schema';
 
@@ -75,6 +75,8 @@ export async function getMyHoldingChart(db: Executor, ownerId: string, positionI
       .where(and(eq(marketCandles.instrumentId, p.instrumentId), eq(marketCandles.interval, iv), gte(marketCandles.openTime, new Date(p.openedAt.getTime() - bars * Number(iv) * 60_000))))
       .orderBy(desc(marketCandles.openTime))
       .limit(bars + Math.ceil((end.getTime() - p.openedAt.getTime()) / (Number(iv) * 60_000)) + 4);
+    // Only this contract's own exchange history: a candle from another exchange's feed is never drawn.
+    rows = rows.filter((r) => !isForeignPublicSource(inst.exchange, r.source));
     if (rows.length) {
       interval = iv;
       break;
@@ -92,7 +94,8 @@ export async function getMyHoldingChart(db: Executor, ownerId: string, positionI
         .orderBy(asc(marketQuotes.asOf))
         .limit(2000);
   const quoteLine: HoldingChartDto['quoteLine'] = [];
-  for (const q of quotes) {
+  const ownQuotes = quotes.filter((q) => !isForeignPublicSource(inst.exchange, q.source));
+  for (const q of ownQuotes) {
     const time = Math.floor(q.asOf.getTime() / 1000);
     if (quoteLine.length && quoteLine[quoteLine.length - 1]!.time >= time) continue; // one point per second, ascending
     quoteLine.push({ time, value: n(q.mark) });
@@ -126,7 +129,7 @@ export async function getMyHoldingChart(db: Executor, ownerId: string, positionI
     interval,
     candles,
     quoteLine,
-    source: rows[rows.length - 1]?.source ?? quotes[quotes.length - 1]?.source ?? null,
+    source: rows[rows.length - 1]?.source ?? ownQuotes[ownQuotes.length - 1]?.source ?? null,
     lines: [
       { kind: 'ENTRY', price: n(p.avgEntryPrice), label: 'Avg entry', historical: false },
       { kind: 'STOP', price: stopPrice, label: stopLabel, historical: closed }

@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { BellRingIcon } from 'lucide-react';
 import { getDb, listMyOutcomes, orderBlocksFor } from '@trendpilot/db';
-import { isReversalWithheld, OUTSIDE_WINDOW_TEXT } from '@trendpilot/domain';
+import { exchangeLabel, isReversalWithheld, OUTSIDE_WINDOW_TEXT } from '@trendpilot/domain';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { StatusPill } from '@/components/ui/StatusPill';
@@ -67,7 +67,17 @@ export default async function SignalsPage() {
                     {ACTION_LABEL[o.signal.action] ?? o.signal.action}
                     <span className="block text-xs text-subtle">
                       {o.signal.sourceExchange}:{o.signal.sourceSymbol} · {o.signal.interval}m · ref {o.signal.referencePrice}
+                      {o.entry?.prices?.reference.currency ? ` ${o.entry.prices.reference.currency}` : ''}
                     </span>
+                    {o.entry?.prices?.venue && (o.entry.prices.venue.bid || o.entry.prices.fill) && (
+                      <span className="block text-xs text-subtle" data-testid="venue-price">
+                        {exchangeLabel(o.entry.prices.venue.exchange)} {o.entry.prices.venue.symbol}
+                        {o.entry.prices.venue.bid ? ` · bid ${o.entry.prices.venue.bid} / ask ${o.entry.prices.venue.ask} · mark ${o.entry.prices.venue.mark} ${o.entry.prices.venue.currency}` : ''}
+                        {o.entry.prices.venue.asOf ? ` · ${fmt(o.entry.prices.venue.asOf)}` : ''}
+                        {o.entry.prices.fill ? ` · ${o.entry.prices.fill.simulated ? 'simulated fill' : 'fill'} ${o.entry.prices.fill.price} ${o.entry.prices.venue.currency}` : ''}
+                        {o.entry.prices.comparison && o.entry.prices.comparison.policy !== 'SAME_CURRENCY' ? ` · ${o.entry.prices.comparison.note ?? o.entry.prices.comparison.policy}` : ''}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 text-muted">
                     <span className="flex items-center gap-1.5">

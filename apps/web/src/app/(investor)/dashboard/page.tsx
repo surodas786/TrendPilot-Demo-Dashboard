@@ -1,12 +1,12 @@
 import Link from 'next/link';
 import { ActivityIcon, AlertTriangleIcon, FlaskConicalIcon } from 'lucide-react';
-import { getDb, getMyDashboard, listLatestQuotes } from '@trendpilot/db';
+import { getDb, getMyDashboard, getMyPaperAccount, listLatestQuotes } from '@trendpilot/db';
 import { isIsoDate } from '@trendpilot/domain';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { LiveQuotesPanel } from '@/components/market/LiveQuotesPanel';
 import { FUNDING_LABEL, fmtTime, pnlTone, usdtOrUnavailable } from '@/components/reporting/format';
 import { StatusPill } from '@/components/ui/StatusPill';
-import { ExchangeTabs, ModeTabs, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
 import { connectionFor } from '@trendpilot/db';
 import { now } from '@/server/clock';
 import { requirePageRole } from '@/server/pageSession';
@@ -30,28 +30,33 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const { user } = await requirePageRole('INVESTOR');
   const { date, mode: m, exchange: x } = await searchParams;
   const mode = viewModeOf(m);
-  const exchange = mode === 'LIVE' ? viewExchangeOf(x) : 'MEXC';
+  // Live per exchange account; Paper per simulator account (MEXC USDT, Lighter USDC). Never summed.
+  const exchange = mode === 'LIVE' ? viewExchangeOf(x) : paperExchangeOf(x);
+  const ccy = exchange === 'LIGHTER' ? 'USDC' : 'USDT';
+  const money = (v: string | null | undefined, signed = false) => usdtOrUnavailable(v, signed, ccy);
   const at = now();
-  const [d, quotes, bitunix] = await Promise.all([
+  const [d, quotes, bitunix, lighterPaper] = await Promise.all([
     getMyDashboard(getDb(), { id: user.id, timezone: user.timezone }, { now: at, date: date && isIsoDate(date) ? date : undefined, mode, exchange }),
     listLatestQuotes(getDb(), at, { publishedOnly: true }),
-    connectionFor(getDb(), user.id, 'BITUNIX')
+    connectionFor(getDb(), user.id, 'BITUNIX'),
+    getMyPaperAccount(getDb(), user.id, 'PAPER', 'LIGHTER')
   ]);
-  const showExchanges = mode === 'LIVE' && !!bitunix && bitunix.status !== 'REVOKED';
-  const venue = exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
+  const showExchanges = mode === 'LIVE' ? !!bitunix && bitunix.status !== 'REVOKED' : !!lighterPaper || exchange === 'LIGHTER';
+  const venue = exchange === 'BITUNIX' ? 'Bitunix' : exchange === 'LIGHTER' ? 'Lighter' : 'MEXC';
   const stale = d.freshness.stale;
 
   return (
     <PageContainer
       title="Dashboard"
-      description={mode === 'LIVE' ? `Your own Live (${venue}) balance and results. Daily figures use confirmed ${venue} fills and fees for the selected day.` : 'Your own paper balances and results. Daily figures use confirmed paper fills and booked funding for the selected day.'}
+      description={mode === 'LIVE' ? `Your own Live (${venue}) balance and results. Daily figures use confirmed ${venue} fills and fees for the selected day.` : exchange === 'LIGHTER' ? 'Your own Lighter Paper balance (USDC, simulated on Lighter public prices) and results. Kept separate from the MEXC Paper account (USDT).' : 'Your own paper balances and results. Daily figures use confirmed paper fills and booked funding for the selected day.'}
       scope={`${user.name} · My Account · Reporting day ${d.day.date} (${d.timezone})`}
       actions={
         <form className="flex items-end gap-2" method="get">
-          {showExchanges && <ExchangeTabs exchange={exchange} path="/dashboard" params={{ date }} />}
+          {showExchanges && <ExchangeTabs exchange={exchange} path="/dashboard" params={{ date }} mode={mode} />}
           <ModeTabs mode={mode} path="/dashboard" params={{ date }} />
           {mode === 'LIVE' && <input type="hidden" name="mode" value="live" />}
           {mode === 'LIVE' && exchange === 'BITUNIX' && <input type="hidden" name="exchange" value="bitunix" />}
+          {mode === 'PAPER' && exchange === 'LIGHTER' && <input type="hidden" name="exchange" value="lighter" />}
           <label className="text-xs text-subtle">
             Reporting day
             <input type="date" name="date" defaultValue={d.day.date} className="mt-1 block rounded-lg border border-line bg-inset px-2 py-1.5 text-sm text-ink" />
@@ -84,17 +89,17 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       ) : (
         <>
           <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat label="Available balance" value={usdtOrUnavailable(d.account.availableUsdt)} testId="available" note={`Wallet ${usdtOrUnavailable(d.account.walletUsdt)}`} />
-            <Stat label="Used margin" value={usdtOrUnavailable(d.account.usedMarginUsdt)} testId="used-margin" note={`Reserved for orders ${usdtOrUnavailable(d.account.orderReserveUsdt)}`} />
+            <Stat label="Available balance" value={money(d.account.availableUsdt)} testId="available" note={`Wallet ${money(d.account.walletUsdt)}`} />
+            <Stat label="Used margin" value={money(d.account.usedMarginUsdt)} testId="used-margin" note={`Reserved for orders ${money(d.account.orderReserveUsdt)}`} />
             <Stat
               label="Equity"
-              value={usdtOrUnavailable(d.account.equityUsdt)}
+              value={money(d.account.equityUsdt)}
               testId="equity"
               note={d.account.equityStatus === 'STALE' ? 'Includes stale prices' : d.account.equityStatus === 'UNAVAILABLE' ? 'A position has no price' : 'Wallet + unrealized'}
             />
             <Stat
               label="Unrealized P&L (mark)"
-              value={d.unrealized.status === 'NONE' ? usdtOrUnavailable('0') : usdtOrUnavailable(d.unrealized.amountUsdt, true)}
+              value={d.unrealized.status === 'NONE' ? money('0') : money(d.unrealized.amountUsdt, true)}
               tone={pnlTone(d.unrealized.amountUsdt)}
               testId="unrealized"
               note={`${d.positions.open} open position${d.positions.open === 1 ? '' : 's'}${d.unrealized.status === 'STALE' ? ' · stale prices' : ''}`}
@@ -109,13 +114,13 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               <div>
                 <dt className="text-xs text-subtle">Gross realized</dt>
                 <dd className={pnlTone(d.daily.grossRealizedUsdt)} data-testid="daily-gross">
-                  {usdtOrUnavailable(d.daily.grossRealizedUsdt, true)}
+                  {money(d.daily.grossRealizedUsdt, true)}
                 </dd>
               </div>
               <div>
                 <dt className="text-xs text-subtle">Fees</dt>
                 <dd className="text-ink" data-testid="daily-fees">
-                  {usdtOrUnavailable(d.daily.feesUsdt)}
+                  {money(d.daily.feesUsdt)}
                 </dd>
                 <dd className="text-xs text-muted">
                   entry {d.daily.entryFeesUsdt} · exit {d.daily.exitFeesUsdt}
@@ -124,14 +129,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               <div>
                 <dt className="text-xs text-subtle">{mode === 'LIVE' ? 'Funding' : 'Funding (simulated)'}</dt>
                 <dd className={pnlTone(d.daily.funding.amountUsdt)} data-testid="daily-funding" data-status={d.daily.funding.status}>
-                  {usdtOrUnavailable(d.daily.funding.amountUsdt, true)} · {FUNDING_LABEL[d.daily.funding.status]}
+                  {money(d.daily.funding.amountUsdt, true)} · {FUNDING_LABEL[d.daily.funding.status]}
                 </dd>
                 <dd className="text-xs text-muted">{d.daily.funding.statusText}</dd>
               </div>
               <div>
                 <dt className="text-xs text-subtle">Net realized</dt>
                 <dd className={`font-semibold ${pnlTone(d.daily.netRealizedUsdt)}`} data-testid="daily-net">
-                  {usdtOrUnavailable(d.daily.netRealizedUsdt, true)}
+                  {money(d.daily.netRealizedUsdt, true)}
                 </dd>
                 <dd className="text-xs text-muted">Gross − fees + booked funding</dd>
               </div>
@@ -152,7 +157,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <span className="font-semibold text-ink">Ledger check: </span>
             {d.reconciliation.ok ? 'Balances match the paper ledger, fills and funding.' : 'A balance does not match the ledger. Contact your administrator.'} Lifetime: opening{' '}
             {d.reconciliation.lifetime.openingBalanceUsdt} · realized {d.reconciliation.lifetime.realizedUsdt} · fees {d.reconciliation.lifetime.feesUsdt} · funding{' '}
-            {d.reconciliation.lifetime.fundingUsdt} USDT.
+            {d.reconciliation.lifetime.fundingUsdt} {ccy}.
           </section>
 
           <p className="text-sm">

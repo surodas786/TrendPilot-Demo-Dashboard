@@ -2,7 +2,7 @@ import { and, eq, inArray, lte, ne, or, isNull, sql } from 'drizzle-orm';
 import { DECISION_REASON_TEXT, decideSignalExit, EXIT_REASON_TEXT, evaluateBlockForSignal, type OppositePolicy, type SignalAction, type SignalInterval, type Weekday } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { claimNextJob, completeJob, failJob, FenceLostError, type JobRow } from '../jobs';
-import { orderBlocks, orderIntents, positions, signalDecisions, signalEvents, strategyVersions, users } from '../schema';
+import { instruments, orderBlocks, orderIntents, positions, signalDecisions, signalEvents, strategyVersions, users } from '../schema';
 import { SIGNAL_DISPATCH_JOB } from './intake';
 import { ENTRY_STEP, evaluateAndReserveEntry, PAPER_SUBMIT_JOB, processPaperSubmit, windowOf, type SubmitHooks, type SubmitSummary } from '../paper/entry';
 import { MARKET_TICK_JOB, PAPER_CLOSE_JOB, PAPER_REVERSE_JOB, processMarketTick, processPaperClose, requestExit, type CloseSummary, type TickSummary } from '../paper/exits';
@@ -63,7 +63,13 @@ export async function dispatchSignalEvent(tx: Executor, eventId: string, now: Da
       .innerJoin(orderIntents, eq(orderIntents.id, positions.openIntentId))
       .where(
         and(
-          inArray(positions.instrumentId, instrumentIds),
+          // The instruments this route delivers to now, OR a position this same TradingView stream
+          // opened (same ingress, source chart and interval): removing or pausing a route target
+          // never strands the exits of positions it opened (Lighter plan Step 3).
+          or(
+            inArray(positions.instrumentId, instrumentIds),
+            sql`exists (select 1 from ${signalEvents} se where se.id = ${orderIntents.eventId} and se.ingress_namespace = ${event.ingressNamespace} and se.source_exchange = ${event.sourceExchange} and se.source_symbol = ${event.sourceSymbol} and se.interval = ${event.interval})`
+          ),
           eq(positions.status, 'OPEN'),
           eq(strategyVersions.packageId, event.packageId),
           lte(positions.openedAt, event.receivedAt),
@@ -289,6 +295,17 @@ export interface SignalOutcomeDto {
     orderState: string | null;
     orderStateReason: string | null;
     positionId: string | null;
+    /**
+     * Prices behind this entry decision, kept apart: the TradingView reference (source chart), the
+     * venue price the evaluation used (its own exchange, currency, price types and time) and the
+     * simulated or real fill. `comparison` says how the two were compared for the deviation check.
+     */
+    prices?: {
+      reference: { source: string; price: string; currency: string | null; type: string; at: string };
+      venue: { exchange: string; symbol: string; currency: string; bid: string | null; ask: string | null; mark: string | null; source: string | null; types: string | null; asOf: string | null } | null;
+      comparison: { policy: string; note: string | null; deviationPct: string | null } | null;
+      fill: { price: string; at: string; simulated: boolean } | null;
+    };
   };
   signal: {
     eventId: string;
@@ -352,10 +369,12 @@ export async function listMyOutcomes(db: Executor, ownerId: string, limit = 50):
 async function attachEntries(db: Executor, ownerId: string, outcomes: SignalOutcomeDto[]): Promise<SignalOutcomeDto[]> {
   if (!outcomes.length) return outcomes;
   const entries = await db
-    .select({ d: signalDecisions, intentId: orderIntents.id, intentState: orderIntents.state, intentReason: orderIntents.stateReason, positionId: positions.id })
+    .select({ d: signalDecisions, intentId: orderIntents.id, intentState: orderIntents.state, intentReason: orderIntents.stateReason, positionId: positions.id, fillPrice: positions.avgEntryPrice, openedAt: positions.openedAt, exchange: instruments.exchange, symbol: instruments.exchangeSymbol, currency: instruments.quote })
     .from(signalDecisions)
     .leftJoin(orderIntents, eq(orderIntents.decisionId, signalDecisions.id))
     .leftJoin(positions, eq(positions.openIntentId, orderIntents.id))
+    .leftJoin(orderBlocks, eq(orderBlocks.id, signalDecisions.orderBlockId))
+    .leftJoin(instruments, eq(instruments.id, orderBlocks.instrumentId))
     .where(and(eq(signalDecisions.ownerId, ownerId), eq(signalDecisions.step, ENTRY_STEP), inArray(signalDecisions.eventId, outcomes.map((o) => o.signal.eventId))));
   const exits = await db
     .select({ d: signalDecisions, intentState: orderIntents.state })
@@ -370,10 +389,24 @@ async function attachEntries(db: Executor, ownerId: string, outcomes: SignalOutc
       : o0;
     const e = entries.find((r) => r.d.eventId === o.signal.eventId && r.d.orderBlockId === o.orderBlockId);
     if (!e) return o;
-    const detail = e.d.detail as { reasonText: string | null };
+    const detail = e.d.detail as {
+      reasonText: string | null;
+      checks?: { quote?: { bid?: string; ask?: string; mark?: string; asOf?: string; source?: string; currency?: string; priceTypes?: string }; reference?: { currency?: string | null }; comparison?: { policy?: string; note?: string }; deviationPct?: string };
+      referenceCurrency?: string | null;
+      venueCurrency?: string;
+    };
+    const q = detail.checks?.quote;
+    const trim = (v: string | null | undefined) => (v ? v.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '') : null);
+    const prices: NonNullable<SignalOutcomeDto['entry']>['prices'] = {
+      reference: { source: `${o.signal.sourceExchange}:${o.signal.sourceSymbol}`, price: o.signal.referencePrice, currency: detail.checks?.reference?.currency ?? detail.referenceCurrency ?? null, type: 'TradingView alert reference (signal bar)', at: o.signal.barCloseAt },
+      venue: e.exchange ? { exchange: e.exchange, symbol: e.symbol ?? '', currency: q?.currency ?? e.currency ?? detail.venueCurrency ?? '', bid: trim(q?.bid), ask: trim(q?.ask), mark: trim(q?.mark), source: q?.source ?? null, types: q?.priceTypes ?? null, asOf: q?.asOf ?? null } : null,
+      comparison: detail.checks?.comparison?.policy ? { policy: detail.checks.comparison.policy, note: detail.checks.comparison.note ?? null, deviationPct: detail.checks.deviationPct ?? null } : null,
+      fill: e.fillPrice && e.openedAt ? { price: trim(e.fillPrice)!, at: e.openedAt.toISOString(), simulated: o.mode !== 'LIVE' } : null
+    };
     return {
       ...o,
       entry: {
+        prices,
         status: e.d.status as 'ENTRY_APPROVED' | 'SKIPPED',
         reason: e.d.reason,
         reasonText: detail.reasonText,

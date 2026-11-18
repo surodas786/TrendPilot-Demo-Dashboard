@@ -1,0 +1,2 @@
+# Pinned third-party artifacts: keep the exact bytes (their SHA-256 is checked at load).
+* -text

@@ -7,7 +7,9 @@ import type { ContractSpec, Quote } from '@trendpilot/domain';
  */
 export const FIXTURE_LABEL = 'Local MEXC contract fixture — not verified against the live exchange';
 
-export interface MexcContractFixture extends ContractSpec {
+export interface MexcContractFixture extends Omit<ContractSpec, 'maxQty' | 'minNotional' | 'maxNotional' | 'quoteCurrency'> {
+  /** MEXC always reports a maximum order quantity. */
+  maxQty: string;
   symbol: string;
   exchangeSymbol: string;
   base: string;

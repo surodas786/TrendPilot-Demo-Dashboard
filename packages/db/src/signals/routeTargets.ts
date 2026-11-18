@@ -3,6 +3,7 @@ import { DomainError, ErrorCode } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { recordAudit } from '../repos/audit';
 import { instruments, signalRouteTargets, signalRoutes } from '../schema';
+import { latestPublishedVersion } from './routeAdmin';
 
 /**
  * Bitunix signal routing (Step 4): a signal route keeps its primary (MEXC) instrument and may name,
@@ -88,8 +89,56 @@ export async function setBitunixRouteTarget(db: Db, adminId: string, routeId: st
   });
 }
 
+/**
+ * Sets (or replaces) the Lighter target of a route, disables it, or (null) removes it (Lighter plan
+ * Step 3: Paper only). The administrator names the Lighter instrument EXPLICITLY: nothing is inferred
+ * from tickers or base symbols (Lighter XAU is not "XAUUSDT"). Validates: a published Lighter
+ * instrument with a catalog market ID, an actionable route, and a newest published version of the
+ * route's strategy lineage that approves that Lighter contract (so its blocks can be evaluated).
+ * Removing or pausing the target never strands open positions: their exits follow the TradingView
+ * stream that opened them (dispatch).
+ */
+export async function setLighterRouteTarget(db: Db, adminId: string, routeId: string, input: { instrumentId: string | null; enabled?: boolean }, correlationId = 'route-target'): Promise<RouteTargetDto | null> {
+  return db.transaction(async (tx) => {
+    const [route] = await tx.select().from(signalRoutes).where(eq(signalRoutes.id, routeId)).for('update');
+    if (!route) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Signal route not found.');
+    const [current] = await tx.select().from(signalRouteTargets).where(and(eq(signalRouteTargets.routeId, routeId), eq(signalRouteTargets.exchange, 'LIGHTER')));
+    if (!input.instrumentId) {
+      if (current) {
+        await tx.delete(signalRouteTargets).where(eq(signalRouteTargets.id, current.id));
+        await recordAudit(tx, { actorUserId: adminId, action: 'ADMIN_SIGNAL_ROUTE_TARGET_REMOVE', targetType: 'signal_route', targetId: routeId, result: 'SUCCESS', before: { exchange: 'LIGHTER', instrumentId: current.instrumentId }, correlationId });
+      }
+      return null;
+    }
+    const [inst] = await tx.select().from(instruments).where(eq(instruments.id, input.instrumentId));
+    if (!inst) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Instrument not found.');
+    if (inst.exchange !== 'LIGHTER' || inst.exchangeMarketId === null) throw new DomainError(400, ErrorCode.VALIDATION_FAILED, 'Only a registered Lighter instrument (with its catalog market ID) can be the Lighter target.');
+    if (inst.status !== 'PUBLISHED') throw new DomainError(409, ErrorCode.CONFLICT, `Lighter ${inst.symbol} (market ${inst.exchangeMarketId}) is not published.`);
+    if (route.kind !== 'ACTIONABLE') throw new DomainError(409, ErrorCode.CONFLICT, 'Only an actionable route can deliver to a Lighter target.');
+    const v = await latestPublishedVersion(tx, route.packageId);
+    if (!v || !v.instrumentIds.includes(inst.id)) {
+      throw new DomainError(409, ErrorCode.CONFLICT, `The route's strategy (newest published version${v ? ` v${v.version}` : ''}) does not approve Lighter ${inst.symbol} (market ${inst.exchangeMarketId}). Publish a version that includes it first.`);
+    }
+    const enabled = input.enabled ?? true;
+    const [row] = current
+      ? await tx.update(signalRouteTargets).set({ instrumentId: inst.id, enabled, revision: current.revision + 1, updatedAt: new Date() }).where(eq(signalRouteTargets.id, current.id)).returning()
+      : await tx.insert(signalRouteTargets).values({ routeId, instrumentId: inst.id, exchange: 'LIGHTER', enabled, createdBy: adminId }).returning();
+    await recordAudit(tx, {
+      actorUserId: adminId,
+      action: 'ADMIN_SIGNAL_ROUTE_TARGET_SET',
+      targetType: 'signal_route',
+      targetId: routeId,
+      result: 'SUCCESS',
+      before: current ? { instrumentId: current.instrumentId, enabled: current.enabled } : null,
+      after: { exchange: 'LIGHTER', instrumentId: inst.id, symbol: inst.symbol, marketId: inst.exchangeMarketId, source: `${route.sourceExchange}:${route.sourceSymbol}`, interval: route.interval, action: route.action, enabled },
+      correlationId
+    });
+    return (await routeTargets(tx, [routeId])).find((t) => t.id === row!.id) ?? null;
+  });
+}
+
 /** For a block's instrument: the TradingView routes that deliver signals to it (primary or target). */
-export async function routesDeliveringTo(db: Executor, instrumentId: string): Promise<{ routeId: string; name: string; source: string; interval: string; action: string; enabled: boolean; via: 'PRIMARY' | 'BITUNIX_TARGET' }[]> {
+export async function routesDeliveringTo(db: Executor, instrumentId: string): Promise<{ routeId: string; name: string; source: string; interval: string; action: string; enabled: boolean; via: 'PRIMARY' | 'BITUNIX_TARGET' | 'LIGHTER_TARGET' }[]> {
   const primary = await db.select().from(signalRoutes).where(eq(signalRoutes.instrumentId, instrumentId));
   const targeted = await db
     .select({ r: signalRoutes, t: signalRouteTargets })
@@ -98,6 +147,6 @@ export async function routesDeliveringTo(db: Executor, instrumentId: string): Pr
     .where(eq(signalRouteTargets.instrumentId, instrumentId));
   return [
     ...primary.map((r) => ({ routeId: r.id, name: r.name, source: `${r.sourceExchange}:${r.sourceSymbol}`, interval: r.interval, action: r.action, enabled: r.enabled, via: 'PRIMARY' as const })),
-    ...targeted.map(({ r, t }) => ({ routeId: r.id, name: r.name, source: `${r.sourceExchange}:${r.sourceSymbol}`, interval: r.interval, action: r.action, enabled: r.enabled && t.enabled, via: 'BITUNIX_TARGET' as const }))
+    ...targeted.map(({ r, t }) => ({ routeId: r.id, name: r.name, source: `${r.sourceExchange}:${r.sourceSymbol}`, interval: r.interval, action: r.action, enabled: r.enabled && t.enabled, via: t.exchange === 'LIGHTER' ? ('LIGHTER_TARGET' as const) : ('BITUNIX_TARGET' as const) }))
   ];
 }

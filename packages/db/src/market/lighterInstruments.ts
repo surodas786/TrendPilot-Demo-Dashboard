@@ -212,6 +212,8 @@ export function lighterInstrumentSpec(m: LighterMarket, maxLeverage: number) {
     qtyStep: pow10neg(m.sizeDecimals),
     minQty: m.minBaseAmount,
     minNotional: m.minQuoteAmount,
+    // Per-order maximum in USDC (catalog `order_quote_limit`); Lighter reports no base-unit maximum.
+    maxNotional: m.orderQuoteLimit,
     priceTick: pow10neg(m.priceDecimals),
     // Eligibility requires the catalog fee to be 0 (the unit of a non-zero value is undocumented).
     takerFeeRate: '0',

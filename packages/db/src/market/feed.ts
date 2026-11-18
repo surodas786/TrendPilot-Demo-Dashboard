@@ -24,6 +24,7 @@ import { recordFundingRate } from '../paper/funding';
 import { fundingRates, instruments, marketCandles, marketFeedEvents, marketFeedStatus } from '../schema';
 import { isMexcFuturesSymbol, MexcPublicError, type MexcKline, type MexcTicker, type PublicMarketSource } from './mexcPublic';
 import { BitunixPublicError } from './bitunixPublic';
+import { LighterPublicError } from './lighterPublic';
 import type { StreamTicker, TickerStreamView } from './mexcWs';
 
 /**
@@ -53,7 +54,7 @@ export const FEED_SOURCE = 'MEXC_PUBLIC';
 export interface FeedOptions {
   source: PublicMarketSource;
   /** Exchange of the covered instruments (default MEXC). */
-  exchange?: 'MEXC' | 'BITUNIX';
+  exchange?: 'MEXC' | 'BITUNIX' | 'LIGHTER';
   /** Local wall clock. */
   now?: () => Date;
   log?: (m: string) => void;
@@ -108,6 +109,8 @@ interface Covered {
   id: string;
   symbol: string;
   exchangeSymbol: string;
+  /** The exchange's numeric market ID (Lighter); null where the API takes the symbol. */
+  exchangeMarketId: number | null;
   contractMultiplier: string;
   priceTick: string;
   qtyStep: string;
@@ -137,16 +140,16 @@ export class MarketFeed {
   private readonly locks = new Map<string, Promise<unknown>>();
 
   /** Exchange whose instruments this feed covers (MEXC by default; BITUNIX for the Bitunix candle feed). */
-  readonly exchange: 'MEXC' | 'BITUNIX';
-  /** Source label of everything this feed writes (MEXC_PUBLIC / BITUNIX_PUBLIC). */
-  readonly source: 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC';
+  readonly exchange: 'MEXC' | 'BITUNIX' | 'LIGHTER';
+  /** Source label of everything this feed writes (MEXC_PUBLIC / BITUNIX_PUBLIC / LIGHTER_PUBLIC). */
+  readonly source: 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC' | 'LIGHTER_PUBLIC';
 
   constructor(
     private readonly db: Db,
     private readonly o: FeedOptions
   ) {
     this.exchange = o.exchange ?? 'MEXC';
-    this.source = this.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : FEED_SOURCE;
+    this.source = this.exchange === 'BITUNIX' ? 'BITUNIX_PUBLIC' : this.exchange === 'LIGHTER' ? 'LIGHTER_PUBLIC' : FEED_SOURCE;
     this.now = o.now ?? (() => new Date());
     this.log = o.log ?? (() => {});
     this.intervals = o.intervals ?? ['5', '15'];
@@ -168,6 +171,8 @@ export class MarketFeed {
 
   /** Exchange symbols the stream should carry (from the last cycle's coverage). */
   get coveredExchangeSymbols(): string[] {
+    // Lighter quotes come from its own WebSocket stream (market IDs), never through this feed.
+    if (this.exchange === 'LIGHTER') return [];
     return this.lastCovered.map((c) => c.exchangeSymbol).filter(this.exchange === 'BITUNIX' ? isBitunixFuturesSymbol : isMexcFuturesSymbol);
   }
 
@@ -182,7 +187,8 @@ export class MarketFeed {
 
   private noteRateLimit(e: unknown): void {
     const bitunixLimited = e instanceof BitunixPublicError && ((e.kind === 'HTTP' && e.code === 429) || (e.kind === 'API' && (e.code === 10005 || e.code === 10006)));
-    if (!bitunixLimited && (!(e instanceof MexcPublicError) || !isRateLimitCode(e.kind, e.code))) return;
+    const lighterLimited = e instanceof LighterPublicError && e.kind === 'HTTP' && e.status === 429;
+    if (!bitunixLimited && !lighterLimited && (!(e instanceof MexcPublicError) || !isRateLimitCode(e.kind, e.code))) return;
     const until = this.now().getTime() + Math.round(FEED_POLICY.restRateLimitCooldownMs * (0.8 + 0.4 * this.rand()));
     if (until > this.restCooldownUntil) {
       this.restCooldownUntil = until;
@@ -209,6 +215,7 @@ export class MarketFeed {
         id: instruments.id,
         symbol: instruments.symbol,
         exchangeSymbol: instruments.exchangeSymbol,
+        exchangeMarketId: instruments.exchangeMarketId,
         status: instruments.status,
         contractMultiplier: instruments.contractMultiplier,
         priceTick: instruments.priceTick,
@@ -630,7 +637,10 @@ export class MarketFeed {
     const out: MexcKline[] = [];
     for (let start = from.getTime(); start <= to.getTime(); start += MAX_KLINES_PER_REQUEST * ms) {
       const end = Math.min(to.getTime(), start + (MAX_KLINES_PER_REQUEST - 1) * ms);
-      out.push(...(await this.o.source.klines(inst.exchangeSymbol, interval, new Date(start), new Date(end))));
+      // Lighter addresses markets by catalog market ID (never by a ticker); the others by symbol.
+      const apiKey = this.exchange === 'LIGHTER' ? String(inst.exchangeMarketId ?? '') : inst.exchangeSymbol;
+      if (!apiKey) throw new Error(`${inst.symbol}: no exchange market identifier`);
+      out.push(...(await this.o.source.klines(apiKey, interval, new Date(start), new Date(end))));
     }
     return out;
   }

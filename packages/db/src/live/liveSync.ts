@@ -70,7 +70,7 @@ const SYNC_LEASE_SECONDS = 120;
 export const SYNC_BUSY = 'A sync for this account is already running; try again in a moment.';
 
 export interface DriftItem {
-  kind: 'SIZE_MISMATCH' | 'UNKNOWN_EXPOSURE' | 'SIDE_MISMATCH' | 'STOP_MISSING' | 'STOP_ORPHANED' | 'POSITION_MODE_CHANGED';
+  kind: 'SIZE_MISMATCH' | 'UNKNOWN_EXPOSURE' | 'SIDE_MISMATCH' | 'STOP_MISSING' | 'STOP_ORPHANED' | 'POSITION_MODE_CHANGED' | 'STOP_EXPIRING';
   symbol: string;
   detail: string;
   at: string;

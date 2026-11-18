@@ -9,13 +9,14 @@ import type { Candle } from './market';
  * Paper mode always fills in the paper simulator.
  */
 
-export const MARKET_SOURCES = ['FIXTURE', 'MEXC_PUBLIC', 'BITUNIX_PUBLIC'] as const;
+export const MARKET_SOURCES = ['FIXTURE', 'MEXC_PUBLIC', 'BITUNIX_PUBLIC', 'LIGHTER_PUBLIC'] as const;
 export type MarketSource = (typeof MARKET_SOURCES)[number];
 
 export const MARKET_SOURCE_LABEL: Record<MarketSource, string> = {
   FIXTURE: 'Fixture (replay data)',
   MEXC_PUBLIC: 'MEXC public market data',
-  BITUNIX_PUBLIC: 'Bitunix public market data'
+  BITUNIX_PUBLIC: 'Bitunix public market data',
+  LIGHTER_PUBLIC: 'Lighter public market data'
 };
 
 /**
@@ -48,7 +49,7 @@ export const QUOTE_CHANNEL_LABEL: Record<QuoteChannel, string> = {
 /** "MEXC public market data · WebSocket", "… · REST fallback", "Fixture (replay data)". */
 export function quoteSourceLabel(source: string | null | undefined, channel: string | null | undefined): string {
   const base = marketSourceLabel(source);
-  return (source === 'MEXC_PUBLIC' || source === 'BITUNIX_PUBLIC') && channel && channel in QUOTE_CHANNEL_LABEL ? `${base} · ${QUOTE_CHANNEL_LABEL[channel as QuoteChannel]}` : base;
+  return source && source.endsWith('_PUBLIC') && channel && channel in QUOTE_CHANNEL_LABEL ? `${base} · ${QUOTE_CHANNEL_LABEL[channel as QuoteChannel]}` : base;
 }
 
 export const FEED_POLICY = {

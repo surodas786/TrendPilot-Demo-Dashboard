@@ -139,30 +139,29 @@ describe('investor pair selection: server-side eligibility', () => {
     expect(e.body).toMatchObject({ instrumentId: xau, orderCostUsdt: '150' });
   });
 
-  it('it can never be activated, moved to Paper, previewed on another price or connected', async () => {
+  it('as a Live entry it can never be activated; moving it to Paper is allowed (Step 3); no other price is previewed', async () => {
     const [b] = await direct.db.select().from(schema.orderBlocks).where(eq(schema.orderBlocks.instrumentId, xau));
     const rs = await call(resume.POST, { method: 'POST', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: b!.revision });
     expect(rs.status).toBe(422);
-    expect(rs.body.message).toMatch(/Lighter trading is not available yet/);
+    expect(rs.body.message).toMatch(/Lighter Live trading is not available yet/);
     const mc = await call(modeChange.GET, { path: '/x?to=PAPER', cookie: cookies.a, params: { id: b!.id } });
-    expect(mc.body).toMatchObject({ allowed: false, blocker: { code: 'PAPER_UNSUPPORTED' } });
+    expect(mc.body).toMatchObject({ allowed: true });
     const pv = await call(preview.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: { ...blockBody({ instrumentId: xau, strategyVersionId: lighterVersion, leverage: 10, weekdays: ALL_DAYS }), mode: 'LIVE' } });
     expect(pv.status).toBe(422);
-    expect(pv.body.message).toMatch(/No Lighter price is available for XAU/);
-    for (const r of [
-      await call(conn.GET, { path: '/x?exchange=LIGHTER', cookie: cookies.a }),
-      await call(conn.PUT, { method: 'PUT', path: '/x', cookie: cookies.a, body: { exchange: 'LIGHTER', accountRef: 'lt-a', apiKey: 'k', secretKey: 's' } })
-    ]) {
-      expect(r.status).toBe(400);
-      expect(r.body.message).toMatch(/Lighter trading is not available yet/);
-    }
+    expect(pv.body.message).toMatch(/No fresh Lighter price is available for XAU/);
+    // Step 4: a Lighter connection can be set up (connect and verify only); an invalid one is refused
+    // with the Lighter input rules, never stored, and never treated as MEXC.
+    expect((await call(conn.GET, { path: '/x?exchange=LIGHTER', cookie: cookies.a })).body).toMatchObject({ connection: null, account: null });
+    const bad = await call(conn.PUT, { method: 'PUT', path: '/x', cookie: cookies.a, body: { exchange: 'LIGHTER', accountRef: 'lt-a', apiKey: 'k', secretKey: 's' } });
+    expect(bad.status).toBe(400);
+    expect(bad.body.message).toMatch(/account index/);
     expect(await direct.db.select().from(schema.exchangeConnections).where(eq(schema.exchangeConnections.exchange, 'LIGHTER'))).toHaveLength(0);
   });
 
-  it('refuses a Paper entry, an unpublished pair, a strategy that does not approve it, and an unknown pair', async () => {
+  it('accepts a Paper entry (Step 3), refuses an unpublished pair, a strategy that does not approve it, and an unknown pair', async () => {
     const paper = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.b, body: blockBody({ instrumentId: xau, strategyVersionId: lighterVersion, mode: 'PAPER', leverage: 10, weekdays: ALL_DAYS }) });
-    expect(paper.status).toBe(400);
-    expect(JSON.stringify(paper.body)).toMatch(/Lighter pairs are Live only/);
+    expect(paper.status, JSON.stringify(paper.body)).toBe(201);
+    expect(paper.body).toMatchObject({ exchange: 'LIGHTER', mode: 'PAPER' });
     const wrongStrategy = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.b, body: blockBody({ instrumentId: xau, strategyVersionId: VERSION, mode: 'LIVE', leverage: 10, weekdays: ALL_DAYS }) });
     expect(wrongStrategy.status).toBe(400);
     expect(JSON.stringify(wrongStrategy.body)).toMatch(/not approved for the selected pair/);
@@ -185,7 +184,7 @@ describe('investor pair selection: server-side eligibility', () => {
     expect((await instRow(xau)).liveAllowed).toBe(false);
     const [route] = await direct.db.select().from(schema.signalRoutes).limit(1);
     const issues = await routeStrategyIssues(direct.db, { kind: 'ACTIONABLE', packageId: route!.packageId, instrumentId: xau, interval: route!.interval as '5' | '15' });
-    expect(issues.map((i) => i.message).join(' ')).toMatch(/Lighter trading is not available yet/);
+    expect(issues.map((i) => i.message).join(' ')).toMatch(/Lighter Live trading is not available yet/);
   });
 
   it('a MEXC or Bitunix price stored on the Lighter instrument is never used for it', async () => {

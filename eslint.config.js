@@ -5,7 +5,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/node_modules/**', '**/.next/**', 'apps/demo/**', '**/next-env.d.ts', 'test-results/**', 'playwright-report/**', 'packages/db/migrations/**']
+    ignores: ['**/node_modules/**', '**/.next/**', 'apps/demo/**', '**/next-env.d.ts', 'test-results/**', 'playwright-report/**', 'packages/db/migrations/**', 'packages/db/vendor/**']
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

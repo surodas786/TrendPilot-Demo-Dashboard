@@ -18,7 +18,7 @@ export interface InstrumentDto {
   quote: string;
   status: 'PUBLISHED' | 'DISABLED';
   leverageChoices: number[];
-  contract: { multiplier: string; qtyStep: string; minQty: string; maxQty: string; priceTick: string; takerFeeRate: string; minNotional: string | null };
+  contract: { multiplier: string; qtyStep: string; minQty: string; maxQty: string; priceTick: string; takerFeeRate: string; minNotional: string | null; maxNotional: string | null };
   suggested: { stopPct: string; takeProfitPct: string; trailingEnabled: boolean; trailingPct: string };
   isFixture: boolean;
   fixtureLabel: string | null;
@@ -47,7 +47,8 @@ const toInstrument = (r: InstrumentRow): InstrumentDto => ({
     maxQty: normDecimal(r.maxQty),
     priceTick: normDecimal(r.priceTick),
     takerFeeRate: normDecimal(r.takerFeeRate),
-    minNotional: r.minNotional === null ? null : normDecimal(r.minNotional)
+    minNotional: r.minNotional === null ? null : normDecimal(r.minNotional),
+    maxNotional: r.maxNotional === null ? null : normDecimal(r.maxNotional)
   },
   suggested: {
     stopPct: normDecimal(r.suggestedStopPct),

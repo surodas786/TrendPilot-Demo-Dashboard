@@ -4,6 +4,7 @@ export * from './errors';
 export * from './exchange';
 export * from './exits';
 export * from './live';
+export * from './lighterLive';
 export * from './liveTransport';
 export * from './mailSettings';
 export * from './market';

@@ -264,7 +264,7 @@ describe('investor Trade Settings and order preview use XAU’s own contract', (
     const r = await call(previewDraft.POST, { method: 'POST', path: '/x', cookie: investor, body });
     expect(r.status).toBe(200);
     expect(r.body.quote.source).toBe('MEXC_PUBLIC');
-    expect(r.body.instrument).toEqual({ symbol: 'XAUUSDT', exchangeSymbol: 'XAU_USDT', fixtureLabel: null });
+    expect(r.body.instrument).toEqual({ symbol: 'XAUUSDT', exchangeSymbol: 'XAU_USDT', fixtureLabel: null, exchange: 'MEXC', quoteCurrency: 'USDT' });
     const long = r.body.sides.find((s: { side: string }) => s.side === 'LONG');
     // 100 USDT × 10 = 1000 USDT notional; one contract = 0.001 XAU × ask.
     const expected = new Decimal(1000).div(new Decimal(long.entryPrice).times('0.001')).floor();

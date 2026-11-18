@@ -3,7 +3,7 @@
 import React from 'react';
 import type { HoldingDto, LiveQuoteDto, TradeDetailDto } from '@trendpilot/db';
 import { cn } from '@/lib/cn';
-import { EXIT_LABEL, signedUsdt, takeProfitPlanLabel, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
+import { currencyOfExchange, EXIT_LABEL, signedUsdt, takeProfitPlanLabel, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, trailingName } from '@/lib/exitLabels';
 import { ConnectionPill } from '../market/LiveQuotesPanel';
 import { useLiveQuotes } from '../market/useLiveQuotes';
 import { fmtTime, pnlTone, priceOrUnavailable } from '../reporting/format';
@@ -27,6 +27,8 @@ function Field({ label, children, testId }: { label: string; children: React.Rea
 export function HoldingDetailClient({ t, holdingPrice, quotes, timezone }: { t: TradeDetailDto; holdingPrice: HoldingDto['price'] | null; quotes: LiveQuoteDto[]; timezone: string }) {
   const { items, connection, nowMs } = useLiveQuotes(quotes, { fallbackRefreshMs: HOLDINGS_FALLBACK_MS });
   const open = t.status === 'OPEN';
+  /** Lighter Paper positions settle in USDC; MEXC and Bitunix in USDT. */
+  const ccy = currencyOfExchange(t.exchange);
   const price = livePriceFor(t.instrumentId, items, holdingPrice, nowMs);
   const unrealized = open ? unrealizedAt(t, price.mark) : null;
   const signalOf = (id: string | null) => (id ? t.signals.find((s) => s.eventId === id) : undefined);
@@ -80,7 +82,7 @@ export function HoldingDetailClient({ t, holdingPrice, quotes, timezone }: { t: 
           <Field label="Current price (mark)">{open ? <PriceCell price={price} timezone={timezone} /> : 'Closed'}</Field>
           <Field label="Unrealized P&L">
             <span className={pnlTone(unrealized)} data-testid="detail-unrealized">
-              {open ? (unrealized === null ? 'Unavailable' : signedUsdt(unrealized)) : '—'}
+              {open ? (unrealized === null ? 'Unavailable' : signedUsdt(unrealized, ccy)) : '—'}
             </span>
           </Field>
           <Field label={open ? 'Stop loss (current)' : 'Stop loss (historical)'}>
@@ -91,11 +93,11 @@ export function HoldingDetailClient({ t, holdingPrice, quotes, timezone }: { t: 
             {t.leverage}× · {t.marginMode.toLowerCase()}
           </Field>
           <Field label="Realized P&L (gross)">
-            <span className={pnlTone(t.realizedPnlUsdt)}>{signedUsdt(t.realizedPnlUsdt)}</span>
+            <span className={pnlTone(t.realizedPnlUsdt)}>{signedUsdt(t.realizedPnlUsdt, ccy)}</span>
           </Field>
-          <Field label="Fees (open + close)">{t.feesUsdt} USDT</Field>
+          <Field label="Fees (open + close)">{t.feesUsdt} {ccy}</Field>
           <Field label="Net realized">
-            <span className={pnlTone(t.netRealizedUsdt)}>{signedUsdt(t.netRealizedUsdt)}</span>
+            <span className={pnlTone(t.netRealizedUsdt)}>{signedUsdt(t.netRealizedUsdt, ccy)}</span>
           </Field>
           <Field label={open ? 'Opened' : 'Closed'}>{fmtTime(open ? t.openedAt : t.closedAt, timezone)}</Field>
         </dl>
@@ -133,8 +135,8 @@ export function HoldingDetailClient({ t, holdingPrice, quotes, timezone }: { t: 
                   </td>
                   <td className="px-2 py-2 text-right text-ink">{f.contracts}</td>
                   <td className="px-2 py-2 text-right text-ink">{priceOrUnavailable(f.price)}</td>
-                  <td className="px-2 py-2 text-right text-muted">{f.fee} USDT</td>
-                  <td className={cn('px-2 py-2 text-right', pnlTone(f.pnl))}>{f.pnl === null ? '—' : signedUsdt(f.pnl)}</td>
+                  <td className="px-2 py-2 text-right text-muted">{f.fee} {ccy}</td>
+                  <td className={cn('px-2 py-2 text-right', pnlTone(f.pnl))}>{f.pnl === null ? '—' : signedUsdt(f.pnl, ccy)}</td>
                   <td className="px-2 py-2 text-right text-ink">{f.remaining}</td>
                   <td className="px-2 py-2 text-xs text-muted">{f.signal ? `${ACTION_LABEL[f.signal.action] ?? f.signal.action} · ${f.signal.interval}m · ${fmtTime(f.signal.barCloseAt, timezone)}` : '—'}</td>
                 </tr>

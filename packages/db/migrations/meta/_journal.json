@@ -225,6 +225,20 @@
       "when": 1794915848168,
       "tag": "0031_m21_lighter_market_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794923996841,
+      "tag": "0032_m22_lighter_paper_routing",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794932141623,
+      "tag": "0033_m23_lighter_private_execution",
+      "breakpoints": true
     }
   ]
 }

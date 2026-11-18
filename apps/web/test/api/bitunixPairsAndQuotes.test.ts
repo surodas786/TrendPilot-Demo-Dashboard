@@ -72,7 +72,7 @@ describe('Paper is MEXC only', () => {
     const r = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: blockBody({ instrumentId: bx, strategyVersionId: version, mode: 'PAPER', orderCostUsdt: '50', leverage: 5, weekdays: ALL_DAYS }) });
     expect(r.status).toBe(400);
     expect(r.body.issues).toContainEqual(expect.objectContaining({ path: 'instrumentId' }));
-    expect(JSON.stringify(r.body)).toMatch(/Paper trading simulates MEXC contracts only/);
+    expect(JSON.stringify(r.body)).toMatch(/Paper trading simulates MEXC and Lighter contracts only/);
     expect(await direct.db.select().from(schema.orderBlocks).where(eq(schema.orderBlocks.instrumentId, bx))).toHaveLength(0);
   });
 

@@ -731,7 +731,7 @@ export async function recordMarketTick(
     mark: string;
     last: string;
     liquidityContracts?: string | null;
-    source?: 'FIXTURE' | 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC';
+    source?: 'FIXTURE' | 'MEXC_PUBLIC' | 'BITUNIX_PUBLIC' | 'LIGHTER_PUBLIC';
     /** Public-feed transport (WS, REST_FALLBACK, REST_POLL). */
     channel?: QuoteChannel | null;
     /** When the feed process received it (for end-to-end latency); defaults to now. */
