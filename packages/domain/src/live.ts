@@ -1,4 +1,5 @@
 import { Decimal } from './decimal';
+import { exchangeLabel } from './exchange';
 
 /**
  * Live mode rules (OPS-01/02, EXE-02). Pure; no I/O.
@@ -94,6 +95,20 @@ export const LIVE_REFUSAL_TEXT: Record<LiveRefusal, string> = {
   LIVE_LEVERAGE: 'The leverage exceeds the approved maximum.',
   LIVE_EXPOSURE: 'The order would exceed the approved maximum total exposure.'
 };
+
+/**
+ * LIVE_REFUSAL_TEXT for the exchange the entry would go to. The base texts name MEXC (its Live
+ * path came first); a Bitunix or Lighter account must not be described as a MEXC one. Bitunix
+ * Live additionally requires Hedge mode.
+ */
+export function liveRefusalText(reason: LiveRefusal, exchange: string = 'MEXC'): string {
+  const base = LIVE_REFUSAL_TEXT[reason];
+  if (exchange === 'MEXC') return base;
+  const label = exchangeLabel(exchange);
+  if (reason === 'LIVE_POSITION_MODE' && exchange === 'BITUNIX')
+    return 'The Bitunix position mode is not Hedge (or is not verified). Bitunix Live needs Hedge mode: change it in Bitunix, then check the connection again. Closing and protection are not affected.';
+  return base.replace(/MEXC/g, label);
+}
 
 export type LiveVerdict = { ok: true } | { ok: false; reason: LiveRefusal; detail?: Record<string, string | number> };
 

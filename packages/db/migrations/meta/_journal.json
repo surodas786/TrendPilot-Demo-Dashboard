@@ -239,6 +239,13 @@
       "when": 1794932141623,
       "tag": "0033_m23_lighter_private_execution",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1795025889908,
+      "tag": "0034_m24_order_block_archive",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,6 @@
 import { lighterConnectionsToSync } from './live/lighterSync';
 import { and, desc, eq, inArray, lt, ne, sql } from 'drizzle-orm';
-import { assertLiveTransportAllowed } from '@trendpilot/domain';
+import { assertLiveTransportAllowed, exchangeLabel } from '@trendpilot/domain';
 import type { Db, Executor } from './client';
 import { exchangeConnections, jobs, marketQuotes, serviceHeartbeats, users } from './schema';
 import { getLiveControl } from './live/liveMode';
@@ -200,8 +200,9 @@ export async function getOperationsStatus(db: Db, now: Date = new Date(), env: R
   if (serviceSummary['market-feed'] !== 'REPORTING') alerts.push({ level: 'WARN', message: `Market feed ${serviceSummary['market-feed'] === 'NEVER_STARTED' ? 'has never reported' : 'is not reporting'}: public prices are not updating.` });
   for (const c of contracts) {
     if (c.instrumentStatus !== 'PUBLISHED' || !c.feed) continue;
-    if (c.feed.state !== 'HEALTHY') alerts.push({ level: 'WARN', message: `${c.symbol} feed ${c.feed.state}${c.feed.lastError ? `: ${c.feed.lastError}` : ''}` });
-    else if (c.latestQuote?.freshness === 'STALE') alerts.push({ level: 'WARN', message: `${c.symbol}: newest price is ${c.latestQuote.ageSeconds} s old` });
+    const name = `${exchangeLabel(c.exchange)} ${c.exchangeSymbol || c.symbol}`;
+    if (c.feed.state !== 'HEALTHY') alerts.push({ level: 'WARN', message: `${name} feed ${c.feed.state}${c.feed.lastError ? `: ${c.feed.lastError}` : ''}` });
+    else if (c.latestQuote?.freshness === 'STALE') alerts.push({ level: 'WARN', message: `${name}: newest price is ${c.latestQuote.ageSeconds} s old` });
   }
   if (jobsDto.dead > 0) alerts.push({ level: 'ERROR', message: `${jobsDto.dead} job(s) failed permanently (DEAD). See recent failures.` });
   if (jobsDto.oldestDueSeconds !== null && jobsDto.oldestDueSeconds > 60) alerts.push({ level: 'WARN', message: `Job backlog: oldest due job waiting ${jobsDto.oldestDueSeconds} s.` });

@@ -1,4 +1,4 @@
-import { connectionFor, fixtureQuote, lighterLiveRefusalFor, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
+import { connectionFor, fixtureQuote, lighterLiveRefusalFor, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type BlockRemovalReason, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
 import {
   assertModeAllowed,
   catalogIssues,
@@ -343,4 +343,76 @@ export async function previewSaved(owner: PublicUser, id: string) {
   const instrument = await getInstrument(getDb(), block.instrumentId);
   if (!instrument) throw notFound();
   return previewWith(instrument, block, block.mode as BlockMode);
+}
+
+/* ─────────────────────────── Removal (Trade Settings → Remove) ─────────────────────────── */
+
+export interface RemovalPreviewItem {
+  id: string;
+  symbol: string;
+  exchange: string;
+  mode: BlockMode;
+  status: BlockStatus;
+  /** DELETE: no history at all. ARCHIVE: trade or signal history references it and is kept. */
+  action: 'DELETE' | 'ARCHIVE';
+}
+export interface RemovalExcludedItem extends Omit<RemovalPreviewItem, 'action'> {
+  reasons: BlockRemovalReason[];
+}
+
+/** Read-only: which of the investor's blocks "Remove unused" would remove, and why the others stay. */
+export async function removalPreview(owner: PublicUser): Promise<{ removable: RemovalPreviewItem[]; excluded: RemovalExcludedItem[] }> {
+  const repo = orderBlocksFor(getDb(), owner.id);
+  const removable: RemovalPreviewItem[] = [];
+  const excluded: RemovalExcludedItem[] = [];
+  for (const b of await repo.list()) {
+    const c = await repo.removalCheck(b.id);
+    const base = { id: b.id, symbol: b.symbol, exchange: b.exchange, mode: b.mode, status: b.status };
+    if (c.reasons.length) excluded.push({ ...base, reasons: c.reasons });
+    else removable.push({ ...base, action: c.history ? 'ARCHIVE' : 'DELETE' });
+  }
+  return { removable, excluded };
+}
+
+/**
+ * Removes the given blocks. Ownership and eligibility are checked again per block inside its own
+ * transaction, under the same account lock an entry takes, so a block that became active or got an
+ * order since the preview is kept and reported. Blocks with history are archived (reversible).
+ */
+export async function removeBlocks(owner: PublicUser, ids: string[], correlationId: string): Promise<{ removed: { id: string; symbol: string; result: 'ARCHIVED' | 'DELETED' }[]; kept: { id: string; symbol: string | null; reasons: BlockRemovalReason[] }[] }> {
+  const unique = [...new Set(ids)].slice(0, 200);
+  if (!unique.length) throw validationError([{ path: 'ids', message: 'Select at least one order block.' }]);
+  const db = getDb();
+  const removed: { id: string; symbol: string; result: 'ARCHIVED' | 'DELETED' }[] = [];
+  const kept: { id: string; symbol: string | null; reasons: BlockRemovalReason[] }[] = [];
+  for (const id of unique) {
+    const outcome = await db.transaction(async (tx) => {
+      const repo = orderBlocksFor(tx, owner.id);
+      const c = await repo.removalCheck(id, { lock: true });
+      if (!c.block) return { kind: 'missing' as const };
+      if (c.reasons.length) return { kind: 'kept' as const, block: c.block, reasons: c.reasons };
+      const result = await repo.remove(id, c.history);
+      if (result === 'NOT_FOUND') return { kind: 'missing' as const };
+      await recordAudit(tx, {
+        actorUserId: owner.id,
+        action: 'ORDER_BLOCK_REMOVE',
+        targetType: 'order_block',
+        targetId: id,
+        result: 'SUCCESS',
+        before: { symbol: c.block.symbol, exchange: c.block.exchange, mode: c.block.mode, status: c.block.status, revision: c.block.revision },
+        metadata: { result, historyKept: c.history },
+        correlationId
+      });
+      return { kind: 'removed' as const, block: c.block, result };
+    });
+    if (outcome.kind === 'removed') removed.push({ id, symbol: outcome.block.symbol, result: outcome.result });
+    else if (outcome.kind === 'kept') {
+      kept.push({ id, symbol: outcome.block.symbol, reasons: outcome.reasons });
+      await recordAudit(db, { actorUserId: owner.id, action: 'ORDER_BLOCK_REMOVE', targetType: 'order_block', targetId: id, result: 'DENIED', metadata: { reasons: outcome.reasons.map((r) => r.code) }, correlationId });
+    } else {
+      kept.push({ id, symbol: null, reasons: [] });
+      await recordAudit(db, { actorUserId: owner.id, action: 'ORDER_BLOCK_REMOVE', targetType: 'order_block', targetId: id.slice(0, 64), result: 'DENIED', metadata: { reason: 'NOT_FOUND_OR_NOT_OWNED' }, correlationId });
+    }
+  }
+  return { removed, kept };
 }

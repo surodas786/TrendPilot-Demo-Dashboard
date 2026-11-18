@@ -13,7 +13,7 @@
  *
  *   npm run ops:route-readiness -- --exchange BITUNIX --symbol XAUUSDT.P --interval 5 --expect-exchange BITUNIX
  */
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { contractMatchesSource, normalizeSource, SIGNAL_ACTIONS, type SignalAction } from '@trendpilot/domain';
 import { createDb } from '../client';
 import { loadRootEnv, requireEnv } from '../env';
@@ -78,7 +78,7 @@ try {
               .from(orderBlocks)
               .innerJoin(strategyVersions, eq(strategyVersions.id, orderBlocks.strategyVersionId))
               .innerJoin(instruments, eq(instruments.id, orderBlocks.instrumentId))
-              .where(and(inArray(orderBlocks.instrumentId, ids), eq(strategyVersions.packageId, r.packageId)))
+              .where(and(inArray(orderBlocks.instrumentId, ids), eq(strategyVersions.packageId, r.packageId), isNull(orderBlocks.archivedAt)))
           : [];
         console.log(`order blocks that would be evaluated (${blocks.length}):`);
         if (blocks.length) console.table(blocks);

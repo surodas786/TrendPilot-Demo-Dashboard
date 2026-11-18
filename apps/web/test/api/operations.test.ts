@@ -81,7 +81,7 @@ describe('operations view', () => {
       .insert(schema.marketFeedStatus)
       .values({ instrumentId: BTC, source: 'MEXC_PUBLIC', exchangeSymbol: 'BTC_USDT', state: 'DOWN', consecutiveFailures: 3, lastError: 'GET /api/v1/contract/ticker: fetch failed' });
     const d = await view();
-    expect(d.alerts.some((a: any) => a.level === 'WARN' && /BTCUSDT feed DOWN: GET \/api\/v1\/contract\/ticker: fetch failed/.test(a.message))).toBe(true);
+    expect(d.alerts.some((a: any) => a.level === 'WARN' && /MEXC BTC_USDT feed DOWN: GET \/api\/v1\/contract\/ticker: fetch failed/.test(a.message))).toBe(true);
     expect(d.feed.contracts.find((c: any) => c.symbol === 'BTCUSDT').feed).toMatchObject({ state: 'DOWN', consecutiveFailures: 3 });
   });
 });

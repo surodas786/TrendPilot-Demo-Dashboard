@@ -130,7 +130,8 @@ export async function dispatchSignalEvent(tx: Executor, eventId: string, now: Da
       .from(orderBlocks)
       .innerJoin(users, eq(users.id, orderBlocks.ownerId))
       .innerJoin(strategyVersions, eq(strategyVersions.id, orderBlocks.strategyVersionId))
-      .where(and(inArray(orderBlocks.instrumentId, instrumentIds), eq(strategyVersions.packageId, event.packageId)))
+      // Removed (archived) blocks keep their history but never see new signals.
+      .where(and(inArray(orderBlocks.instrumentId, instrumentIds), eq(strategyVersions.packageId, event.packageId), isNull(orderBlocks.archivedAt)))
       // Owner order = account-lock order: concurrent dispatches can never deadlock.
       .orderBy(orderBlocks.ownerId, orderBlocks.id);
 

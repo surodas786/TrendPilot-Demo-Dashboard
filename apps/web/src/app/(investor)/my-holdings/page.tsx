@@ -1,6 +1,7 @@
 import { connectionFor, getDb, getMyPaperAccount, listBitunixExchangeOnlyLegs, listLatestQuotes, listMyHoldings, listMyPositions } from '@trendpilot/db';
 import { HoldingsClient } from '@/components/holdings/HoldingsClient';
-import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
+import { ExchangeSyncPanel } from '@/components/trades/ExchangeSyncPanel';
+import { manualSyncUnavailable } from '@/server/investorSync';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf, liveViewExchanges } from '@/components/ui/ModeTabs';
 import { now } from '@/server/clock';
@@ -43,19 +44,16 @@ export default async function MyHoldingsPage({ searchParams }: { searchParams: P
         </div>
       }
     >
-      {mode === 'LIVE' && exchange === 'BITUNIX' && connection && connection.status !== 'REVOKED' && (
-        <p className="mb-3 text-xs text-subtle" data-testid="bitunix-sync-note">
-          Bitunix account last synced {connection.lastSyncOkAt ? connection.lastSyncOkAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'never'}
-          {connection.lastSyncError ? ` · latest attempt failed: ${connection.lastSyncError}` : ''}. Sync from Live Trading → Bitunix Futures connection.
-        </p>
-      )}
-      {mode === 'LIVE' && exchange === 'MEXC' && connection && connection.status !== 'REVOKED' && (
-        <SyncWithMexcButton
+      {mode === 'LIVE' && connection && connection.status !== 'REVOKED' && (
+        <ExchangeSyncPanel
+          key={`LIVE:${exchange}`}
+          exchange={exchange}
           lastSyncOkAt={connection.lastSyncOkAt?.toISOString() ?? null}
           lastSyncAt={connection.lastSyncAt?.toISOString() ?? null}
           lastSyncError={connection.lastSyncError}
           drift={(connection.drift ?? []) as { kind: string; symbol: string; detail: string }[]}
           timezone={user.timezone}
+          unavailableReason={manualSyncUnavailable(exchange)}
         />
       )}
       <HoldingsClient open={open} closed={closed} quotes={quotes} timezone={user.timezone} mode={mode} currency={exchange === 'LIGHTER' ? 'USDC' : 'USDT'} />

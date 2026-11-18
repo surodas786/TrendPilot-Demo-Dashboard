@@ -7,7 +7,7 @@ import {
   ErrorCode,
   exchangeUnavailableReason,
   keyFingerprint,
-  LIVE_REFUSAL_TEXT,
+  liveRefusalText,
   liveAccountBlockers,
   liveAccountGate,
   type LiveRefusal,
@@ -160,7 +160,7 @@ export async function liveEntryEligibility(
   if (verdict.ok) return { verdict, reasonText: null, blockers: [] };
   const account = liveAccountBlockers(state, cs, r.ownerId, !!inst?.liveAllowed).map((b) => b.reason);
   const blockers = account.length ? account : [verdict.reason];
-  return { verdict, reasonText: blockers.map((b) => LIVE_REFUSAL_TEXT[b]).join(' '), blockers };
+  return { verdict, reasonText: blockers.map((b) => liveRefusalText(b, inst?.exchange ?? 'MEXC')).join(' '), blockers };
 }
 
 /** Shown when no Lighter Live scope applies; the specific reason follows it. */

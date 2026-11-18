@@ -2,13 +2,15 @@
 
 import React, { useState } from 'react';
 import type { OperationsDto } from '@trendpilot/db';
+import { exchangeLabel } from '@trendpilot/domain';
 import { request } from '@/lib/api';
 import { Button } from '../ui/Button';
 import { StatusPill, type PillTone } from '../ui/StatusPill';
 
 const fmt = (iso: string | null, tz: string) => (iso ? new Intl.DateTimeFormat('en-GB', { timeZone: tz, dateStyle: 'short', timeStyle: 'medium' }).format(new Date(iso)) : '—');
 const svcTone: Record<string, PillTone> = { REPORTING: 'gain', NOT_REPORTING: 'loss', NEVER_STARTED: 'loss', STOPPED: 'neutral' };
-const svcLabel: Record<string, string> = { REPORTING: 'Reporting', NOT_REPORTING: 'Not reporting', NEVER_STARTED: 'Never started', STOPPED: 'Stopped' };
+const feedTone = (state: string): PillTone => (state === 'HEALTHY' ? 'gain' : state === 'STARTING' || state === 'NOT_STARTED' ? 'neutral' : state === 'DOWN' ? 'loss' : 'warn');
+const svcLabel: Record<string, string> ={ REPORTING: 'Reporting', NOT_REPORTING: 'Not reporting', NEVER_STARTED: 'Never started', STOPPED: 'Stopped' };
 
 function Tile({ label, children, testId }: { label: string; children: React.ReactNode; testId: string }) {
   return (
@@ -70,7 +72,7 @@ export function OperationsAdmin({ initial, timezone }: { initial: OperationsDto;
         </Tile>
         <Tile label="Market feed" testId="ops-feed">
           <StatusPill tone={svcTone[d.serviceSummary['market-feed']]!}>{svcLabel[d.serviceSummary['market-feed']]}</StatusPill>
-          <p className="mt-1 text-xs text-muted">{feedStates.map((c) => `${c.symbol} ${c.feed?.state ?? 'not started'}`).join(' · ') || 'No published contracts'}</p>
+          <p className="mt-1 text-xs text-muted">{feedStates.map((c) => `${exchangeLabel(c.exchange)} ${c.exchangeSymbol || c.symbol} ${c.feed?.state ?? 'not started'}`).join(' · ') || 'No published contracts'}</p>
         </Tile>
         <Tile label="Job queue" testId="ops-jobs">
           <span>
@@ -84,6 +86,53 @@ export function OperationsAdmin({ initial, timezone }: { initial: OperationsDto;
           </p>
         </Tile>
       </div>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold text-ink">Feed health by exchange and contract</h3>
+        <div className="overflow-x-auto rounded-xl border border-line bg-surface">
+          <table className="w-full min-w-[760px] text-left text-sm" aria-label="Feed health by exchange">
+            <thead className="border-b border-line text-xs text-subtle">
+              <tr>
+                <th scope="col" className="px-4 py-2 font-medium">Exchange</th>
+                <th scope="col" className="px-4 py-2 font-medium">Contract</th>
+                <th scope="col" className="px-4 py-2 font-medium">Feed state</th>
+                <th scope="col" className="px-4 py-2 font-medium">Newest price</th>
+                <th scope="col" className="px-4 py-2 font-medium">Source</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line/60">
+              {feedStates.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-3 text-xs text-subtle">
+                    No published contracts.
+                  </td>
+                </tr>
+              ) : (
+                [...feedStates]
+                  .sort((a, b) => a.exchange.localeCompare(b.exchange) || a.symbol.localeCompare(b.symbol))
+                  .map((c) => {
+                    const st = c.feed?.state ?? 'NOT_STARTED';
+                    return (
+                      <tr key={c.instrumentId} data-testid={`feed-${c.exchange}-${c.exchangeSymbol || c.symbol}`} data-state={st}>
+                        <td className="px-4 py-2 font-medium text-ink">{exchangeLabel(c.exchange)}</td>
+                        <td className="px-4 py-2 font-mono text-xs text-muted">
+                          {c.exchangeSymbol || c.symbol}
+                          {c.marketId !== null ? ` (market ${c.marketId})` : ''} · {c.quoteCurrency}
+                        </td>
+                        <td className="px-4 py-2">
+                          <StatusPill tone={c.feed && !c.feed.reporting ? 'warn' : feedTone(st)}>{c.feed?.stateText ?? 'Not started'}</StatusPill>
+                          {c.feed && !c.feed.reporting && <p className="mt-0.5 text-[11px] text-warn">Last stored state; the feed is not reporting for this contract.</p>}
+                        </td>
+                        <td className="px-4 py-2 text-xs text-muted">{c.latestQuote ? `${c.latestQuote.last} · ${c.latestQuote.ageSeconds} s ago (${c.latestQuote.freshness === 'FRESH' ? 'fresh' : 'stale'})` : 'none received'}</td>
+                        <td className="px-4 py-2 text-xs text-subtle">{c.latestQuote?.sourceLabel ?? c.feed?.source ?? '—'}</td>
+                      </tr>
+                    );
+                  })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <section className="space-y-2">
         <h3 className="text-sm font-semibold text-ink">Services</h3>
@@ -153,7 +202,9 @@ export function OperationsAdmin({ initial, timezone }: { initial: OperationsDto;
             {d.feed.events.map((e) => (
               <li key={e.id} className="flex flex-col gap-0.5 px-4 py-2.5 md:flex-row md:gap-4" data-testid="feed-event" data-kind={e.kind}>
                 <span className="w-44 shrink-0 text-xs text-subtle">{fmt(e.createdAt, timezone)}</span>
-                <span className="w-40 shrink-0 font-mono text-xs text-muted">{e.kind}</span>
+                <span className="w-56 shrink-0 font-mono text-xs text-muted">
+                  {exchangeLabel(e.exchange)} {e.symbol} · {e.kind}
+                </span>
                 <span className="text-xs text-ink">{e.message}</span>
               </li>
             ))}

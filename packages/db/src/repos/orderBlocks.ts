@@ -1,4 +1,4 @@
-import { and, asc, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
   DomainError,
   ErrorCode,
@@ -11,7 +11,7 @@ import {
   type Weekday
 } from '@trendpilot/domain';
 import type { Executor } from '../client';
-import { instruments, orderBlocks, orderIntents, paperAccounts, positions } from '../schema';
+import { instruments, jobs, orderBlocks, orderIntents, paperAccounts, positions, signalDecisions } from '../schema';
 
 /** Order intent states that are not finished yet (same set the entry and exit paths use). */
 const UNFINISHED_INTENTS = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
@@ -82,7 +82,8 @@ export type WriteResult = { ok: true; block: OrderBlockDto } | { ok: false; reas
  * unowned ID behaves exactly like a missing one.
  */
 export function orderBlocksFor(db: Executor, ownerId: string) {
-  const owned = (id: string) => and(eq(orderBlocks.id, id), eq(orderBlocks.ownerId, ownerId));
+  // Archived (removed) blocks are invisible to the investor: not listed, not editable, not resumable.
+  const owned = (id: string) => and(eq(orderBlocks.id, id), eq(orderBlocks.ownerId, ownerId), isNull(orderBlocks.archivedAt));
   const select = () =>
     db
       .select({ b: orderBlocks, symbol: instruments.symbol, exchange: instruments.exchange })
@@ -131,13 +132,13 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
       const [row] = await db
         .select({ id: orderBlocks.id })
         .from(orderBlocks)
-        .where(and(eq(orderBlocks.ownerId, ownerId), eq(orderBlocks.instrumentId, instrumentId), eq(orderBlocks.mode, mode)))
+        .where(and(eq(orderBlocks.ownerId, ownerId), eq(orderBlocks.instrumentId, instrumentId), eq(orderBlocks.mode, mode), isNull(orderBlocks.archivedAt)))
         .limit(1);
       return row?.id ?? null;
     },
 
     async list(): Promise<OrderBlockDto[]> {
-      const rows = await select().where(eq(orderBlocks.ownerId, ownerId)).orderBy(asc(instruments.symbol), asc(orderBlocks.mode));
+      const rows = await select().where(and(eq(orderBlocks.ownerId, ownerId), isNull(orderBlocks.archivedAt))).orderBy(asc(instruments.symbol), asc(orderBlocks.mode));
       return rows.map((r) => toDto(r.b, r));
     },
 
@@ -187,6 +188,62 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
       return { ok: true, block: (await get(id))! };
     },
 
+    /**
+     * Why this block cannot be removed now (empty = removable), and whether trade or signal
+     * history references it (then it is archived, not deleted). Inside a transaction, `lock`
+     * first locks the owner's account row for the block's mode (the row an entry locks before
+     * it reserves an order) and the block row, so nothing can start between check and removal.
+     */
+    async removalCheck(id: string, opts: { lock?: boolean } = {}): Promise<{ block: OrderBlockDto | undefined; reasons: BlockRemovalReason[]; history: boolean }> {
+      const block = await get(id);
+      if (!block) return { block: undefined, reasons: [], history: false };
+      if (opts.lock) {
+        await db.select({ id: paperAccounts.id }).from(paperAccounts).where(and(eq(paperAccounts.ownerId, ownerId), eq(paperAccounts.mode, block.mode))).for('update');
+        await db.select({ id: orderBlocks.id }).from(orderBlocks).where(owned(id)).for('update');
+      }
+      const fresh = opts.lock ? await get(id) : block;
+      if (!fresh) return { block: undefined, reasons: [], history: false };
+      const [[open], [unfinished], [reversal], [decisions], [intents], [allPositions]] = await Promise.all([
+        db.select({ n: count() }).from(positions).where(and(eq(positions.orderBlockId, id), eq(positions.ownerId, ownerId), eq(positions.status, 'OPEN'))),
+        db.select({ n: count() }).from(orderIntents).where(and(eq(orderIntents.orderBlockId, id), eq(orderIntents.ownerId, ownerId), inArray(orderIntents.state, [...UNFINISHED_INTENTS]))),
+        // A close-and-reverse waiting to reopen: the close is done but the new entry is not queued yet.
+        db
+          .select({ n: count() })
+          .from(jobs)
+          .innerJoin(orderIntents, sql`${orderIntents.id}::text = ${jobs.payload}->>'closeIntentId'`)
+          .where(and(eq(jobs.kind, 'paper.reverse'), inArray(jobs.status, ['PENDING', 'RUNNING']), eq(orderIntents.orderBlockId, id))),
+        db.select({ n: count() }).from(signalDecisions).where(eq(signalDecisions.orderBlockId, id)),
+        db.select({ n: count() }).from(orderIntents).where(eq(orderIntents.orderBlockId, id)),
+        db.select({ n: count() }).from(positions).where(eq(positions.orderBlockId, id))
+      ]);
+      const reasons: BlockRemovalReason[] = [];
+      if (fresh.status === 'ACTIVE') reasons.push({ code: 'ACTIVE', text: 'Active: it can take new entries. Pause it first.' });
+      if (Number(open?.n ?? 0)) reasons.push({ code: 'OPEN_POSITION', text: `${open!.n} open position(s) are managed by it (stop loss, take profit, closes).` });
+      if (Number(unfinished?.n ?? 0)) reasons.push({ code: 'UNRESOLVED_ORDER', text: `${unfinished!.n} order(s) are not finished yet (submitted, partially filled or awaiting reconciliation).` });
+      if (Number(reversal?.n ?? 0)) reasons.push({ code: 'REVERSAL_PENDING', text: 'A close-and-reverse is still being processed.' });
+      const history = Number(decisions?.n ?? 0) + Number(intents?.n ?? 0) + Number(allPositions?.n ?? 0) > 0;
+      return { block: fresh, reasons, history };
+    },
+
+    /**
+     * Removes a block that `removalCheck` cleared (call it with `lock` in the same transaction).
+     * With history it is archived (kept for trade and signal history, reversible); without any it
+     * is deleted. The shared instrument is never touched.
+     */
+    async remove(id: string, history: boolean): Promise<'ARCHIVED' | 'DELETED' | 'NOT_FOUND'> {
+      if (!isUuid(id)) return 'NOT_FOUND';
+      if (history) {
+        const rows = await db
+          .update(orderBlocks)
+          .set({ archivedAt: sql`now()`, status: 'PAUSED', revision: sql`${orderBlocks.revision} + 1`, updatedAt: sql`now()` })
+          .where(owned(id))
+          .returning({ id: orderBlocks.id });
+        return rows.length ? 'ARCHIVED' : 'NOT_FOUND';
+      }
+      const rows = await db.delete(orderBlocks).where(owned(id)).returning({ id: orderBlocks.id });
+      return rows.length ? 'DELETED' : 'NOT_FOUND';
+    },
+
     async setStatus(id: string, expectedRevision: number, status: BlockStatus): Promise<WriteResult> {
       if (!isUuid(id)) return { ok: false, reason: 'NOT_FOUND' };
       const rows = await db
@@ -201,3 +258,9 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
 }
 
 export type OrderBlockRepo = ReturnType<typeof orderBlocksFor>;
+
+/** Why an order block is kept when the investor asks to remove it. */
+export interface BlockRemovalReason {
+  code: 'ACTIVE' | 'OPEN_POSITION' | 'UNRESOLVED_ORDER' | 'REVERSAL_PENDING';
+  text: string;
+}

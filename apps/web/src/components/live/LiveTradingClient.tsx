@@ -33,6 +33,14 @@ export interface LiveStatus {
   } | null;
   liveContracts: { id: string; symbol: string; exchangeSymbol: string }[];
   entries: { allowed: boolean; reason: string | null; reasonText: string | null; blockers: { reason: string; text: string }[] };
+  /** Per exchange: connection verification and Live entry permission (the gates order submission uses), with next actions. */
+  exchanges: {
+    exchange: string;
+    label: string;
+    connection: { status: string | null; text: string; accountRef: string | null; positionMode: string | null };
+    liveContracts: string[];
+    entries: { allowed: boolean; blockers: { reason: string; text: string; next: string | null }[] };
+  }[];
 }
 
 const Row = ({ label, children }: { label: string; children: React.ReactNode }) => (
@@ -108,25 +116,40 @@ export function LiveTradingClient({ initial }: { initial: LiveStatus }) {
           <Row label="Approved by administrator">{yes(!!c?.approved, 'Approved', 'Not yet')}</Row>
           <Row label="Your Live activation">{yes(!!c?.liveEnabled, 'On', 'Off')}</Row>
           <Row label="Your Live entries">{c?.entriesHalted ? <StatusPill tone="warn">Halted</StatusPill> : <StatusPill tone="neutral">Not halted</StatusPill>}</Row>
-          <Row label="Contracts allowed for Live">{status.liveContracts.length ? status.liveContracts.map((x) => x.exchangeSymbol || x.symbol).join(', ') : 'None yet'}</Row>
+          <Row label="MEXC contracts allowed for Live">{status.liveContracts.length ? status.liveContracts.map((x) => x.exchangeSymbol || x.symbol).join(', ') : 'None yet'}</Row>
         </div>
-        <p className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${status.entries.allowed ? 'bg-gain/10 text-gain' : 'bg-inset text-muted'}`} data-testid="live-entries">
-          <CircleAlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-          {status.entries.allowed ? (
-            'New Live entries are allowed on the contracts above, within your limits.'
-          ) : (
-            <span>
-              New Live entries are not possible now:
-              <ul className="mt-1 list-disc space-y-0.5 pl-4" data-testid="live-blockers">
-                {status.entries.blockers.map((b) => (
-                  <li key={b.reason} data-reason={b.reason}>
-                    {b.text}
-                  </li>
-                ))}
-              </ul>
-            </span>
-          )}
-        </p>
+        <div className="mt-3 space-y-2" data-testid="live-by-exchange">
+          <p className="text-xs font-medium text-subtle">Live entries by exchange — connection verification and Live entry permission are separate</p>
+          {status.exchanges.map((e) => (
+            <div
+              key={e.exchange}
+              className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs ${e.entries.allowed ? 'bg-gain/10 text-gain' : 'bg-inset text-muted'}`}
+              data-testid={e.exchange === 'MEXC' ? 'live-entries' : `live-entries-${e.exchange}`}
+              data-exchange={e.exchange}
+              data-allowed={e.entries.allowed}
+            >
+              <CircleAlertIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              <span>
+                <span className="font-semibold">{e.label}</span> · connection {e.connection.text.toLowerCase()} ·{' '}
+                {e.entries.allowed ? (
+                  `New ${e.label} Live entries are allowed on ${e.liveContracts.join(', ')}, within your ${e.label} limits.`
+                ) : (
+                  <>
+                    New {e.label} Live entries are not possible now:
+                    <ul className="mt-1 list-disc space-y-0.5 pl-4" data-testid={e.exchange === 'MEXC' ? 'live-blockers' : `live-blockers-${e.exchange}`}>
+                      {e.entries.blockers.map((b) => (
+                        <li key={b.reason} data-reason={b.reason}>
+                          {b.text}
+                          {b.next && <span className="block text-subtle">Next: {b.next}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
         {c?.haltReason && c.entriesHalted && <p className="mt-2 text-xs text-warn">Halt reason: {c.haltReason}. An administrator resumes entries after review.</p>}
         <p className="mt-3 text-xs text-subtle">Turning Live off or halting stops new Live entries only. Your stop losses, take profit, trailing take profit, close-on-signal and manual closes keep working on open Live positions.</p>
         {c && (

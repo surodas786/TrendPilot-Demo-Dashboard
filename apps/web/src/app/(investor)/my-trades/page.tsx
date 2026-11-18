@@ -5,7 +5,8 @@ import { PageContainer } from '@/components/layout/PageContainer';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { StatusPill } from '@/components/ui/StatusPill';
 import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
-import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
+import { ExchangeSyncPanel } from '@/components/trades/ExchangeSyncPanel';
+import { manualSyncUnavailable } from '@/server/investorSync';
 import { EXIT_LABEL, signedUsdt as signedMoney, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, targetSummary, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
 import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf, liveViewExchanges } from '@/components/ui/ModeTabs';
@@ -77,19 +78,32 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
       }
     >
       {live && connection && connection.status !== 'REVOKED' && (
-        <SyncWithMexcButton
+        <ExchangeSyncPanel
+          key={`LIVE:${exchange}`}
+          exchange={exchange}
           lastSyncOkAt={connection.lastSyncOkAt?.toISOString() ?? null}
           lastSyncAt={connection.lastSyncAt?.toISOString() ?? null}
           lastSyncError={connection.lastSyncError}
           drift={(connection.drift ?? []) as { kind: string; symbol: string; detail: string }[]}
           timezone={user.timezone}
+          unavailableReason={manualSyncUnavailable(exchange)}
         />
+      )}
+      {live && (!connection || connection.status === 'REVOKED') && (
+        <p className="rounded-xl border border-line bg-surface px-4 py-3 text-xs text-muted" data-testid="sync-unavailable">
+          No {venue} account is connected, so there is nothing to sync. Connect it on the Live Trading page.
+        </p>
+      )}
+      {!live && (
+        <p className="text-xs text-subtle" data-testid="sync-unavailable">
+          Paper positions are simulated by TrendPilot{exchange === 'LIGHTER' ? ' on Lighter public prices' : ''}; there is no exchange account to sync.
+        </p>
       )}
 
       {account && (
         <dl className="grid gap-3 rounded-xl border border-line bg-surface p-4 text-sm sm:grid-cols-4" data-testid="paper-balance">
           <div>
-            <dt className="text-xs text-subtle">{live ? `Live wallet (${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'}, synced)` : 'Paper wallet'}</dt>
+            <dt className="text-xs text-subtle">{live ? `Live wallet (${venue}, synced)` : exchange === 'LIGHTER' ? 'Paper wallet (Lighter, USDC)' : 'Paper wallet'}</dt>
             <dd className="text-ink">{usdt(account.walletBalanceUsdt)}</dd>
           </div>
           <div>

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { CalendarOffIcon, CircleDotIcon, PauseIcon, PencilIcon, PlayIcon } from 'lucide-react';
+import { CalendarOffIcon, CircleDotIcon, PauseIcon, PencilIcon, PlayIcon, Trash2Icon } from 'lucide-react';
 import { Decimal, tradingWindowSummary, weekdaysSummary, type OrderBlockDto } from '@trendpilot/domain';
 import { Button } from '../ui/Button';
 import { StatusPill } from '../ui/StatusPill';
@@ -18,10 +18,14 @@ interface Props {
   busy: boolean;
   onEdit: () => void;
   onToggle: () => void;
+  /** Present only when the server found the block removable (paused, no open position, no unfinished order). */
+  onRemove?: () => void;
+  /** Why a paused block cannot be removed now (open position, unfinished order, pending reversal). */
+  keptBecause?: string;
 }
 
 /** Adapted from the MagicPatterns TokenBlockRow. Status is always shown as text as well as colour (UI-06). */
-export function OrderBlockRow({ block, pairLabel, contract, currency = 'USDT', strategyName, busy, onEdit, onToggle }: Props) {
+export function OrderBlockRow({ block, pairLabel, contract, currency = 'USDT', strategyName, busy, onEdit, onToggle, onRemove, keptBecause }: Props) {
   const active = block.status === 'ACTIVE';
   const noDays = block.weekdays.length === 0;
   return (
@@ -79,6 +83,11 @@ export function OrderBlockRow({ block, pairLabel, contract, currency = 'USDT', s
             <CalendarOffIcon className="h-3 w-3" aria-hidden /> No entry days selected
           </p>
         )}
+        {keptBecause && (
+          <p className="mt-1 text-xs text-subtle" data-testid="remove-kept-reason">
+            Cannot be removed: {keptBecause}
+          </p>
+        )}
       </div>
       <div className="flex gap-2">
         <Button size="sm" icon={PencilIcon} onClick={onEdit} aria-label={`Edit ${pairLabel} ${block.mode === 'LIVE' ? 'Live' : 'Paper'}`}>
@@ -87,6 +96,11 @@ export function OrderBlockRow({ block, pairLabel, contract, currency = 'USDT', s
         <Button size="sm" variant="ghost" icon={active ? PauseIcon : PlayIcon} onClick={onToggle} loading={busy} aria-label={`${active ? 'Pause' : 'Resume'} ${pairLabel} ${block.mode === 'LIVE' ? 'Live' : 'Paper'}`}>
           {active ? 'Pause' : 'Resume'}
         </Button>
+        {onRemove && (
+          <Button size="sm" variant="ghost" icon={Trash2Icon} onClick={onRemove} aria-label={`Remove ${pairLabel} ${block.mode === 'LIVE' ? 'Live' : 'Paper'}`}>
+            Remove
+          </Button>
+        )}
       </div>
     </li>
   );

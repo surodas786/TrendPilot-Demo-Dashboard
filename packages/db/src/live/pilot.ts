@@ -1,4 +1,4 @@
-import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { ALLOWED_MODES, checkPilotEntry, DomainError, ErrorCode, pilotBlockIssues, validatePilotLimits, type PilotScope } from '@trendpilot/domain';
 import type { Db, Executor } from '../client';
 import { recordAudit } from '../repos/audit';
@@ -119,7 +119,7 @@ export async function activatePilot(db: Db, investorId: string, correlationId = 
       .select({ b: orderBlocks, oppositePolicy: strategyVersions.oppositePolicy })
       .from(orderBlocks)
       .innerJoin(strategyVersions, eq(strategyVersions.id, orderBlocks.strategyVersionId))
-      .where(and(eq(orderBlocks.ownerId, investorId), eq(orderBlocks.instrumentId, p.instrumentId)));
+      .where(and(eq(orderBlocks.ownerId, investorId), eq(orderBlocks.instrumentId, p.instrumentId), isNull(orderBlocks.archivedAt)));
     if (!blocks.length) throw new DomainError(409, ErrorCode.CONFLICT, 'Create Trade Settings for the pilot contract first.');
     const issues = blocks.flatMap(({ b, oppositePolicy }) => pilotBlockIssues({ allowAdds: b.allowAdds, leverage: b.leverage, instrumentId: b.instrumentId }, { oppositePolicy }, toScope(p)));
     if (issues.length) throw new DomainError(409, ErrorCode.CONFLICT, issues.join(' '));
