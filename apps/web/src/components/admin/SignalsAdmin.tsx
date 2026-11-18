@@ -156,7 +156,8 @@ function BitunixTargetControl({ route, instruments, onSet }: { route: SignalRout
 }
 
 /**
- * Link, pause or remove an EXPLICITLY chosen Lighter market as a target of a route (Paper only). The
+ * Link, pause or remove an EXPLICITLY chosen Lighter market as a target of a route. Paper blocks on it
+ * trade at once; Live blocks only inside the Lighter Live scope (server settings + approvals). The
  * administrator picks the Lighter market by name and market ID: nothing is matched from the
  * TradingView ticker (Lighter XAU is not "XAUUSDT"), so no market is pre-selected.
  */
@@ -170,7 +171,7 @@ function LighterTargetControl({ route, instruments, onSet }: { route: SignalRout
       {!current ? (
         <>
           <select aria-label="Lighter market for this route" value={choice} onChange={(e) => setChoice(e.target.value)} className="h-8 rounded-md border border-line bg-inset px-2 text-xs text-ink">
-            <option value="">Route to a Lighter market (Paper)…</option>
+            <option value="">Route to a Lighter market…</option>
             {candidates.map((i) => (
               <option key={i.id} value={i.id}>
                 Lighter {i.exchangeSymbol} (market {i.marketId}) · {i.base}/{i.quote}
@@ -184,7 +185,7 @@ function LighterTargetControl({ route, instruments, onSet }: { route: SignalRout
       ) : (
         <>
           <span className="text-[11px] text-subtle">
-            Lighter {current.exchangeSymbol} · Paper{current.enabled ? '' : ' · paused'}
+            Lighter {current.exchangeSymbol} · target saved{current.enabled ? '' : ' · paused'} · Live only within the Lighter Live scope
           </span>
           <Button size="sm" variant="ghost" onClick={() => onSet(current.instrumentId, !current.enabled)}>
             {current.enabled ? 'Pause Lighter routing' : 'Resume Lighter routing'}
@@ -261,11 +262,11 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     router.refresh();
   };
 
-  /** Lighter plan Step 3: an explicitly chosen Lighter market as a Paper target of this route. */
+  /** An explicitly chosen Lighter market as a target of this route (Paper, and Live within the Lighter Live scope). */
   const setLighterTarget = async (route: SignalRouteDto, instrumentId: string | null, enabled = true) => {
     const r = await request('PUT', `/v1/admin/signal-routes/${route.id}/lighter-target`, { body: { instrumentId, enabled } });
     if (!r.ok) toast.error(r.message, { duration: 10_000 });
-    else toast.success(instrumentId ? (enabled ? 'Lighter (Paper) routing on for this route' : 'Lighter routing paused for this route') : 'Lighter routing removed from this route');
+    else toast.success(instrumentId ? (enabled ? 'Lighter target saved for this route' : 'Lighter routing paused for this route') : 'Lighter routing removed from this route');
     router.refresh();
   };
 
