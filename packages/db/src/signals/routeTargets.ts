@@ -68,6 +68,7 @@ export async function setBitunixRouteTarget(db: Db, adminId: string, routeId: st
     const [inst] = await tx.select().from(instruments).where(eq(instruments.id, input.instrumentId));
     if (!inst) throw new DomainError(404, ErrorCode.NOT_FOUND, 'Instrument not found.');
     if (inst.exchange !== 'BITUNIX') throw new DomainError(400, ErrorCode.VALIDATION_FAILED, 'Only a Bitunix instrument can be added as a route target; the route’s own instrument stays its MEXC target.');
+    if (primary?.exchange === 'BITUNIX') throw new DomainError(409, ErrorCode.CONFLICT, `This route's own signal contract is already Bitunix ${primary.exchangeSymbol}; it executes on Bitunix without an extra target.`);
     if (!primary || inst.symbol !== primary.symbol) {
       throw new DomainError(409, ErrorCode.CONFLICT, `This route delivers ${primary?.symbol ?? 'another contract'} signals; ${inst.symbol} on Bitunix is a different contract.`);
     }

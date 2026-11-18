@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Decimal } from './decimal';
+import { exchangeLabel } from './exchange';
 import { directionPermitted, type BlockStatus, type Direction, type Mode } from './orderBlock';
 import { entryGate, OUTSIDE_WINDOW_TEXT, type TradingWindow } from './tradingWindow';
 import type { Weekday } from './weekdays';
@@ -57,6 +58,46 @@ export type TradingViewPayload = z.output<typeof tradingViewPayloadSchema>;
 
 /** SIG-03: normalise the source tuple to the registered route format. */
 export const normalizeSource = (value: string) => value.trim().toUpperCase();
+
+/**
+ * Contract key of a TradingView ticker or an exchange symbol: upper case, without TradingView's
+ * perpetual suffix ".P" and without separators. "XAUUSDT.P" → "XAUUSDT"; MEXC "XAU_USDT" → "XAUUSDT".
+ */
+export const contractKey = (value: string) =>
+  normalizeSource(value)
+    .replace(/\.P$/, '')
+    .replace(/[^A-Z0-9]/g, '');
+
+/**
+ * Is this instrument the chart's own contract for a route source? Same exchange as TradingView's
+ * {{exchange}} and the same contract as {{ticker}}: a BITUNIX:XAUUSDT.P chart is Bitunix XAUUSDT,
+ * never MEXC XAU_USDT or BTC_USDT. Used by the admin form (choices) and the server (validation).
+ */
+export function contractMatchesSource(inst: { exchange: string; exchangeSymbol: string }, sourceExchange: string, sourceSymbol: string): boolean {
+  const key = contractKey(sourceSymbol);
+  return key !== '' && inst.exchange === normalizeSource(sourceExchange) && contractKey(inst.exchangeSymbol) === key;
+}
+
+type ContractLike = { exchange: string; exchangeSymbol: string };
+
+/**
+ * Why `chosen` cannot be the signal contract of a route for this source, or null when it is the
+ * chart's own contract. `instruments` is the whole catalog: when no contract matches the source at
+ * all, the message says so (and what to import) instead of naming a wrong one.
+ */
+export function signalContractIssue(chosen: ContractLike | null | undefined, instruments: readonly ContractLike[], sourceExchange: string, sourceSymbol: string): string | null {
+  const ex = normalizeSource(sourceExchange);
+  const sym = normalizeSource(sourceSymbol);
+  if (!ex || !sym) return 'Enter the source exchange and ticker first; the signal contract must be that chart’s contract.';
+  if (chosen && contractMatchesSource(chosen, ex, sym)) return null;
+  const matching = instruments.filter((i) => i.exchange !== 'LIGHTER' && contractMatchesSource(i, ex, sym));
+  if (!matching.length) {
+    return `No ${exchangeLabel(ex)} contract ${contractKey(sym)} exists for ${ex}:${sym}. Import and publish the ${exchangeLabel(ex)} ${contractKey(sym)} perpetual in Admin → Trading Pairs, then select it here.`;
+  }
+  const options = matching.map((i) => `${exchangeLabel(i.exchange)} ${i.exchangeSymbol}`).join(' or ');
+  if (!chosen) return `Select the signal contract for ${ex}:${sym}: ${options}.`;
+  return `${exchangeLabel(chosen.exchange)} ${chosen.exchangeSymbol} is not the contract of the ${ex}:${sym} chart. Select ${options}.`;
+}
 
 /** Ingress rejection reasons (persisted, never per-investor). */
 export type SignalRejectReason =

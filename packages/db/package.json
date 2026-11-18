@@ -28,6 +28,7 @@
     "live-sync": "tsx src/cli/live-sync.ts",
     "lighter-sync": "tsx src/cli/lighter-sync.ts",
     "lighter-readiness": "tsx src/cli/lighter-readiness.ts",
+    "route-readiness": "tsx src/cli/route-readiness.ts",
     "close-incident-trace": "tsx src/cli/close-incident-trace.ts",
     "exit-halt": "tsx src/cli/exit-halt.ts"
   },

@@ -44,6 +44,7 @@
     "ops:live-sync": "npm run live-sync -w @trendpilot/db --",
     "ops:lighter-sync": "npm run lighter-sync -w @trendpilot/db --",
     "ops:lighter-readiness": "npm run lighter-readiness -w @trendpilot/db --",
+    "ops:route-readiness": "npm run route-readiness -w @trendpilot/db --",
     "ops:close-incident-trace": "npm run close-incident-trace -w @trendpilot/db --",
     "ops:exit-halt": "npm run exit-halt -w @trendpilot/db --"
   },

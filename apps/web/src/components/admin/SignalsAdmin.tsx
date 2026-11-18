@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { KeyRoundIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react';
 import { toast } from 'sonner';
 import type { InstrumentDto, PackageDto, SignalEventOpsDto, SignalRouteDto } from '@trendpilot/db';
-import { SIGNAL_ACTIONS, type SignalAction } from '@trendpilot/domain';
+import { contractMatchesSource, exchangeLabel, normalizeSource, SIGNAL_ACTIONS, signalContractIssue, type SignalAction } from '@trendpilot/domain';
 import { issueMap, request } from '@/lib/api';
 import { CopyButtonInline } from './CopyButtonInline';
 import { Button } from '../ui/Button';
@@ -81,15 +81,28 @@ function TimeframeTag({ latest, interval }: { latest: { version: number; timefra
   );
 }
 
+/** Signal contracts for the form's source: only the chart's own contract (same exchange and ticker). Lighter is never a source. */
+const contractsForSource = (instruments: InstrumentDto[], f: Pick<RouteForm, 'sourceExchange' | 'sourceSymbol'>) =>
+  instruments.filter((i) => i.exchange !== 'LIGHTER' && contractMatchesSource(i, f.sourceExchange, f.sourceSymbol));
+
+/** Client-side copy of the server rule, so a wrong or missing contract is explained before saving. */
+const contractError = (instruments: InstrumentDto[], f: RouteForm) =>
+  signalContractIssue(instruments.find((i) => i.id === f.instrumentId), instruments, f.sourceExchange, f.sourceSymbol);
+
 function RouteFields({ form, setForm, errors, instruments, packages }: { form: RouteForm; setForm: (f: RouteForm) => void; errors: Record<string, string>; instruments: InstrumentDto[]; packages: PackageDto[] }) {
   const pkg = packages.find((p) => p.id === form.packageId);
   const latest = pkg ? latestOf(pkg) : null;
+  const contracts = contractsForSource(instruments, form);
+  const hasSource = normalizeSource(form.sourceExchange) !== '' && normalizeSource(form.sourceSymbol) !== '';
+  // A previous choice never survives a change of source: the contract must be re-chosen for the new chart.
+  const setSource = (patch: Partial<Pick<RouteForm, 'sourceExchange' | 'sourceSymbol'>>) => setForm({ ...form, ...patch, instrumentId: '' });
+  const contractHint = (hasSource && !contracts.length ? signalContractIssue(null, instruments, form.sourceExchange, form.sourceSymbol) : null) ?? errors.instrumentId ?? null;
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-3">
         <TextField label="Route name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} error={errors.name} />
-        <TextField label="Source exchange ({{exchange}})" value={form.sourceExchange} onChange={(v) => setForm({ ...form, sourceExchange: v })} error={errors.sourceExchange} />
-        <TextField label="Source ticker ({{ticker}})" placeholder="BTCUSDT.P" value={form.sourceSymbol} onChange={(v) => setForm({ ...form, sourceSymbol: v })} error={errors.sourceSymbol} />
+        <TextField label="Source exchange ({{exchange}})" placeholder="MEXC or BITUNIX" value={form.sourceExchange} onChange={(v) => setSource({ sourceExchange: v })} error={errors.sourceExchange} />
+        <TextField label="Source ticker ({{ticker}})" placeholder="BTCUSDT.P" value={form.sourceSymbol} onChange={(v) => setSource({ sourceSymbol: v })} error={errors.sourceSymbol} />
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <div>
@@ -105,11 +118,16 @@ function RouteFields({ form, setForm, errors, instruments, packages }: { form: R
             label="Signal contract (the chart's exchange contract)"
             value={form.instrumentId}
             onChange={(v) => setForm({ ...form, instrumentId: v })}
-            options={instruments
-              .filter((i) => i.exchange !== 'BITUNIX' && i.exchange !== 'LIGHTER')
-              .map((i) => ({ value: i.id, label: `${i.symbol} (${i.exchange} ${i.exchangeSymbol}, ${i.quote})${i.status === 'PUBLISHED' ? '' : ' · disabled: signal source only, no entries'}` }))}
+            options={[
+              {
+                value: '',
+                label: !hasSource ? 'Enter source exchange and ticker first' : contracts.length ? `Select the ${normalizeSource(form.sourceExchange)}:${normalizeSource(form.sourceSymbol)} contract…` : 'No matching contract',
+                disabled: true
+              },
+              ...contracts.map((i) => ({ value: i.id, label: `${i.symbol} (${exchangeLabel(i.exchange)} ${i.exchangeSymbol}, ${i.quote})${i.status === 'PUBLISHED' ? '' : ' · disabled: signal source only, no entries'}` }))
+            ]}
           />
-          {errors.instrumentId && <p className="mt-1 text-xs text-loss">{errors.instrumentId}</p>}
+          {contractHint && <p className="mt-1 text-xs text-loss" data-testid="signal-contract-error">{contractHint}</p>}
         </div>
         <div>
           <FilterSelect
@@ -140,6 +158,8 @@ const formErrors = (r: { issues: { path: string; message: string }[]; message: s
 /** Link, pause or remove the same contract on Bitunix as an explicit target of a route. */
 function BitunixTargetControl({ route, instruments, onSet }: { route: SignalRouteDto; instruments: InstrumentDto[]; onSet: (instrumentId: string | null, enabled: boolean) => void }) {
   const current = route.targets.find((t) => t.exchange === 'BITUNIX');
+  // A Bitunix chart's route executes on its own Bitunix contract; an extra Bitunix target would duplicate it.
+  if (route.instrument.exchange === 'BITUNIX' && !current) return <div className="mt-1 text-[11px] text-subtle">Executes on Bitunix {route.instrument.exchangeSymbol} (the signal contract).</div>;
   const candidates = instruments.filter((i) => i.exchange === 'BITUNIX' && i.status === 'PUBLISHED' && i.symbol === route.instrument.symbol);
   if (!current && !candidates.length) return <div className="mt-1 text-[11px] text-subtle">No published Bitunix {route.instrument.symbol} contract to route to.</div>;
   return (
@@ -217,7 +237,7 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
     interval: '15',
     action: 'BULLISH_FLIP',
     kind: 'ACTIONABLE',
-    instrumentId: instruments.find((i) => i.status === 'PUBLISHED' && i.exchange === 'MEXC')?.id ?? instruments[0]?.id ?? '',
+    instrumentId: '', // chosen from the contracts of the entered source exchange and ticker
     packageId: packages.find((p) => !p.archivedAt)?.id ?? '',
     maxSignalAgeSeconds: '120',
     clockToleranceSeconds: '5'
@@ -237,6 +257,8 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
 
   const createRoute = async (e: React.FormEvent) => {
     e.preventDefault();
+    const wrong = contractError(instruments, form);
+    if (wrong) return setErrors({ instrumentId: wrong });
     const r = await request('POST', '/v1/admin/signal-routes', { body: bodyOf(form) });
     if (!r.ok) {
       setErrors(r.issues.length ? issueMap(r.issues) : { sourceSymbol: r.message });
@@ -250,6 +272,8 @@ export function SignalsAdmin({ ingress, routes, instruments, packages, events, r
   const saveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editing) return;
+    const wrong = contractError(instruments, editing.form);
+    if (wrong) return setEditing({ ...editing, errors: { instrumentId: wrong } });
     const r = await request('PUT', `/v1/admin/signal-routes/${editing.route.id}`, { body: bodyOf(editing.form), revision: editing.route.revision });
     if (!r.ok) {
       setEditing({ ...editing, errors: formErrors(r) });
