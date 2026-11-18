@@ -103,7 +103,7 @@ describe('the same underlying on MEXC, Bitunix and Lighter never mixes', () => {
     await direct.db.delete(schema.marketQuotes).where(and(eq(schema.marketQuotes.instrumentId, xau)));
   });
 
-  it('with a fresh Lighter price the preview shows that price only (no order estimates for Lighter yet)', async () => {
+  it('with a fresh Lighter price the Live preview uses that price only, in USDC with Lighter sizing (never another venue)', async () => {
     const at = new Date();
     setTestClock(() => at);
     const w = new LighterQuoteWriter(direct.db, new ExchangePriceCache(), { minIntervalMs: 0 });
@@ -112,9 +112,10 @@ describe('the same underlying on MEXC, Bitunix and Lighter never mixes', () => {
     expect(await w.onUpdate('92', at)).toBe('WRITTEN');
     const pv = await call(preview.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: { ...blockBody({ instrumentId: xau, strategyVersionId: version, leverage: 10, weekdays: ALL_DAYS }), mode: 'LIVE' } });
     expect(pv.status, JSON.stringify(pv.body)).toBe(200);
-    expect(pv.body).toMatchObject({ quote: { source: 'LIGHTER_PUBLIC' }, sides: [], instrument: { exchange: 'LIGHTER', quoteCurrency: 'USDC', exchangeSymbol: 'XAU' } });
+    expect(pv.body).toMatchObject({ quote: { source: 'LIGHTER_PUBLIC' }, instrument: { exchange: 'LIGHTER', quoteCurrency: 'USDC', exchangeSymbol: 'XAU' } });
     expect([Number(pv.body.quote.bid), Number(pv.body.quote.ask)]).toEqual([3862.04, 3862.05]);
-    expect(pv.body.notes.join(' ')).toMatch(/Lighter public price only/);
+    expect(pv.body.sides.length).toBeGreaterThan(0);
+    expect(pv.body.notes.join(' ')).toMatch(/Live estimate on Lighter public prices \(USDC\)/);
     setTestClock(() => clock.now);
   });
 });

@@ -200,7 +200,7 @@ interface LighterImport {
 /**
  * Lighter USDC perpetuals (registration only): validated against the official public catalog of the
  * Ethereum-based Lighter mainnet by exact native symbol or market ID, and added as a separate
- * DISABLED instrument. Lighter trading (connection, prices, orders) is not available yet.
+ * DISABLED instrument. Prices come from Lighter; Live orders follow the Live eligibility checks.
  */
 function LighterImportSection() {
   const router = useRouter();
@@ -231,7 +231,7 @@ function LighterImportSection() {
       </form>
       <p className="text-xs text-subtle">
         Looks the market up in Lighter&apos;s official public catalog for the Ethereum mainnet. Only active, Lighter-deployed perpetuals settled in USDC are accepted; spot pairs, inactive or frozen markets, dated or binary markets and other
-        environments are refused. Enter the symbol exactly as Lighter lists it (XAU, not XAUUSDT) or its market ID. Lighter trading is not available yet: the pair can be published and selected, but not connected, priced or traded.
+        environments are refused. Enter the symbol exactly as Lighter lists it (XAU, not XAUUSDT) or its market ID. Published Lighter pairs get Lighter prices and Paper trading; Live needs the Lighter account approved and the contract on the Live allowlist.
       </p>
       {result && (
         <div className="space-y-1 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs text-muted" data-testid="lighter-imported">
@@ -301,13 +301,13 @@ export function PairsAdmin({ pairs }: { pairs: InstrumentDto[] }) {
       <section className="space-y-3 rounded-xl border border-line bg-surface p-4">
         <h3 className="text-sm font-semibold text-ink">Add a MEXC Futures pair</h3>
         <form onSubmit={validate} className="flex flex-wrap items-start gap-2" noValidate>
-          <TextField label="MEXC Futures ticker" placeholder="e.g. XAUUSDT or XAU_USDT" value={symbol} onChange={(v) => setSymbol(v.toUpperCase())} error={errors.symbol} className="w-60" />
+          <TextField label="MEXC Futures ticker" placeholder="e.g. XAUUSDT or XAU_USDC" value={symbol} onChange={(v) => setSymbol(v.toUpperCase())} error={errors.symbol} className="w-60" />
           <Button type="submit" icon={SearchCheckIcon} className="mt-7" disabled={!symbol || checking} loading={checking}>
             Validate
           </Button>
         </form>
         <p className="text-xs text-subtle">
-          Validation looks the contract up on MEXC Futures (public contract info) and reads its size, tick, steps and leverage limits from the exchange. Test and local demo builds use the fixture catalogue instead. The
+          Validation looks the contract up on MEXC Futures (public contract info) and reads its settlement currency (USDT or USDC), size, tick, steps and leverage limits from the exchange. Test and local demo builds use the fixture catalogue instead. The
           TradingView alert symbol is set separately on signal routes.
         </p>
         {validated && (
@@ -329,7 +329,7 @@ export function PairsAdmin({ pairs }: { pairs: InstrumentDto[] }) {
               )}
             </p>
             <p className="text-xs text-muted">
-              Contract size {validated.contract.multiplier} {validated.symbol.replace(/USDT$/, '')} · min {validated.contract.minQty} · step {validated.contract.qtyStep} · max {validated.contract.maxQty} · price tick{' '}
+              Contract size {validated.contract.multiplier} {validated.symbol.replace(/(USDT|USDC)$/, '')} · min {validated.contract.minQty} · step {validated.contract.qtyStep} · max {validated.contract.maxQty} · price tick{' '}
               {validated.contract.priceTick} · taker fee {validated.contract.takerFeeRate} · MEXC leverage {validated.leverage.min}–{validated.leverage.max}× (choices {validated.leverageChoices.join(', ')}×)
             </p>
             {validated.warnings.map((w) => (

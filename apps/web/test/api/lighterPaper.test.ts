@@ -6,7 +6,7 @@
 // Lighter candles; nothing calls Lighter, and no Live transport may be touched (the Live seam throws).
 import { and, desc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { addLighterInstrument, assessEntry, ExchangePriceCache, installLiveTestSeam, LighterQuoteWriter, lighterSignerLoads, listMyOutcomes, lockPaperAccount, recordMarketTick, schema } from '@trendpilot/db';
+import { addLighterInstrument, assessEntry, listSignalRoutes, ExchangePriceCache, installLiveTestSeam, LighterQuoteWriter, lighterSignerLoads, listMyOutcomes, lockPaperAccount, recordMarketTick, schema } from '@trendpilot/db';
 import { buildTradingViewPayload, Decimal, fixtureCandles, PAPER_USDT_USDC_PARITY } from '@trendpilot/domain';
 import * as blocks from '@/app/v1/me/order-blocks/route';
 import * as blockById from '@/app/v1/me/order-blocks/[id]/route';
@@ -14,6 +14,7 @@ import * as resume from '@/app/v1/me/order-blocks/[id]/resume/route';
 import * as preview from '@/app/v1/me/order-blocks/preview/route';
 import * as routesApi from '@/app/v1/admin/signal-routes/route';
 import * as lighterTarget from '@/app/v1/admin/signal-routes/[id]/lighter-target/route';
+import * as routeById from '@/app/v1/admin/signal-routes/[id]/route';
 import * as instrumentPatch from '@/app/v1/admin/instruments/[id]/route';
 import * as holdingsApi from '@/app/v1/me/holdings/route';
 import * as dashboardApi from '@/app/v1/me/dashboard/route';
@@ -224,7 +225,10 @@ describe('one alert, two investors, two destinations', () => {
     const dash = await call(dashboardApi.GET, { path: '/x?mode=PAPER&exchange=LIGHTER', cookie: cookies.a });
     expect(dash.status, JSON.stringify(dash.body)).toBe(200);
     expect(dash.body).toMatchObject({ exchange: 'LIGHTER', positions: { open: 1 } });
-    expect((await call(dashboardApi.GET, { path: '/x?mode=LIVE&exchange=LIGHTER', cookie: cookies.a })).status).toBe(422);
+    // Live Lighter is its own (USDC) account: reported separately, never the Paper account.
+    const live = await call(dashboardApi.GET, { path: '/x?mode=LIVE&exchange=LIGHTER', cookie: cookies.a });
+    expect(live.status, JSON.stringify(live.body)).toBe(200);
+    expect(live.body).toMatchObject({ exchange: 'LIGHTER', mode: 'LIVE', positions: { open: 0 } });
   });
 });
 
@@ -355,7 +359,7 @@ describe('entry checks on Lighter data only', () => {
     const pv = await call(preview.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: { ...blockBody({ instrumentId: lighterXau, strategyVersionId: version, leverage: 1, orderCostUsdt: '5', weekdays: ALL_DAYS }), mode: 'PAPER' } });
     expect(pv.status, JSON.stringify(pv.body)).toBe(200);
     expect(JSON.stringify(pv.body.sides)).toMatch(/below the exchange minimum of 10 USDC/);
-    expect(pv.body.notes.join(' ')).toMatch(/Lighter Standard account 0%/);
+    expect(pv.body.notes.join(' ')).toMatch(/Fee: 0 taker as published by Lighter/);
     await direct.db.update(schema.instruments).set({ maxNotional: '100' }).where(eq(schema.instruments.id, lighterXau));
     const big = await call(preview.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: { ...blockBody({ instrumentId: lighterXau, strategyVersionId: version, leverage: 10, orderCostUsdt: '100', weekdays: ALL_DAYS }), mode: 'PAPER' } });
     expect(JSON.stringify(big.body.sides)).toMatch(/exceeds the exchange maximum of 100 USDC per order/);
@@ -386,6 +390,45 @@ describe('signal validation and execution-contract eligibility are independent',
   });
 });
 
+describe('routes with a disabled signal contract stay editable; currencies never mix', () => {
+  it('an admin edits and saves the XAU routes while their MEXC contract is DISABLED; the Lighter targets persist after reload', async () => {
+    const [mx] = await direct.db.select().from(schema.instruments).where(eq(schema.instruments.id, mexcXau));
+    await direct.db.update(schema.instruments).set({ status: 'DISABLED' }).where(eq(schema.instruments.id, mexcXau));
+    try {
+      for (const action of ['BULLISH_FLIP', 'BEARISH_FLIP'] as const) {
+        const id = routeIds[action]!;
+        const [r] = await direct.db.select().from(schema.signalRoutes).where(eq(schema.signalRoutes.id, id));
+        const body = { name: `${r!.name} (edited)`, sourceExchange: r!.sourceExchange, sourceSymbol: r!.sourceSymbol, interval: r!.interval, action: r!.action, kind: r!.kind, instrumentId: r!.instrumentId, packageId: r!.packageId, maxSignalAgeSeconds: r!.maxSignalAgeSeconds, clockToleranceSeconds: r!.clockToleranceSeconds };
+        const res = await call(routeById.PUT, { method: 'PUT', path: '/x', cookie: cookies.admin, params: { id }, body, ifMatch: r!.revision });
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+        expect((await setTarget(id, lighterXau)).status).toBe(200);
+      }
+      // "Reload": the Admin → Signals loader returns both routes with their Lighter target.
+      const page = (await listSignalRoutes(direct.db)).filter((r) => [routeIds.BULLISH_FLIP, routeIds.BEARISH_FLIP].includes(r.id));
+      expect(page).toHaveLength(2);
+      for (const r of page) expect(r.targets).toEqual([expect.objectContaining({ exchange: 'LIGHTER', instrumentId: lighterXau, enabled: true })]);
+    } finally {
+      await direct.db.update(schema.instruments).set({ status: mx!.status }).where(eq(schema.instruments.id, mexcXau));
+    }
+  });
+
+  it('a USDC-settled MEXC contract never uses the USDT account: the entry is refused, nothing reserved', async () => {
+    const [usdc] = await direct.db
+      .insert(schema.instruments)
+      .values({ exchange: 'MEXC', symbol: 'XAUUSDC', exchangeSymbol: 'XAU_USDC', base: 'XAU', quote: 'USDC', status: 'PUBLISHED', contractMultiplier: '0.001', qtyStep: '1', minQty: '1', maxQty: '48000', priceTick: '0.01', takerFeeRate: '0.0002', leverageChoices: [1, 2, 5, 10, 20], suggestedStopPct: '1', suggestedTakeProfitPct: '2', suggestedTrailingPct: '1' })
+      .returning();
+    const [block] = await direct.db.select().from(schema.orderBlocks).where(eq(schema.orderBlocks.id, blockOf.aMexc!));
+    const [ver] = await direct.db.select().from(schema.strategyVersions).where(eq(schema.strategyVersions.id, version));
+    const assessed = await direct.db.transaction(async (tx) => {
+      const acct = await lockPaperAccount(tx, idA, 'PAPER', 'MEXC');
+      expect(acct.currency).toBe('USDT');
+      return assessEntry(tx, { event: { interval: '15', barOpenAt: bar, referencePrice: '3860' }, block: { ...block!, instrumentId: usdc!.id }, version: ver!, side: 'LONG', now: clock.now, account: acct });
+    });
+    expect(assessed.result).toMatchObject({ ok: false, reason: 'ACCOUNT_CURRENCY_MISMATCH', detail: { contractCurrency: 'USDC', accountCurrency: 'USDT' } });
+    expect(assessed.live).toBeNull();
+  });
+});
+
 describe('Lighter Live stays unreachable', () => {
   it('a Lighter Live block cannot be activated, Live evaluation refuses it, and no Live order exists', async () => {
     const c = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.b, body: blockBody({ instrumentId: lighterXau, strategyVersionId: version, mode: 'LIVE', weekdays: ALL_DAYS }) });
@@ -398,7 +441,7 @@ describe('Lighter Live stays unreachable', () => {
     const assessed = await direct.db.transaction(async (tx) => assessEntry(tx, { event: { interval: '15', barOpenAt: bar, referencePrice: '3860' }, block: block!, version: ver!, side: 'LONG', now: clock.now, account: await lockPaperAccount(tx, idB, 'PAPER', 'LIGHTER') }));
     expect(assessed.result).toMatchObject({ ok: false, reason: 'EXCHANGE_NOT_ENABLED' });
     expect(assessed.live).toBeNull();
-    await expect(direct.db.transaction((tx) => lockPaperAccount(tx, idB, 'LIVE', 'LIGHTER'))).rejects.toThrow(/Lighter Live trading is not available/);
+    await expect(direct.db.transaction((tx) => lockPaperAccount(tx, idB, 'LIVE', 'LIGHTER'))).rejects.toThrow(/Lighter Live is not enabled for this account/);
     expect(await direct.db.select().from(schema.orderIntents).where(eq(schema.orderIntents.mode, 'LIVE'))).toHaveLength(0);
     expect(await direct.db.select().from(schema.paperAccounts).where(and(eq(schema.paperAccounts.mode, 'LIVE'), eq(schema.paperAccounts.exchange, 'LIGHTER')))).toHaveLength(0);
   });

@@ -8,7 +8,7 @@ import { ClosePositionButton } from '@/components/trades/ClosePositionButton';
 import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
 import { EXIT_LABEL, signedUsdt as signedMoney, TARGET_STATUS_LABEL, TRAILING_STATUS_LABEL, targetSummary, trailingName } from '@/lib/exitLabels';
 import { requirePageRole } from '@/server/pageSession';
-import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf, liveViewExchanges } from '@/components/ui/ModeTabs';
 
 export const dynamic = 'force-dynamic';
 
@@ -40,18 +40,20 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
   const usdt = (v: string) => money(v, ccy);
   const signed = (v: string) => signedMoney(v, ccy);
   const db = getDb();
-  const [account, allPositions, allOrders, connection, bitunix, lighterPaper] = await Promise.all([
+  const [account, allPositions, allOrders, connection, bitunix, lighterPaper, lighter] = await Promise.all([
     getMyPaperAccount(db, user.id, mode, exchange),
     listMyPositions(db, user.id),
     listMyOrders(db, user.id),
     live ? connectionFor(db, user.id, exchange) : null,
     connectionFor(db, user.id, 'BITUNIX'),
-    getMyPaperAccount(db, user.id, 'PAPER', 'LIGHTER')
+    getMyPaperAccount(db, user.id, 'PAPER', 'LIGHTER'),
+    connectionFor(db, user.id, 'LIGHTER')
   ]);
+  const liveOptions = liveViewExchanges({ bitunix, lighter });
   const positions = allPositions.filter((p) => p.mode === mode && p.exchange === exchange);
   const orders = allOrders.filter((o) => o.mode === mode && o.exchange === exchange);
-  const showExchanges = live ? !!bitunix && bitunix.status !== 'REVOKED' : !!lighterPaper || exchange === 'LIGHTER';
-  const venue = exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC';
+  const showExchanges = live ? liveOptions.length > 1 : !!lighterPaper || exchange === 'LIGHTER';
+  const venue = exchange === 'BITUNIX' ? 'Bitunix' : exchange === 'LIGHTER' ? 'Lighter' : 'MEXC';
   const open = positions.filter((p) => p.status !== 'CLOSED');
   const closed = positions.filter((p) => p.status === 'CLOSED');
   const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: user.timezone, dateStyle: 'medium', timeStyle: 'short' });
@@ -62,14 +64,14 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
       description={`${live ? 'Live' : 'Paper'} positions opened from shared signals with your own settings, each with its attached stop loss.`}
       scope={
         live
-          ? `${user.name} · My Account · Live — real orders and fills on your own ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} Futures account.`
+          ? `${user.name} · My Account · Live — real orders and fills on your own ${exchange === 'BITUNIX' ? 'Bitunix Futures' : exchange === 'LIGHTER' ? 'Lighter (USDC)' : 'MEXC Futures'} account.`
           : exchange === 'LIGHTER'
             ? `${user.name} · My Account · Paper (Lighter, USDC) — simulated orders and fills on Lighter public prices. No order reaches Lighter.`
             : `${user.name} · My Account · Paper — simulated orders and fills on fixture or public MEXC prices. No order reaches a real exchange.`
       }
       actions={
         <div className="flex flex-wrap gap-2">
-          {showExchanges && <ExchangeTabs exchange={exchange} path="/my-trades" mode={mode} />}
+          {showExchanges && <ExchangeTabs options={mode === 'LIVE' ? liveOptions : undefined} exchange={exchange} path="/my-trades" mode={mode} />}
           <ModeTabs mode={mode} path="/my-trades" />
         </div>
       }

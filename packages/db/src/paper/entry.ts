@@ -124,6 +124,15 @@ export async function assessEntry(
   if (inst!.status !== 'PUBLISHED') {
     return { result: { ok: false, reason: 'CONTRACT_DISABLED', detail: { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, reasonText: ENTRY_REASON_TEXT.CONTRACT_DISABLED } }, live: null, availableUsdt: availableOf(account) };
   }
+  // The account must hold the contract's settlement currency (as stored from the exchange's metadata):
+  // a USDT balance is never used for a USDC contract, or the reverse.
+  if (account.currency && inst!.quote && account.currency !== inst!.quote) {
+    return {
+      result: { ok: false, reason: 'ACCOUNT_CURRENCY_MISMATCH', detail: { exchange: inst!.exchange, executionSymbol: inst!.exchangeSymbol, contractCurrency: inst!.quote, accountCurrency: account.currency, reasonText: ENTRY_REASON_TEXT.ACCOUNT_CURRENCY_MISMATCH } },
+      live: null,
+      availableUsdt: availableOf(account)
+    };
+  }
   // Live only on exchanges TrendPilot can trade Live; Lighter only inside the Lighter Live scope
   // (account, market and route; lighterLiveScope.ts), refused by default.
   if (block.mode === 'LIVE' && !isTradableExchange(inst!.exchange)) {

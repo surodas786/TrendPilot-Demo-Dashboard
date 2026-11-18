@@ -300,5 +300,5 @@ export class MexcPublicClient implements PublicMarketSource {
   }
 }
 
-/** MEXC Futures symbol format, e.g. BTC_USDT. */
-export const isMexcFuturesSymbol = (s: string) => /^[A-Z0-9]+_USDT$/.test(s);
+/** MEXC Futures symbol format, e.g. BTC_USDT or XAU_USDC. */
+export const isMexcFuturesSymbol = (s: string) => /^[A-Z0-9]+_(USDT|USDC)$/.test(s);

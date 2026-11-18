@@ -2,7 +2,7 @@ import { connectionFor, getDb, getMyPaperAccount, listBitunixExchangeOnlyLegs, l
 import { HoldingsClient } from '@/components/holdings/HoldingsClient';
 import { SyncWithMexcButton } from '@/components/trades/SyncWithMexcButton';
 import { PageContainer } from '@/components/layout/PageContainer';
-import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
+import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf, liveViewExchanges } from '@/components/ui/ModeTabs';
 import { now } from '@/server/clock';
 import { requirePageRole } from '@/server/pageSession';
 
@@ -17,26 +17,28 @@ export default async function MyHoldingsPage({ searchParams }: { searchParams: P
   const exchange = mode === 'LIVE' ? viewExchangeOf(sp.exchange) : paperExchangeOf(sp.exchange);
   const db = getDb();
   const at = now();
-  const [open, all, quotes, connection, bitunix, lighterPaper] = await Promise.all([
+  const [open, all, quotes, connection, bitunix, lighterPaper, lighter] = await Promise.all([
     listMyHoldings(db, user.id, at, mode, exchange),
     listMyPositions(db, user.id),
     listLatestQuotes(db, at, { publishedOnly: true }),
     mode === 'LIVE' ? connectionFor(db, user.id, exchange) : null,
     connectionFor(db, user.id, 'BITUNIX'),
-    getMyPaperAccount(db, user.id, 'PAPER', 'LIGHTER')
+    getMyPaperAccount(db, user.id, 'PAPER', 'LIGHTER'),
+    connectionFor(db, user.id, 'LIGHTER')
   ]);
+  const liveOptions = liveViewExchanges({ bitunix, lighter });
   const closed = all.filter((p) => p.status === 'CLOSED' && p.mode === mode && p.exchange === exchange).sort((a, b) => Date.parse(b.closedAt ?? b.openedAt) - Date.parse(a.closedAt ?? a.openedAt));
-  const showExchanges = mode === 'LIVE' ? !!bitunix && bitunix.status !== 'REVOKED' : !!lighterPaper || exchange === 'LIGHTER';
+  const showExchanges = mode === 'LIVE' ? liveOptions.length > 1 : !!lighterPaper || exchange === 'LIGHTER';
   // Bitunix Hedge legs TrendPilot does not manage (the other leg, or opened on Bitunix): read-only.
   const otherLegs = mode === 'LIVE' && exchange === 'BITUNIX' ? await listBitunixExchangeOnlyLegs(db, user.id) : [];
   return (
     <PageContainer
       title="My Holdings"
       description="Your positions with live prices, unrealized P&L and stop protection. Select a holding for its fills and chart."
-      scope={`${user.name} · My Account · ${mode === 'LIVE' ? `Live — your ${exchange === 'BITUNIX' ? 'Bitunix' : 'MEXC'} Futures account` : exchange === 'LIGHTER' ? 'Paper (Lighter, USDC) — simulated on Lighter public prices' : 'Paper — simulated'}`}
+      scope={`${user.name} · My Account · ${mode === 'LIVE' ? `Live — your ${exchange === 'BITUNIX' ? 'Bitunix Futures' : exchange === 'LIGHTER' ? 'Lighter (USDC)' : 'MEXC Futures'} account` : exchange === 'LIGHTER' ? 'Paper (Lighter, USDC) — simulated on Lighter public prices' : 'Paper — simulated'}`}
       actions={
         <div className="flex flex-wrap gap-2">
-          {showExchanges && <ExchangeTabs exchange={exchange} path="/my-holdings" mode={mode} />}
+          {showExchanges && <ExchangeTabs options={mode === 'LIVE' ? liveOptions : undefined} exchange={exchange} path="/my-holdings" mode={mode} />}
           <ModeTabs mode={mode} path="/my-holdings" />
         </div>
       }

@@ -91,7 +91,12 @@ export const pairOptionLabel = (i: Pick<InstrumentDto, 'base' | 'quote' | 'excha
 export const costCurrency = (i: Pick<InstrumentDto, 'quote'> | undefined) => i?.quote || 'USDT';
 
 /** Paper simulates MEXC (USDT) and Lighter (USDC) contracts; Bitunix pairs are Live only. Lighter Live is not available. */
-export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => (mode === 'LIVE' ? i.exchange !== 'LIGHTER' : i.exchange === 'MEXC' || i.exchange === 'LIGHTER');
+/**
+ * Which modes a pair can be CONFIGURED in. Live: every exchange (a Lighter Live block is saved paused;
+ * whether it may be activated and trade is decided server-side by the Live eligibility checks).
+ * Paper: the simulators (MEXC, Lighter).
+ */
+export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => (mode === 'LIVE' ? true : i.exchange === 'MEXC' || i.exchange === 'LIGHTER');
 
 /**
  * Exit fields prefilled from the administrator's published pair suggestions (CFG-05).

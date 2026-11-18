@@ -184,7 +184,7 @@ describe('investor pair selection: server-side eligibility', () => {
     expect((await instRow(xau)).liveAllowed).toBe(false);
     const [route] = await direct.db.select().from(schema.signalRoutes).limit(1);
     const issues = await routeStrategyIssues(direct.db, { kind: 'ACTIONABLE', packageId: route!.packageId, instrumentId: xau, interval: route!.interval as '5' | '15' });
-    expect(issues.map((i) => i.message).join(' ')).toMatch(/Lighter Live trading is not available yet/);
+    expect(issues.map((i) => i.message).join(' ')).toMatch(/Lighter Live is not enabled for this account/);
   });
 
   it('a MEXC or Bitunix price stored on the Lighter instrument is never used for it', async () => {

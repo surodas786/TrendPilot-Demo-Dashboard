@@ -44,11 +44,16 @@ async function denied(admin: PublicUser, action: string, id: string, reason: str
   await recordAudit(getDb(), { actorUserId: admin.id, action, targetType: 'signal_route', targetId: id, result: 'DENIED', metadata: { reason, ...detail }, correlationId });
 }
 
-/** Contract must be a published pair; actionable routes must match their strategy. */
+/**
+ * The route's own contract identifies the TradingView chart's exchange contract (signal source). It
+ * may be DISABLED: a disabled contract takes no entries (decided per destination at entry), but its
+ * chart can still deliver signals to the route's explicit targets. Actionable routes must match
+ * their strategy.
+ */
 export async function checkRouteTarget(input: SignalRouteCreate): Promise<void> {
   const db = getDb();
   const inst = await getInstrument(db, input.instrumentId);
-  if (!inst || inst.status !== 'PUBLISHED') throw validationError([{ path: 'instrumentId', message: 'Select a published pair.' }]);
+  if (!inst) throw validationError([{ path: 'instrumentId', message: 'Select a pair.' }]);
   await assertPackageActive(input.packageId);
   const issues = await routeStrategyIssues(db, input);
   if (issues.length) throw validationError(issues);
