@@ -127,6 +127,8 @@ export function buildMexcCloseOrder(i: MexcCloseInput): MexcCloseBuild {
 const mexcMessage = (e: MexcPrivateError) => e.message.replace(/^[^:]*:\s*/, '').replace(/\s*\(code -?\d+\)$/, '').slice(0, 200);
 
 export class UncertainSubmissionError extends Error {
+  /** Sanitized request/response of the attempt, when the venue reports it (evidence only). */
+  diagnostics?: import('../paper/simulator').VenueDiagnostics;
   constructor(readonly clientOrderId: string, cause: string) {
     super(`Submission ${clientOrderId} is uncertain (${cause}); it must be reconciled by client order ID before any retry.`);
     this.name = 'UncertainSubmissionError';

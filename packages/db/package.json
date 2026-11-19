@@ -20,6 +20,7 @@
     "ops-mail": "tsx src/cli/ops-mail.ts",
     "mexc-readonly-check": "tsx src/cli/mexc-readonly-check.ts",
     "bitunix-check": "tsx src/cli/bitunix-check.ts",
+    "bitunix-order-trace": "tsx src/cli/bitunix-order-trace.ts",
     "bitunix-pilot": "tsx src/cli/bitunix-pilot.ts",
     "lighter-testnet-check": "tsx src/cli/lighter-testnet-check.ts",
     "live-preflight": "tsx src/cli/live-preflight.ts",

@@ -26,6 +26,7 @@ export * from './live/bitunixPrivateWs';
 export * from './live/bitunixSupervisor';
 export * from './live/bitunixSync';
 export * from './live/bitunixPositionSync';
+export * from './live/bitunixIntents';
 export * from './live/bitunixPilot';
 export * from './live/bitunixPrivate';
 export * from './live/lighterPrivate';

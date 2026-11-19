@@ -84,7 +84,15 @@ export class BitunixOrderTransport implements BitunixOrderRequester {
   ) {
     this.env = o.env ?? process.env;
     openLiveOrderTransport(this.env);
-    this.read = new BitunixReadOnlyTransport({ credentials: o.credentials, baseUrl: o.baseUrl, timeoutMs: o.timeoutMs, fetch: o.fetch, now: o.now, nonce: o.nonce });
+    // Only the options actually given: an explicit `undefined` must never replace a transport default.
+    this.read = new BitunixReadOnlyTransport({
+      credentials: o.credentials,
+      ...(o.baseUrl ? { baseUrl: o.baseUrl } : {}),
+      ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
+      ...(o.fetch ? { fetch: o.fetch } : {}),
+      ...(o.now ? { now: o.now } : {}),
+      ...(o.nonce ? { nonce: o.nonce } : {})
+    });
   }
 
   get<T>(path: string, params?: Record<string, QueryValue>): Promise<T> {
@@ -307,7 +315,9 @@ export function bitunixVenue(o: BitunixVenueOptions): ExecutionVenue & { reconci
       // Bitunix may hold the order (or already holds one with this client ID): reconcile, don't resend.
       const found = await getOrder(clientId).catch(() => null);
       if (found) return { accepted: true, diagnostics: { request, response: { code: duplicate ? 'DUPLICATE_FOUND' : 'UNCERTAIN_FOUND', message: (e as Error).message.slice(0, 200) } } };
-      throw new UncertainSubmissionError(clientId, (e as Error).message);
+      const u = new UncertainSubmissionError(clientId, (e as Error).message);
+      u.diagnostics = { request, response: { code: be ? (be.kind === 'API' || be.kind === 'HTTP' ? (be.code ?? be.kind) : be.kind) : 'ERROR', message: (e as Error).message.slice(0, 200) } };
+      throw u;
     }
   };
 
@@ -337,10 +347,16 @@ export function bitunixVenue(o: BitunixVenueOptions): ExecutionVenue & { reconci
       if (!stopType) return reject(`STOP_BASIS_UNSUPPORTED:${req.stop.basis}`);
       const c = await o.contractFor(req.instrumentId);
       let stopPrice = req.stop.price;
-      if (!(await getOrder(req.clientOrderId))) {
-        const mode = await hedgeOrRefusal();
+      let diagnostics: VenueDiagnostics | undefined;
+      // Reads before the order request: a failure here means nothing was transmitted.
+      const notSent = <T>(p: Promise<T>): Promise<T> =>
+        p.catch((e) => {
+          throw Object.assign(e instanceof Error ? e : new Error(String(e)), { diagnostics: { request: null, response: { code: 'NOT_SENT', message: `before transmission: ${(e as Error)?.message ?? String(e)}`.slice(0, 200) } } });
+        });
+      if (!(await notSent(getOrder(req.clientOrderId)))) {
+        const mode = await notSent(hedgeOrRefusal());
         if (mode) return reject(mode);
-        const settings = parseTradingSettings(await r.get('/api/v1/futures/account/trading_settings', { symbols: c.symbol }), c.symbol);
+        const settings = parseTradingSettings(await notSent(r.get('/api/v1/futures/account/trading_settings', { symbols: c.symbol })), c.symbol);
         const bad = checkTradingSettings(settings, req.side, req.leverage, req.marginMode ?? 'ISOLATED');
         if (bad) return reject(bad);
         const qty = roundQtyDown(req.contracts, c.qtyStep);
@@ -353,15 +369,21 @@ export function bitunixVenue(o: BitunixVenueOptions): ExecutionVenue & { reconci
         const price = req.side === 'LONG' ? req.quote.ask : req.quote.bid;
         const notional = D(qty).times(price);
         const required = notional.div(req.leverage).plus(notional.times(c.takerFeeRate));
-        const acct = parseBitunixAccount(await r.get('/api/v1/futures/account', { marginCoin: 'USDT' }), 'USDT');
+        const acct = parseBitunixAccount(await notSent(r.get('/api/v1/futures/account', { marginCoin: 'USDT' })), 'USDT');
         const available = acct ? D(acct.available).plus(Decimal.min(0, acct.crossUnrealizedPNL)) : D(0);
         if (required.gt(available)) return reject(`INSUFFICIENT_MARGIN: needs ${required.toDecimalPlaces(8).toFixed()} USDT, Bitunix shows ${available.toFixed()} available`);
         const sent = await submit(req.clientOrderId, buildBitunixOpenOrder({ symbol: c.symbol, side: req.side, qty, clientId: req.clientOrderId, stopPrice, stopType }), { settings, available: available.toFixed(), requiredMargin: required.toDecimalPlaces(8).toFixed() });
-        if ('rejected' in sent) return reject(sent.rejected);
+        diagnostics = sent.diagnostics;
+        if ('rejected' in sent) return { ...reject(sent.rejected), diagnostics };
       }
       const ord = await untilFinal(req.clientOrderId);
-      if (!ord) throw new UncertainSubmissionError(req.clientOrderId, 'order not final after confirmation polling');
-      return openResult(c.symbol, ord, req.clientOrderId, req.side, { price: stopPrice, basis: req.stop.basis });
+      if (!ord) {
+        const u = new UncertainSubmissionError(req.clientOrderId, 'order not final after confirmation polling');
+        if (diagnostics) u.diagnostics = diagnostics;
+        throw u;
+      }
+      const res = await openResult(c.symbol, ord, req.clientOrderId, req.side, { price: stopPrice, basis: req.stop.basis });
+      return diagnostics ? { ...res, diagnostics } : res;
     },
 
     async lookupOrder(clientOrderId, instrumentId) {

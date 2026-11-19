@@ -3,7 +3,7 @@ import { Decimal, type ExitReason } from '@trendpilot/domain';
 import type { Db } from '../client';
 import { recordExitFill } from '../paper/exits';
 import { exchangeAccountEvents, exchangePositions, fills, instruments, orderIntents, paperAccounts, positionExits, positions } from '../schema';
-import { readHistoryTrades, type BitunixTrade } from './bitunixAccount';
+import { isTrendPilotClientId, readHistoryTrades, type BitunixTrade } from './bitunixAccount';
 import { bitunixVenue } from './bitunixOrders';
 import { BitunixPrivateError, type BitunixRequester } from './bitunixPrivate';
 import type { ConnectionRow } from './liveMode';
@@ -180,7 +180,7 @@ export async function linkBitunixPositions(db: Db, conn: ConnectionRow, r: Bitun
       const qty = Decimal.min(g.qty, need);
       // TrendPilot's own close (clientId tp-…): booked by its own job under this same key; the
       // original exit reason is used if the sync gets there first.
-      const own = g.clientId && /^tpx?-/.test(g.clientId) ? (await db.select({ reason: orderIntents.exitReason, id: orderIntents.id }).from(orderIntents).where(eq(orderIntents.clientOrderId, g.clientId)))[0] : undefined;
+      const own = isTrendPilotClientId(g.clientId) && g.clientId ? (await db.select({ reason: orderIntents.exitReason, id: orderIntents.id }).from(orderIntents).where(eq(orderIntents.clientOrderId, g.clientId)))[0] : undefined;
       const stopTriggered = stopEvents.some((e) => e.at && e.at.getTime() <= g.at + 1_000);
       const reason: ExitReason = own?.reason ? (own.reason as ExitReason) : liquidated ? 'LIQUIDATION' : stopTriggered ? 'STOP_LOSS' : 'EXTERNAL_CLOSE';
       const flatNow = mirror.status === 'CLOSED' && platformQty.minus(qty).lte(venueQty);

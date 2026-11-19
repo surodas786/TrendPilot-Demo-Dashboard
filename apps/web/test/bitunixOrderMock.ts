@@ -33,7 +33,9 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
   settings: Record<string, { marginMode: string; longLeverage: number; shortLeverage: number }> = {};
   fillPrice: Record<string, string> = { BTCUSDT: '64000', XAUUSDT: '3866.2' };
   /** Next placement: fill fraction (1 = full, 0 = none), TP/SL attach (NO / LATE n reads), outcome. */
-  next: { fillFraction?: string; attachStop?: 'YES' | 'NO'; stopVisibleAfterReads?: number; timeout?: 'BEFORE_ACCEPT' | 'AFTER_ACCEPT'; rejectCode?: number; duplicate?: boolean } = {};
+  next: { fillFraction?: string; attachStop?: 'YES' | 'NO'; stopVisibleAfterReads?: number; timeout?: 'BEFORE_ACCEPT' | 'AFTER_ACCEPT'; rejectCode?: number; duplicate?: boolean; lookupsFailAfterAccept?: number } = {};
+  /** The next N get_order_detail reads fail with a network error (lookups unavailable). */
+  detailFailures = 0;
   /** Exchange clock (tests set it to their own clock). */
   nowMs: () => number = Date.now;
   private seq = 1;
@@ -50,6 +52,7 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
     this.hiddenTpsl = [];
     this.modifies = [];
     this.modifyOutcome = 'APPLY';
+    this.detailFailures = 0;
   }
 
   setSettings(symbol: string, s: { marginMode?: string; longLeverage?: number; shortLeverage?: number } = {}): void {
@@ -69,6 +72,10 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
       }
       case '/api/v1/futures/trade/get_order_detail': {
         this.calls.push({ path, params });
+        if (this.detailFailures > 0) {
+          this.detailFailures -= 1;
+          throw new BitunixPrivateError('GET get_order_detail: network error', 'NETWORK');
+        }
         const o = params.clientId ? this.orders.get(String(params.clientId)) : [...this.orders.values()].find((x) => x.orderId === params.orderId);
         if (!o) throw new BitunixPrivateError('GET get_order_detail: Order not found, please try it later (code 20007)', 'API', 20007);
         const { tradeSide: _t, positionId: _p, ...rest } = o;
@@ -169,6 +176,7 @@ export class MockBitunixExchange extends MockBitunix implements BitunixOrderRequ
       const realizedPNL = tradeSide === 'CLOSE' ? D(price).minus(entry).times(filled).times(legSide === 'LONG' ? 1 : -1).toFixed() : '0';
       this.trades.push({ tradeId: String(800_000_000_000 + this.seq++), orderId: order.orderId, positionId: order.positionId, symbol, side, qty: filled.toFixed(), price, fee: D(filled).times(price).times('0.0006').toFixed(), realizedPNL: realizedPNL === '0' && tradeSide === 'CLOSE' ? '0.0000001' : realizedPNL, reduceOnly: false, clientId, ctime: now });
     }
+    if (n.lookupsFailAfterAccept) this.detailFailures = n.lookupsFailAfterAccept;
     if (n.timeout === 'AFTER_ACCEPT') throw new BitunixPrivateError('POST place_order: timed out', 'TIMEOUT');
     if (n.duplicate) throw new BitunixPrivateError('POST place_order: Client ID duplicate (code 30042)', 'API', 30042);
     return { orderId: order.orderId, clientId } as T;

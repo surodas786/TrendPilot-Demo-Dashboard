@@ -3,7 +3,7 @@ import { exitHaltText } from '../venue/closeRejection';
 import { Decimal, marketSourceLabel, trailingTakeProfitContracts, type MarketSource, type TrailingKind } from '@trendpilot/domain';
 import type { Executor } from '../client';
 import { availableOf } from './accounts';
-import { fills, instruments, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions, positionTargets, signalDecisions, signalEvents } from '../schema';
+import { fills, instruments, jobs, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions, positionTargets, signalDecisions, signalEvents } from '../schema';
 
 /**
  * Investor read models for paper trading (UI-02 Holdings, UI-04 My Trades, §10.1 /me routes).
@@ -311,13 +311,33 @@ export interface OrderDto {
   signalEventId: string | null;
   exitReason: string | null;
   filledContracts: string;
+  /** Base asset the quantity is counted in (Bitunix and Lighter quantities are base-asset units, e.g. XAU). */
+  base: string;
+  /** The exchange's own order ID, once the exchange reported it. */
+  exchangeOrderId: string | null;
+  /** Unresolved orders: the last reconciliation attempt (job, sync or private push) and what it found. */
+  reconcileAttempts: number;
+  lastReconcileAt: string | null;
+  lastReconcileNote: string | null;
+  /** Submit/close job of an unresolved order: DEAD means it will not run again; reconciliation settles it. */
+  job: { status: string; attempts: number; maxAttempts: number; lastError: string | null } | null;
 }
 
-async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$inferSelect; symbol: string; exchange: string }[]): Promise<OrderDto[]> {
+const UNRESOLVED_ORDER = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'];
+
+async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$inferSelect; symbol: string; exchange: string; base: string }[]): Promise<OrderDto[]> {
   const out: OrderDto[] = [];
-  for (const { i, symbol, exchange } of rows) {
+  for (const { i, symbol, exchange, base } of rows) {
     const fs = await db.select().from(fills).where(eq(fills.intentId, i.id));
     const [pos] = await db.select({ id: positions.id }).from(positions).where(eq(positions.openIntentId, i.id));
+    const [job] = UNRESOLVED_ORDER.includes(i.state)
+      ? await db
+          .select({ status: jobs.status, attempts: jobs.attempts, maxAttempts: jobs.maxAttempts, lastError: jobs.lastError })
+          .from(jobs)
+          .where(sql`${jobs.payload}->>'intentId' = ${i.id}`)
+          .orderBy(desc(jobs.createdAt))
+          .limit(1)
+      : [];
     out.push({
       id: i.id,
       clientOrderId: i.clientOrderId,
@@ -343,13 +363,19 @@ async function hydrateOrders(db: Executor, rows: { i: typeof orderIntents.$infer
       positionId: i.kind === 'CLOSE' ? i.positionId : (pos?.id ?? null),
       signalEventId: i.eventId,
       exitReason: i.exitReason,
-      filledContracts: n(i.filledContracts)!
+      filledContracts: n(i.filledContracts)!,
+      base,
+      exchangeOrderId: i.exchangeOrderId,
+      reconcileAttempts: i.reconcileAttempts,
+      lastReconcileAt: i.lastReconcileAt?.toISOString() ?? null,
+      lastReconcileNote: i.lastReconcileNote,
+      job: job ? { status: job.status, attempts: job.attempts, maxAttempts: job.maxAttempts, lastError: job.lastError?.slice(0, 300) ?? null } : null
     });
   }
   return out;
 }
 
-const orderSelect = (db: Executor) => db.select({ i: orderIntents, symbol: instruments.symbol, exchange: instruments.exchange }).from(orderIntents).innerJoin(instruments, eq(instruments.id, orderIntents.instrumentId));
+const orderSelect = (db: Executor) => db.select({ i: orderIntents, symbol: instruments.symbol, exchange: instruments.exchange, base: instruments.base }).from(orderIntents).innerJoin(instruments, eq(instruments.id, orderIntents.instrumentId));
 
 export async function listMyOrders(db: Executor, ownerId: string, limit = 100): Promise<OrderDto[]> {
   return hydrateOrders(db, await orderSelect(db).where(eq(orderIntents.ownerId, ownerId)).orderBy(desc(orderIntents.createdAt)).limit(limit));

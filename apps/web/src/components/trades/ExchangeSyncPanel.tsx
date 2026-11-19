@@ -13,6 +13,26 @@ export interface DriftItemView {
   detail: string;
 }
 
+/** A Live order TrendPilot submitted whose outcome is not established yet. */
+export interface UnresolvedOrderView {
+  id: string;
+  clientOrderId: string;
+  label: string;
+  state: string;
+  createdAt: string;
+  lastReconcileAt: string | null;
+  /** Last reconciliation note, job error or state reason: the latest known failure reason. */
+  reason: string | null;
+  /** e.g. "DEAD after 8/8 attempts" */
+  job: string | null;
+  exchangeOrderId: string | null;
+}
+
+const age = (iso: string, now: number) => {
+  const m = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 60_000));
+  return m < 60 ? `${m} min` : m < 2880 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.floor(m / 1440)} d`;
+};
+
 interface SyncResponse {
   exchange: string;
   result: { exchange: string; ok: boolean; busy: boolean; error: string | null; lines: string[]; drift: DriftItemView[] };
@@ -59,7 +79,9 @@ export function ExchangeSyncPanel({
   lastSyncError,
   drift = [],
   timezone,
-  unavailableReason = null
+  unavailableReason = null,
+  unresolved = [],
+  renderedAt
 }: {
   exchange: string;
   lastSyncOkAt: string | null;
@@ -69,6 +91,10 @@ export function ExchangeSyncPanel({
   timezone: string;
   /** Set when this exchange has no investor-triggered sync: shown instead of the button. */
   unavailableReason?: string | null;
+  /** Live orders on this exchange still unresolved (SUBMITTING etc.): shown with the sync health. */
+  unresolved?: UnresolvedOrderView[];
+  /** Server render time (ms), so ages render the same on server and client. */
+  renderedAt?: number;
 }) {
   const router = useRouter();
   const venue = exchangeLabel(exchange);
@@ -87,7 +113,7 @@ export function ExchangeSyncPanel({
     else if (r.data.result.exchange !== exchange) message = { tone: 'err', text: `Unexpected answer for ${exchangeLabel(r.data.result.exchange)}; nothing shown for ${venue}.` };
     else if (r.data.result.busy) message = { tone: 'err', text: r.data.result.error ?? `A ${venue} sync is already running.` };
     else if (!r.data.result.ok) message = { tone: 'err', text: `${venue} sync failed: ${r.data.result.error ?? 'unknown error'}. Positions were left unchanged.` };
-    else message = { tone: 'ok', text: r.data.result.lines.length ? r.data.result.lines.join(' · ') : `TrendPilot matches ${venue}.` };
+    else message = { tone: 'ok', text: r.data.result.lines.length ? r.data.result.lines.join(' · ') : `Positions match ${venue}.` };
     setTab(origin, { busy: false, message });
     router.refresh();
   }
@@ -125,7 +151,31 @@ export function ExchangeSyncPanel({
       {tab.message && (
         <p role="status" className={`text-xs ${tab.message.tone === 'ok' ? 'text-muted' : 'text-loss'}`} data-testid="sync-message">
           {tab.message.text}
+          {tab.message.tone === 'ok' && unresolved.length > 0 && ` ${unresolved.length} order(s) still unresolved — see below.`}
         </p>
+      )}
+      {unresolved.length > 0 && (
+        <div className="space-y-1 rounded-lg border border-line bg-inset px-3 py-2 text-xs" data-testid="unresolved-orders">
+          <p className="font-medium text-loss">
+            {unresolved.length} unresolved {venue} submission{unresolved.length === 1 ? '' : 's'}: the outcome is not confirmed yet, and the reservation stays held until {venue} shows whether the order was accepted.
+          </p>
+          <ul className="space-y-1">
+            {unresolved.map((o) => (
+              <li key={o.id} data-testid="unresolved-order" data-state={o.state} className="text-muted">
+                <span className="text-ink">{o.label}</span> · {o.state} for {age(o.createdAt, renderedAt ?? Date.now())} · last reconciliation {o.lastReconcileAt ? fmt(o.lastReconcileAt) : 'never'}
+                {o.job && <> · submit job {o.job}</>}
+                {o.exchangeOrderId && (
+                  <>
+                    {' '}
+                    · {venue} order {o.exchangeOrderId}
+                  </>
+                )}
+                {o.reason && <span className="block break-words text-subtle">Reason: {o.reason}</span>}
+                <span className="block font-mono text-subtle">clientId {o.clientOrderId}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );

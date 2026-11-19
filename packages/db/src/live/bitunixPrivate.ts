@@ -216,7 +216,10 @@ export class BitunixReadOnlyTransport implements BitunixRequester {
       minIntervalMs: BITUNIX_MIN_REQUEST_INTERVAL_MS,
       retries: 2,
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-      ...o
+      // An option passed as `undefined` keeps its default (19 Nov 2026: the order transport passed
+      // `now: undefined` through, every signed read threw "this.o.now is not a function" and the
+      // XAUUSDT entry e6d08d8e… never left TrendPilot).
+      ...(Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as BitunixHttpOptions)
     };
   }
 

@@ -1,8 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
-import { usePathname } from 'next/navigation';
-import { FlaskConicalIcon, LogOutIcon, MenuIcon, ShieldIcon, UserRoundIcon } from 'lucide-react';
+import React, { Suspense, useState } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+import { FlaskConicalIcon, LogOutIcon, MenuIcon, ShieldIcon, UserRoundIcon, ZapIcon } from 'lucide-react';
+import { exchangeLabel } from '@trendpilot/domain';
+import { paperExchangeOf, viewExchangeOf, viewModeOf } from '@/components/ui/ModeTabs';
 import { pageTitle, type ShellRole } from './navigation';
 
 /**
@@ -19,12 +21,43 @@ function ScopeBadge({ role, name }: { role: ShellRole; name: string }) {
   );
 }
 
+/** Reporting pages with a Paper / Live switch (?mode=live&exchange=…): the badge follows that view. */
+const MODE_VIEW_PAGES = ['/dashboard', '/my-holdings', '/my-trades'];
+
+/**
+ * The mode of the view on screen, read from the same URL parameters the page itself uses (one
+ * source of truth): "Live · Bitunix" on My Trades → Bitunix → Live, "Paper" on a Paper view. Pages
+ * without a Paper/Live view (Live Trading, Trade Settings, a single trade…) show no global mode:
+ * each order block and position carries its own stored mode there.
+ */
+function ViewModeBadge() {
+  const pathname = usePathname();
+  const params = useSearchParams();
+  if (!MODE_VIEW_PAGES.includes(pathname)) return null;
+  const mode = viewModeOf(params.get('mode') ?? undefined);
+  if (mode === 'LIVE') {
+    const exchange = viewExchangeOf(params.get('exchange') ?? undefined);
+    return (
+      <span data-testid="view-mode-badge" data-mode="LIVE" data-exchange={exchange} className="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-warn/40 bg-warn/10 px-2.5 text-xs font-semibold text-warn">
+        <ZapIcon className="h-3.5 w-3.5" aria-hidden />
+        Live · {exchangeLabel(exchange)}
+      </span>
+    );
+  }
+  const exchange = paperExchangeOf(params.get('exchange') ?? undefined);
+  return (
+    <span data-testid="view-mode-badge" data-mode="PAPER" data-exchange={exchange} className="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-accent/40 bg-accent/10 px-2.5 text-xs font-semibold text-accent">
+      <FlaskConicalIcon className="h-3.5 w-3.5" aria-hidden />
+      Paper{exchange === 'LIGHTER' ? ' · Lighter' : ''}
+    </span>
+  );
+}
+
 function PaperBadge() {
   return (
-    <span className="inline-flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full border border-accent/40 bg-accent/10 px-2.5 text-xs font-semibold text-accent">
-      <FlaskConicalIcon className="h-3.5 w-3.5" aria-hidden />
-      Paper
-    </span>
+    <Suspense fallback={null}>
+      <ViewModeBadge />
+    </Suspense>
   );
 }
 
