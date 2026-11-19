@@ -77,6 +77,8 @@ export interface BitunixOrderRequester extends BitunixRequester {
  * same gate as MEXC. A POST is never retried: an uncertain outcome is reconciled by client ID.
  */
 export class BitunixOrderTransport implements BitunixOrderRequester {
+  /** The key's own account tag in `subAccountId` (resolveBitunixAccountTag), when established. */
+  accountTag: string | null = null;
   private readonly read: BitunixReadOnlyTransport;
   private readonly env: Record<string, string | undefined>;
   constructor(
@@ -275,8 +277,10 @@ export function bitunixVenue(o: BitunixVenueOptions): ExecutionVenue & { reconci
         filledAt: new Date(Math.max(...trades.map((x) => x.ctimeMs ?? 0)) || Date.now())
       };
     }
-    if (!ord.tradeQty || D(ord.tradeQty).lte(0) || !ord.price || D(ord.price).lte(0)) throw new UncertainSubmissionError(ord.clientId ?? ord.orderId, 'fills not listed yet');
-    return { fillId: `bitunix:${ord.orderId}`, contracts: ord.tradeQty, price: ord.price, fee: ord.fee ?? '0', filledAt: new Date(ord.mtimeMs ?? Date.now()) };
+    // Without listed trades only Bitunix's EXECUTED average may price the fill; the requested price
+    // (a limit, or the reference a market order was placed at) never does.
+    if (!ord.tradeQty || D(ord.tradeQty).lte(0) || !ord.avgPrice || D(ord.avgPrice).lte(0)) throw new UncertainSubmissionError(ord.clientId ?? ord.orderId, 'fills not listed yet');
+    return { fillId: `bitunix:${ord.orderId}`, contracts: ord.tradeQty, price: ord.avgPrice, fee: ord.fee ?? '0', filledAt: new Date(ord.mtimeMs ?? Date.now()) };
   };
 
   const legs = async (symbol: string): Promise<BitunixPosition[]> => (await readPendingPositions(r, { symbol })).items.filter((p) => p.symbol === symbol && D(p.qty).gt(0));

@@ -29,7 +29,7 @@ import type { ExecutionVenue } from '../venue/types';
 import type { CapabilityId, CapabilityState } from './capabilities';
 import { MexcHttpTransport, MexcPrivateError, MEXC_PRIVATE_DEFAULT_BASE_URL, normalizeAssets, normalizePositions, normalizeStops, type MexcCredentials, type MexcRequester } from './mexcPrivate';
 import { mexcVenue, POSITION_MODE_MISMATCH, positionModeOf, UncertainSubmissionError } from './mexcVenue';
-import { bitunixCredentialsOf } from './bitunixConnection';
+import { bitunixCredentialsOf, withAccountTag } from './bitunixConnection';
 import { BitunixOrderTransport, bitunixVenue, type BitunixOrderRequester } from './bitunixOrders';
 import { lighterApiFor, lighterLiveInputs, lighterScopeOf, lighterSeamActive, lighterSignerFor } from './lighterConnection';
 import { openLighterOrderTransport } from './lighterPrivate';
@@ -60,6 +60,11 @@ export interface LiveTestSeam {
   /** Bitunix order + read access for a Bitunix connection (tests only). */
   bitunixRequesterFor?: (conn: ConnectionRow) => BitunixOrderRequester;
   transportEnabled?: boolean;
+  /**
+   * Bitunix without `bitunixRequesterFor`: the production BitunixOrderTransport is constructed with
+   * this env instead of process.env (tests stub global fetch). Never used in production.
+   */
+  bitunixTransportEnv?: Record<string, string | undefined>;
   confirm?: { attempts: number; delayMs: number };
 }
 let seam: LiveTestSeam | null = null;
@@ -276,7 +281,12 @@ export async function resolveAccountVenue(
   if (exchange === 'BITUNIX') {
     // Bitunix: the order transport is opened with THIS connection's key; it refuses unless
     // LIVE_ORDER_TRANSPORT=enabled in production (same deployment gate as MEXC).
-    const requester = seam?.bitunixRequesterFor ? seam.bitunixRequesterFor(conn) : new BitunixOrderTransport({ credentials: bitunixCredentialsOf(conn), baseUrl: env.BITUNIX_PRIVATE_BASE_URL || undefined, env });
+    // Tests may build the REAL transport (production construction) with their own transport env.
+    const transportEnv = seam?.bitunixTransportEnv ?? env;
+    const requester = withAccountTag(
+      seam?.bitunixRequesterFor ? seam.bitunixRequesterFor(conn) : new BitunixOrderTransport({ credentials: bitunixCredentialsOf(conn), baseUrl: transportEnv.BITUNIX_PRIVATE_BASE_URL || undefined, env: transportEnv }),
+      conn
+    );
     const inner = bitunixVenue({
       requester,
       contractFor: async (instrumentId) => {

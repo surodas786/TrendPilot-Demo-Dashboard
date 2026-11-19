@@ -253,6 +253,13 @@
       "when": 1795545600000,
       "tag": "0035_m25_intent_exchange_reconcile",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1795632000000,
+      "tag": "0036_m26_intent_exchange_status",
+      "breakpoints": true
     }
   ]
 }

@@ -149,6 +149,10 @@ export const redactBitunixHeaders = (h: Record<string, string>) => Object.fromEn
 export const BITUNIX_READ_ONLY_PATHS: RegExp[] = [
   /^\/api\/v1\/futures\/account$/,
   /^\/api\/v1\/futures\/account\/position_mode$/,
+  // Leverage and margin mode per symbol, read before every Live entry (checkTradingSettings). Missing
+  // here until 19 Nov 2026: with the transport's clock bug fixed, every Bitunix entry would have been
+  // refused at this read, before transmission. Verified on production: HTTP 200, code 0.
+  /^\/api\/v1\/futures\/account\/trading_settings$/,
   /^\/api\/v1\/futures\/position\/get_pending_positions$/,
   /^\/api\/v1\/futures\/position\/get_history_positions$/,
   /^\/api\/v1\/futures\/trade\/get_pending_orders$/,
@@ -203,6 +207,8 @@ export interface BitunixHttpOptions {
  * nothing). A Bitunix refusal (signature, permission, IP whitelist, parameter) is never retried.
  */
 export class BitunixReadOnlyTransport implements BitunixRequester {
+  /** The key's own account tag in `subAccountId` (resolveBitunixAccountTag), when established. */
+  accountTag: string | null = null;
   private readonly o: Required<Omit<BitunixHttpOptions, 'onRequest'>> & Pick<BitunixHttpOptions, 'onRequest'>;
   private nextAt = 0;
   constructor(o: BitunixHttpOptions) {
