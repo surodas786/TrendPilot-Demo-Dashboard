@@ -1,7 +1,7 @@
 import { connectionFor, getDb, getMyPaperAccount, listBitunixExchangeOnlyLegs, listLatestQuotes, listMyHoldings, listMyPositions } from '@trendpilot/db';
 import { HoldingsClient } from '@/components/holdings/HoldingsClient';
 import { ExchangeSyncPanel } from '@/components/trades/ExchangeSyncPanel';
-import { manualSyncUnavailable } from '@/server/investorSync';
+import { holdingsSyncState, manualSyncUnavailable } from '@/server/investorSync';
 import { PageContainer } from '@/components/layout/PageContainer';
 import { ExchangeTabs, ModeTabs, paperExchangeOf, viewExchangeOf, viewModeOf, liveViewExchanges } from '@/components/ui/ModeTabs';
 import { now } from '@/server/clock';
@@ -56,10 +56,21 @@ export default async function MyHoldingsPage({ searchParams }: { searchParams: P
           unavailableReason={manualSyncUnavailable(exchange)}
         />
       )}
-      <HoldingsClient open={open} closed={closed} quotes={quotes} timezone={user.timezone} mode={mode} currency={exchange === 'LIGHTER' ? 'USDC' : 'USDT'} />
+      <HoldingsClient
+        open={open}
+        closed={closed}
+        quotes={quotes}
+        timezone={user.timezone}
+        mode={mode}
+        currency={exchange === 'LIGHTER' ? 'USDC' : 'USDT'}
+        sync={mode === 'LIVE' && connection && connection.status !== 'REVOKED' ? holdingsSyncState(exchange, connection) : null}
+      />
       {mode === 'LIVE' && exchange === 'BITUNIX' && (
         <section className="mt-6 rounded-xl border border-line bg-surface" data-testid="bitunix-other-legs">
-          <h3 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">Other Bitunix legs (not managed by TrendPilot)</h3>
+          <h3 className="border-b border-line px-4 py-3 text-sm font-semibold text-ink">
+            Other Bitunix legs (not managed by TrendPilot)
+            {connection && holdingsSyncState(exchange, connection).stale && <span className="ml-2 text-xs font-normal text-warn">as of the last successful sync; the latest sync failed</span>}
+          </h3>
           {otherLegs.length === 0 ? (
             <p className="px-4 py-3 text-sm text-muted">None: every open Bitunix leg in your account is a TrendPilot position above.</p>
           ) : (

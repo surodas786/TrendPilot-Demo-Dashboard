@@ -23,6 +23,11 @@ export interface MockPosition {
 
 export class MockBitunix implements BitunixRequester {
   mode = 'HEDGE';
+  /**
+   * get_pending_positions `side`: DOCUMENTED = LONG/SHORT (the docs); PRODUCTION = the leg's opening
+   * direction BUY/SELL, as production sent it on 19 Nov 2026 in HEDGE mode.
+   */
+  pendingPositionSide: 'DOCUMENTED' | 'PRODUCTION' = 'DOCUMENTED';
   usdt = { available: '100', frozen: '0', margin: '0', crossUnrealizedPNL: '0', isolationUnrealizedPNL: '0' };
   positions = new Map<string, MockPosition>();
   history: Record<string, unknown>[] = [];
@@ -38,6 +43,7 @@ export class MockBitunix implements BitunixRequester {
 
   reset(): void {
     this.mode = 'HEDGE';
+    this.pendingPositionSide = 'DOCUMENTED';
     this.usdt = { available: '100', frozen: '0', margin: '0', crossUnrealizedPNL: '0', isolationUnrealizedPNL: '0' };
     this.positions.clear();
     this.history = [];
@@ -82,7 +88,7 @@ export class MockBitunix implements BitunixRequester {
       case '/api/v1/futures/account':
         return [{ marginCoin: 'USDT', transfer: this.usdt.available, positionMode: this.mode, bonus: '0', ...this.usdt }] as T;
       case '/api/v1/futures/position/get_pending_positions':
-        return [...this.positions.values()].filter((p) => (!params.positionId || p.positionId === params.positionId) && (!params.symbol || p.symbol === params.symbol)).map((p) => ({ positionMode: this.mode, marginMode: 'ISOLATION', leverage: 10, ...p })) as T;
+        return [...this.positions.values()].filter((p) => (!params.positionId || p.positionId === params.positionId) && (!params.symbol || p.symbol === params.symbol)).map((p) => ({ positionMode: this.mode, marginMode: 'ISOLATION', leverage: 10, ...p, ...(this.pendingPositionSide === 'PRODUCTION' ? { side: p.side === 'LONG' ? 'BUY' : 'SELL' } : {}) })) as T;
       case '/api/v1/futures/position/get_history_positions': {
         const rows = this.history.filter((h) => (!params.positionId || h.positionId === params.positionId) && (!params.symbol || h.symbol === params.symbol));
         return { positionList: this.page(rows, params), total: rows.length } as T;

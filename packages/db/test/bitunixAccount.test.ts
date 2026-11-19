@@ -46,7 +46,9 @@ describe('Bitunix account reads', () => {
     await expect(readAllPages(pages({ '/x': () => 'oops' }).r, '/x', {}, 'orderList', normalizeBitunixOrder)).rejects.toMatchObject({ kind: 'PARSE' });
     await expect(readAllPages(pages({ '/x': () => ({ orderList: [{ symbol: 'BTCUSDT' }] }) }).r, '/x', {}, 'orderList', normalizeBitunixOrder)).rejects.toThrow(/orderId is missing/);
     expect(() => normalizeBitunixPosition(pos({ qty: 'x' }))).toThrow(/qty is not a number/);
-    expect(() => normalizeBitunixPosition(pos({ side: 'BUY' }))).toThrow(/unknown position side/);
+    // BUY/SELL is a position direction only on a row that states its position mode (see bitunixPendingPositionSide.test.ts).
+    expect(() => normalizeBitunixPosition(pos({ side: 'BUY', positionMode: undefined }))).toThrow(/unknown position side "BUY" \(no positionMode on the row\)/);
+    expect(() => normalizeBitunixPosition(pos({ side: 'BOTH' }))).toThrow(/unknown position side/);
     expect(() => normalizeBitunixPosition(pos({ positionId: Number('9007199254740993') }))).toThrow(/lost precision/);
     expect((await readAllPages(pages({ '/x': () => ({ total: 0 }) }).r, '/x', {}, 'orderList', normalizeBitunixOrder)).items).toEqual([]);
   });

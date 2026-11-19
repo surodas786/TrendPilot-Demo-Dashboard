@@ -64,17 +64,30 @@ const id = (v: unknown, field: string, what: string): string => {
   if (typeof v === 'number' && !Number.isSafeInteger(v)) throw new BitunixPrivateError(`${what}: ${field} lost precision (unsafe number)`, 'PARSE');
   return String(v);
 };
-const sideOf = (v: unknown, what: string, history = false): Side => {
-  const s = String(v ?? '').toUpperCase();
-  if (s === 'LONG' || s === 'SHORT') return s;
-  // Position HISTORY reports the leg by its opening direction (production 19 Nov 2026: "BUY").
-  if (history && s === 'BUY') return 'LONG';
-  if (history && s === 'SELL') return 'SHORT';
-  throw new BitunixPrivateError(`${what}: unknown position side ${JSON.stringify(v ?? null)}`, 'PARSE');
-};
 const modeOf = (v: unknown): BitunixPositionMode | null => {
   const s = String(v ?? '').toUpperCase();
   return s === 'ONE_WAY' || s === 'HEDGE' ? s : null;
+};
+/**
+ * POSITION direction (the leg's exposure), per endpoint. Never used for ORDER sides: an order's
+ * BUY/SELL is its trade direction, and in Hedge mode a SELL may close a Long leg (reduce-only), so
+ * order rows keep their raw side and opening/closing intent is decided from tradeSide/reduceOnly.
+ *
+ *  - get_pending_positions: documented as LONG/SHORT, but production (19 Nov 2026, HEDGE mode,
+ *    position 403163326623575343) sends the leg's opening direction: "SELL" for the Short leg (the
+ *    private WebSocket `position` channel sent "SHORT" for the same leg). A position row's BUY/SELL is
+ *    accepted only with a recognized positionMode on the row (HEDGE: one leg per direction;
+ *    ONE_WAY: the net position's direction), so an unidentified row still fails the read.
+ *  - get_history_positions: production sends BUY/SELL (19 Nov 2026: "BUY"); rows carry no mode.
+ */
+type SideSource = { endpoint: 'pending'; positionMode: BitunixPositionMode | null } | { endpoint: 'history' };
+const sideOf = (v: unknown, what: string, src: SideSource): Side => {
+  const s = String(v ?? '').toUpperCase();
+  if (s === 'LONG' || s === 'SHORT') return s;
+  const directional = src.endpoint === 'history' || src.positionMode !== null;
+  if (directional && s === 'BUY') return 'LONG';
+  if (directional && s === 'SELL') return 'SHORT';
+  throw new BitunixPrivateError(`${what}: unknown position side ${JSON.stringify(v ?? null)}${src.endpoint === 'pending' && src.positionMode === null && (s === 'BUY' || s === 'SELL') ? ' (no positionMode on the row)' : ''}`, 'PARSE');
 };
 /** A row from another account (sub-account) — never part of the investor's main-account state. */
 export const isSubAccountRow = (r: Record<string, unknown>) => r.subAccountId !== undefined && r.subAccountId !== null && r.subAccountId !== '' && String(r.subAccountId) !== '0';
@@ -105,13 +118,14 @@ export interface BitunixPosition {
 export function normalizeBitunixPosition(r: Record<string, unknown>): BitunixPosition {
   const what = `position ${String(r?.positionId ?? '?')}`;
   const liq = decOrNull(r.liqPrice, 'liqPrice', what);
+  const positionMode = modeOf(r.positionMode);
   return {
     positionId: id(r.positionId, 'positionId', what),
     symbol: id(r.symbol, 'symbol', what),
-    side: sideOf(r.side, what),
+    side: sideOf(r.side, what, { endpoint: 'pending', positionMode }),
     qty: dec(r.qty, 'qty', what),
     avgOpenPrice: decOrNull(r.avgOpenPrice, 'avgOpenPrice', what),
-    positionMode: modeOf(r.positionMode),
+    positionMode,
     marginMode: str(r.marginMode),
     leverage: ms(r.leverage),
     margin: decOrNull(r.margin, 'margin', what),
@@ -145,7 +159,7 @@ export function normalizeBitunixHistoryPosition(r: Record<string, unknown>): Bit
   return {
     positionId: id(r.positionId, 'positionId', what),
     symbol: id(r.symbol, 'symbol', what),
-    side: sideOf(r.side, what, true),
+    side: sideOf(r.side, what, { endpoint: 'history' }),
     maxQty: decOrNull(r.maxQty, 'maxQty', what),
     entryPrice: decOrNull(r.entryPrice, 'entryPrice', what),
     closePrice: decOrNull(r.closePrice, 'closePrice', what),

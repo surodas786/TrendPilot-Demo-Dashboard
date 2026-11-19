@@ -56,3 +56,13 @@ export function bitunixLines(r: BitunixSyncResult): string[] {
   return out;
 }
 
+
+/**
+ * Live Holdings sync state: `stale` when the latest sync failed and no success came after it, so the
+ * positions shown are the last verified snapshot (never presented as a freshly verified account).
+ */
+export function holdingsSyncState(exchange: ExchangeId, c: { lastSyncOkAt: Date | null; lastSyncAt: Date | null; lastSyncError: string | null }) {
+  const ok = c.lastSyncOkAt?.getTime() ?? null;
+  const last = c.lastSyncAt?.getTime() ?? null;
+  return { exchange, stale: !!c.lastSyncError && (ok === null || (last !== null && last > ok)), lastSyncOkAt: c.lastSyncOkAt?.toISOString() ?? null, lastSyncAt: c.lastSyncAt?.toISOString() ?? null, error: c.lastSyncError };
+}

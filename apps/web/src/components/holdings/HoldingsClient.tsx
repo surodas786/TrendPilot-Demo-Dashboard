@@ -92,7 +92,35 @@ export function PriceCell({ price, timezone }: { price: LivePrice; timezone: str
  * Prices stream from TrendPilot (SSE of the stored market feed); if the stream is not live or
  * stays silent, prices and positions are re-read from TrendPilot every 60 seconds.
  */
-export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mode = 'PAPER', currency = 'USDT' }: { open: HoldingDto[]; closed: PositionDto[]; quotes: LiveQuoteDto[]; timezone: string; mode?: 'PAPER' | 'LIVE'; /** The viewed account's currency (one account per view, never mixed). */ currency?: string }) {
+/**
+ * Live: the exchange account's sync state. `stale` = the latest sync failed after (or without) the
+ * last successful one, so the positions shown are the last verified snapshot, not a fresh read.
+ */
+export interface HoldingsSyncState {
+  exchange: string;
+  stale: boolean;
+  lastSyncOkAt: string | null;
+  lastSyncAt: string | null;
+  error: string | null;
+}
+
+export function HoldingsClient({
+  open: initialOpen,
+  closed,
+  quotes,
+  timezone,
+  mode = 'PAPER',
+  currency = 'USDT',
+  sync = null
+}: {
+  open: HoldingDto[];
+  closed: PositionDto[];
+  quotes: LiveQuoteDto[];
+  timezone: string;
+  mode?: 'PAPER' | 'LIVE';
+  /** The viewed account's currency (one account per view, never mixed). */ currency?: string;
+  sync?: HoldingsSyncState | null;
+}) {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>('open');
   const [open, setOpen] = useState(initialOpen);
@@ -125,14 +153,28 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
   const counted = rows.filter((r) => !r.gone);
   const total = counted.every((r) => r.unrealized !== null) ? counted.reduce((s, r) => s.plus(r.unrealized!), new Decimal(0)).toFixed() : null;
   const go = (id: string) => router.push(`/my-holdings/${id}`);
+  const stale = mode === 'LIVE' && !!sync?.stale;
+  const venue = sync ? exchangeLabel(sync.exchange) : '';
 
   return (
     <div className="space-y-4">
+      {stale && (
+        <div role="status" data-testid="holdings-sync-stale" className="rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-ink">
+          <p className="font-medium">Holdings may be incomplete: the latest {venue} sync failed{sync!.lastSyncAt ? ` at ${fmtTime(sync!.lastSyncAt, timezone)}` : ''}.</p>
+          <p className="mt-0.5 text-muted">
+            Showing the last verified state{sync!.lastSyncOkAt ? ` (last successful sync ${fmtTime(sync!.lastSyncOkAt, timezone)})` : ' (no successful sync yet)'}. Positions opened or closed on {venue} since then are not reflected; this is not a confirmed flat account.
+          </p>
+          {sync!.error && <p className="mt-1 break-words font-mono text-[11px] text-subtle">{sync!.error}</p>}
+        </div>
+      )}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <dl className="flex flex-wrap gap-x-10 gap-y-3">
           <div>
             <dt className="text-xs text-subtle">Open positions</dt>
-            <dd className="mt-0.5 text-2xl font-semibold tabular-nums text-ink">{counted.length}</dd>
+            <dd className="mt-0.5 text-2xl font-semibold tabular-nums text-ink" data-testid="holdings-open-count" data-stale={stale ? 'true' : 'false'}>
+              {counted.length}
+              {stale && <span className="ml-2 align-middle text-xs font-normal text-warn">as of last successful sync</span>}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-subtle">Unrealized P&amp;L (mark)</dt>
@@ -181,7 +223,11 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
 
       {tab === 'open' ? (
         open.length === 0 ? (
-          <EmptyState icon={LayersIcon} title="No open positions" body="Positions open here when an accepted signal matches one of your active order blocks." />
+          stale ? (
+            <EmptyState icon={LayersIcon} title="No verified open positions" body={`None as of the last successful ${venue} sync. The latest sync failed, so this does not confirm the account is flat.`} />
+          ) : (
+            <EmptyState icon={LayersIcon} title="No open positions" body="Positions open here when an accepted signal matches one of your active order blocks." />
+          )
         ) : (
           <div className="overflow-x-auto rounded-xl border border-line bg-surface">
             <table className="w-full min-w-[1100px] text-sm" aria-label="Open positions">
@@ -225,7 +271,14 @@ export function HoldingsClient({ open: initialOpen, closed, quotes, timezone, mo
                         </span>
                       )}
                     </td>
-                    <td className="px-3 py-2.5 text-right text-ink">{priceOrUnavailable(h.avgEntryPrice)}</td>
+                    <td className="px-3 py-2.5 text-right text-ink">
+                      {priceOrUnavailable(h.avgEntryPrice)}
+                      {h.venueLeg && (
+                        <span className="block text-[11px] text-subtle" data-testid="holding-venue-leg">
+                          {venueName(h)}: {h.venueLeg.qty} @ {h.venueLeg.avgOpenPrice ?? '—'} · margin {h.venueLeg.marginUsdt ?? '—'} {currency} · liq. {h.venueLeg.liqPrice ?? 'none'}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2.5">
                       <PriceCell price={price} timezone={timezone} />
                     </td>

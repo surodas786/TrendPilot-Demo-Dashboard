@@ -19,6 +19,8 @@ import {
   ExchangePriceCache,
   installBitunixTestSeam,
   installLiveTestSeam,
+  listBitunixExchangeOnlyLegs,
+  listMyHoldings,
   parseBitunixPrivateFrame,
   reconcileBitunixIntents,
   requestExit,
@@ -37,6 +39,7 @@ import * as capabilities from '@/app/v1/admin/live/capabilities/route';
 import * as contracts from '@/app/v1/admin/live/contracts/[id]/route';
 import * as platform from '@/app/v1/admin/live/platform/route';
 import { setTestClock } from '@/server/clock';
+import { holdingsSyncState } from '@/server/investorSync';
 import { BTC, blockBody, call, direct, teardown, userId, USERS } from '../helpers';
 import { MockBitunixExchange } from '../bitunixOrderMock';
 import { MockMexc } from '../mexcMock';
@@ -95,17 +98,17 @@ async function bitunixQuote(bid = '63999.9', ask = '64000.1', mark = '64000') {
 }
 
 /** A new alert bar, a fresh quote, then the real entry evaluation (reservation + paper.submit job). */
-async function enterLong(): Promise<string> {
+async function enterLong(side: 'LONG' | 'SHORT' = 'LONG'): Promise<string> {
   bar = new Date(bar.getTime() + M15);
   clock.now = plus(new Date(bar.getTime() + M15), 3);
   setTestClock(() => clock.now);
-  expect(await deliver('BULLISH_FLIP', bar, '64000.0')).toBe(202);
+  expect(await deliver(side === 'SHORT' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', bar, '64000.0')).toBe(202);
   await drain(clock.now);
   await bitunixQuote();
   const [event] = await direct.db.select().from(schema.signalEvents).orderBy(desc(schema.signalEvents.receivedAt)).limit(1);
   const [block] = await direct.db.select().from(schema.orderBlocks).where(eq(schema.orderBlocks.id, blockA));
   const [version] = await direct.db.select().from(schema.strategyVersions).where(eq(schema.strategyVersions.id, versionId));
-  const out = await direct.db.transaction((tx) => evaluateAndReserveEntry(tx, { event: event!, block: block!, version: version!, side: 'LONG', now: clock.now }));
+  const out = await direct.db.transaction((tx) => evaluateAndReserveEntry(tx, { event: event!, block: block!, version: version!, side, now: clock.now }));
   expect(out).toMatchObject({ status: 'ENTRY_APPROVED' });
   return out.intentId!;
 }
@@ -149,6 +152,7 @@ beforeAll(async () => {
 beforeEach(() => {
   x.next = {};
   x.detailFailures = 0;
+  x.pendingPositionSide = 'DOCUMENTED';
 });
 afterAll(async () => {
   installLiveTestSeam(null);
@@ -443,5 +447,113 @@ describe('production-shaped history (19 Nov 2026)', () => {
     expect(await openPositions()).toHaveLength(0);
     x.historyOrders = [];
     x.orders.delete('2123290721968840706');
+  });
+});
+
+describe('get_pending_positions side "SELL" (production, 19 Nov 2026: position 403163326623575343)', () => {
+  it('a filled Short entry stuck behind the parse failure is recovered by read-only sync: position linked, stop verified, reservation applied, Holdings shows the leg', async () => {
+    const id = await enterLong('SHORT');
+    // Bitunix accepts and fills the Short, but the job never learns it (as in production, where its
+    // post-fill position read failed on side "SELL" until the job went DEAD).
+    x.next = { timeout: 'AFTER_ACCEPT', lookupsFailAfterAccept: 100 };
+    await drain(clock.now);
+    await killJob(id);
+    x.detailFailures = 0;
+    const reservedBefore = D((await bxAccount()).orderReserve);
+    const clientId = (await intent(id)).clientOrderId;
+    const order = x.orders.get(clientId)!;
+    expect(order).toMatchObject({ side: 'SELL', tradeSide: 'OPEN', status: 'FILLED' });
+    const leg = x.legOf('BTCUSDT', 'SHORT')!;
+    Object.assign(leg, { liqPrice: '70100.5', margin: '0.6412' });
+    expect(await intent(id)).toMatchObject({ state: 'SUBMITTING' });
+
+    // The pending-position endpoint now answers as production does: side "SELL" for the Short leg.
+    x.pendingPositionSide = 'PRODUCTION';
+    const r = await sync();
+    expect(r.error ?? null).toBeNull();
+    expect(r.ok).toBe(true);
+    expect(r.intents).toEqual([expect.objectContaining({ intentId: id, clientOrderId: clientId, result: 'FILLED', exchangeOrderId: order.orderId, jobStatus: 'DEAD (8/8)' })]);
+    expect(await intent(id)).toMatchObject({ state: 'FILLED', exchangeOrderId: order.orderId, clientOrderId: clientId });
+
+    // Matched by clientId -> orderId -> fills -> the Short leg's positionId; stop verified on Bitunix.
+    const [p] = await openPositions();
+    expect(p).toMatchObject({ openIntentId: id, side: 'SHORT', exchangePositionRef: leg.positionId, protectionStatus: 'PROTECTED' });
+    expect(D(p!.exchangeLiquidationPrice!).eq('70100.5')).toBe(true);
+    expect(D(p!.contracts).eq(leg.qty)).toBe(true);
+    expect(await fillsOf(id)).toEqual([expect.objectContaining({ exchangeFillId: `bitunix:${order.orderId}`, side: 'SHORT' })]);
+    // The reservation was applied exactly once (none left held for this intent).
+    expect(D((await bxAccount()).orderReserve).lt(reservedBefore)).toBe(true);
+    const mirror = (await direct.db.select().from(schema.exchangePositions).where(eq(schema.exchangePositions.exchangePositionId, leg.positionId)))[0]!;
+    expect(mirror).toMatchObject({ side: 'SHORT', status: 'OPEN', origin: 'TRENDPILOT', avgOpenPrice: '64000', liqPrice: '70100.5', margin: '0.6412' });
+
+    // Holdings: the managed position with Bitunix's own figures; it is no longer an "other leg".
+    const h = await listMyHoldings(direct.db, idA, clock.now, 'LIVE', 'BITUNIX');
+    expect(h).toEqual([expect.objectContaining({ id: p!.id, side: 'SHORT', venueLeg: expect.objectContaining({ positionId: leg.positionId, qty: leg.qty, avgOpenPrice: '64000', marginUsdt: '0.6412', liqPrice: '70100.5', origin: 'TRENDPILOT' }) })]);
+    expect((await listBitunixExchangeOnlyLegs(direct.db, idA)).map((l) => l.exchangePositionId)).not.toContain(leg.positionId);
+    expect(holdingsSyncState('BITUNIX', await bxConn()).stale).toBe(false);
+
+    // Repeated sync: nothing doubles; reconciliation never sent anything.
+    expect((await sync()).ok).toBe(true);
+    expect(await fillsOf(id)).toHaveLength(1);
+    expect(await openPositions()).toHaveLength(1);
+    expect(x.posts.filter((b) => b.clientId === clientId)).toHaveLength(1);
+    x.pendingPositionSide = 'DOCUMENTED';
+    await closeAll();
+  });
+
+  it('a position read that fails to parse keeps the last verified snapshot and marks Holdings stale with the last successful sync time', async () => {
+    const id = await enterLong('SHORT');
+    await drain(clock.now);
+    expect(await intent(id)).toMatchObject({ state: 'FILLED' });
+    x.pendingPositionSide = 'PRODUCTION';
+    expect((await sync()).ok).toBe(true);
+    const okAt = (await bxConn()).lastSyncOkAt!;
+    const before = await openPositions();
+    const mirrorBefore = (await direct.db.select().from(schema.exchangePositions).where(eq(schema.exchangePositions.exchangePositionId, before[0]!.exchangePositionRef!)))[0]!;
+
+    clock.now = plus(clock.now, 330);
+    x.failOn('/api/v1/futures/position/get_pending_positions', new BitunixPrivateError('position 403163326623575343: unknown position side "BOTH"', 'PARSE'), true);
+    const failed = await sync();
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toMatch(/unknown position side "BOTH"/);
+    const c = await bxConn();
+    expect(c.lastSyncOkAt!.getTime()).toBe(okAt.getTime());
+    expect(holdingsSyncState('BITUNIX', c)).toMatchObject({ stale: true, lastSyncOkAt: okAt.toISOString(), error: expect.stringMatching(/unknown position side/) });
+    // Nothing was closed or changed by the failed read.
+    expect(await openPositions()).toEqual(before);
+    const mirrorAfter = (await direct.db.select().from(schema.exchangePositions).where(eq(schema.exchangePositions.id, mirrorBefore.id)))[0]!;
+    expect(mirrorAfter).toMatchObject({ status: 'OPEN', qty: mirrorBefore.qty, revision: mirrorBefore.revision });
+
+    // The next good read clears the stale state.
+    expect((await sync()).ok).toBe(true);
+    expect(holdingsSyncState('BITUNIX', await bxConn()).stale).toBe(false);
+    x.pendingPositionSide = 'DOCUMENTED';
+    await closeAll();
+  });
+
+  it('a reduce-only order carrying the intent clientId is never booked as its opening order', async () => {
+    const id = await enterLong('SHORT');
+    x.next = { timeout: 'AFTER_ACCEPT', lookupsFailAfterAccept: 100 };
+    await drain(clock.now);
+    await killJob(id);
+    x.detailFailures = 0;
+    const clientId = (await intent(id)).clientOrderId;
+    const o = x.orders.get(clientId)!;
+    const real = x.get.bind(x);
+    // get_order_detail reports the order as reduce-only (a close): the entry stays unresolved.
+    x.get = (async (path: string, params: Record<string, unknown> = {}) => {
+      const v = (await real(path, params)) as Record<string, unknown>;
+      return path === '/api/v1/futures/trade/get_order_detail' ? { ...v, reduceOnly: true } : v;
+    }) as typeof x.get;
+    try {
+      const r = await sync();
+      expect(r.intents).toEqual([expect.objectContaining({ intentId: id, result: 'PENDING', detail: expect.stringContaining(`order ${o.orderId} is reduce-only`) })]);
+      expect(await intent(id)).toMatchObject({ state: 'SUBMITTING' });
+      expect(await fillsOf(id)).toHaveLength(0);
+    } finally {
+      x.get = real;
+    }
+    expect((await sync()).intents).toEqual([expect.objectContaining({ intentId: id, result: 'FILLED' })]);
+    await closeAll();
   });
 });
