@@ -39,8 +39,15 @@ export function bitunixCredentialsOf(c: ConnectionRow): BitunixCredentials {
 
 /** Read-only REST access with THIS connection's key (the test seam replaces it outside production). */
 export function bitunixRequesterFor(c: ConnectionRow, env: Record<string, string | undefined> = process.env): BitunixRequester {
-  if (seam) return seam.requesterFor(c);
-  return new BitunixReadOnlyTransport({ credentials: bitunixCredentialsOf(c), baseUrl: env.BITUNIX_PRIVATE_BASE_URL || BITUNIX_PRIVATE_DEFAULT_BASE_URL });
+  if (seam) return withAccountTag(seam.requesterFor(c), c);
+  return withAccountTag(new BitunixReadOnlyTransport({ credentials: bitunixCredentialsOf(c), baseUrl: env.BITUNIX_PRIVATE_BASE_URL || BITUNIX_PRIVATE_DEFAULT_BASE_URL }), c);
+}
+
+/** Carries the connection's verified own-account tag (account_state.ownSubAccountId) on a requester. */
+export function withAccountTag<R extends BitunixRequester>(r: R, c: Pick<ConnectionRow, 'accountState'>): R {
+  const tag = (c.accountState as { ownSubAccountId?: unknown } | null)?.ownSubAccountId;
+  if (typeof tag === 'string' && tag) (r as R & { accountTag?: string | null }).accountTag = tag;
+  return r;
 }
 const requesterFor = bitunixRequesterFor;
 

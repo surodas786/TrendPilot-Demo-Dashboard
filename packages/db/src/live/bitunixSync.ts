@@ -7,7 +7,10 @@ import {
   readHistoryPositions,
   readHistoryTrades,
   readPendingPositions,
+  originOf,
+  resolveBitunixAccountTag,
   takeBitunixSnapshot,
+  type TaggedRequester,
   type BitunixHistoryPosition,
   type BitunixPosition,
   type BitunixSnapshot,
@@ -61,6 +64,9 @@ export interface AccountState {
   excludedSubAccountRows?: number;
   /** Fills and orders are read up to here (exchange ms). */
   historySyncedToMs?: number;
+  /** The key's own account ID as Bitunix tags it in `subAccountId` (resolveBitunixAccountTag). */
+  ownSubAccountId?: string;
+  ownSubAccountEvidence?: string;
 }
 
 export interface BitunixSyncResult {
@@ -80,6 +86,8 @@ export interface BitunixSyncResult {
   excludedSubAccountRows: number;
   /** TrendPilot Live positions reconciled against the mirror (Step 4). */
   links?: BitunixPositionLink[];
+  /** History order rows that could not be parsed (recorded as ORDER_UNPARSED events). */
+  unparsedHistoryRows?: number;
   /** Unresolved TrendPilot entries reconciled from Bitunix evidence in this run. */
   intents?: IntentReconcileResult[];
 }
@@ -377,8 +385,24 @@ async function syncHistory(db: Db, conn: ConnectionRow, r: BitunixRequester, now
   const state = (fresh?.s ?? {}) as AccountState;
   const from = Math.max(0, (state.historySyncedToMs ?? nowMs - BITUNIX_HISTORY_LOOKBACK_MS) - HISTORY_OVERLAP_MS);
   const trades = await readHistoryTrades(r, { startTime: from, endTime: nowMs });
-  const orders = await readHistoryOrders(r, { startTime: from, endTime: nowMs });
+  // A row Bitunix sends in a form TrendPilot cannot parse is recorded (with its identifiers) instead
+  // of failing the whole sync; the watermark then stays put so the window is read again.
+  const orders = await readHistoryOrders(r, { startTime: from, endTime: nowMs }, { collectRowErrors: true });
+  const unparsed = orders.skipped ?? [];
+  out.unparsedHistoryRows = unparsed.length;
   await db.transaction(async (tx) => {
+    for (const k of unparsed)
+      await recordAccountEvent(tx, conn, {
+        kind: 'ORDER_UNPARSED',
+        dedupKey: `order-unparsed:${k.orderId ?? '?'}:${k.error}`.slice(0, 300),
+        origin: originOf(k.clientId),
+        source: 'HISTORY',
+        exchangeOrderId: k.orderId,
+        symbol: k.symbol,
+        side: null,
+        businessTimeMs: nowMs,
+        detail: { clientId: k.clientId, error: k.error }
+      });
     for (const t of trades.items) {
       if (
         await recordAccountEvent(tx, conn, {
@@ -406,12 +430,13 @@ async function syncHistory(db: Db, conn: ConnectionRow, r: BitunixRequester, now
           symbol: o.symbol,
           side: o.side,
           businessTimeMs: o.mtimeMs ?? o.ctimeMs,
-          detail: { status: o.status, type: o.orderType, qty: o.qty, tradeQty: o.tradeQty, price: o.price, reduceOnly: o.reduceOnly, fee: o.fee, clientId: o.clientId }
+          detail: { status: o.status, type: o.orderType, qty: o.qty, tradeQty: o.tradeQty, requestedPrice: o.requestedPrice, avgPrice: o.avgPrice, reduceOnly: o.reduceOnly, fee: o.fee, clientId: o.clientId, ...(o.issues ? { issues: o.issues } : {}) }
         })
       )
         out.events += 1;
     }
-    // The window is complete (every page read): move the watermark.
+    // The window is complete (every page read and parsed): move the watermark.
+    if (unparsed.length) return;
     await tx
       .update(exchangeConnections)
       .set({ accountState: sql`${exchangeConnections.accountState} || ${JSON.stringify({ historySyncedToMs: nowMs })}::jsonb` })
@@ -525,7 +550,12 @@ export async function applyBitunixEvent(db: Db, conn: ConnectionRow, e: BitunixP
       // queues (one path for pushes, lost responses and missed pushes), never from the push alone.
       const own = await noteBitunixOrderPush(db, conn, e, new Date());
       const terminal = e.status === 'FILLED' || e.status === 'CANCELED' || e.status === 'PART_FILLED_CANCELED';
-      return { applied: fresh || !!own, needsSync: (fresh && (e.status === 'FILLED' || e.status === 'PART_FILLED' || e.status === 'PART_FILLED_CANCELED')) || (!!own?.unresolved && terminal) };
+      return {
+        applied: fresh || !!own?.advanced,
+        // REST settles: a fill, a final status for an unresolved TrendPilot order, or a push that
+        // conflicts with the status already stored (out-of-order or contradictory delivery).
+        needsSync: (fresh && (e.status === 'FILLED' || e.status === 'PART_FILLED' || e.status === 'PART_FILLED_CANCELED')) || (!!own?.unresolved && terminal) || !!own?.conflict
+      };
     }
     case 'balance': {
       if (e.coin !== 'USDT') return { applied: false, needsSync: false };
@@ -606,6 +636,22 @@ export async function syncBitunixConnection(db: Db, connectionId: string, r: Bit
   if (!lease) return { ...out, busy: true, error: 'a sync is already running for this connection' };
   const at = now();
   try {
+    // Rows Bitunix tags with the key's own account ID are the main account's: established once per
+    // key from exchange evidence, kept in account_state, carried on the requester for every list read.
+    const st = (conn.accountState ?? {}) as AccountState;
+    let tag = typeof st.ownSubAccountId === 'string' && st.ownSubAccountId ? st.ownSubAccountId : null;
+    if (!tag) {
+      const found = await resolveBitunixAccountTag(r).catch(() => ({ tag: null, evidence: '' }));
+      if (found.tag) {
+        tag = found.tag;
+        conn.accountState = { ...st, ownSubAccountId: found.tag, ownSubAccountEvidence: found.evidence };
+        await db
+          .update(exchangeConnections)
+          .set({ accountState: sql`${exchangeConnections.accountState} || ${JSON.stringify({ ownSubAccountId: found.tag, ownSubAccountEvidence: found.evidence })}::jsonb` })
+          .where(eq(exchangeConnections.id, conn.id));
+      }
+    }
+    if (tag) (r as TaggedRequester).accountTag = tag;
     const snap = await takeBitunixSnapshot(r, () => now().getTime());
     out.excludedSubAccountRows = snap.excludedSubAccountRows;
     await applyBitunixSnapshot(db, conn, snap, out);

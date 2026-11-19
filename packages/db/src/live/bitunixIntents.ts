@@ -65,7 +65,8 @@ export interface ReconcileOptions {
 }
 
 /** The venue's order-changing method is never reachable from reconciliation. */
-const readOnly = (r: BitunixRequester): BitunixOrderRequester => ({
+const readOnly = (r: BitunixRequester): BitunixOrderRequester & { accountTag?: string | null } => ({
+  accountTag: (r as { accountTag?: string | null }).accountTag ?? null,
   get: (path, params) => r.get(path, params),
   post: async (path) => {
     throw new BitunixPrivateError(`Refusing POST ${path}: reconciliation is read-only`, 'REFUSED');
@@ -189,10 +190,18 @@ export async function reconcileBitunixIntents(db: Db, conn: ConnectionRow, r: Bi
       // exclude the row under clock skew. The newest 2000 orders of the symbol are read.
       // Every row counts here, including rows Bitunix tags with a subAccountId (on production it tags
       // the investor's own history rows that way): a row carrying this TrendPilot clientId is evidence.
-      const pending = (await readPendingOrders(r, { maxPages: 5, includeSubAccountRows: true })).items.find((x) => x.clientId === intent.clientOrderId);
-      const history = pending ? undefined : (await readHistoryOrders(r, { symbol }, { maxPages: 20, includeSubAccountRows: true })).items.find((x) => x.clientId === intent.clientOrderId);
-      const hit = pending ?? history;
+      // Rows that fail to parse are collected, not fatal; one that could be this order (same clientId,
+      // or no clientId to tell) keeps the search incomplete, so absence is never concluded over it.
+      const opts = { maxPages: 20, includeSubAccountRows: true, collectRowErrors: true };
+      const pendingRead = await readPendingOrders(r, opts);
+      const historyRead = await readHistoryOrders(r, { symbol }, opts);
+      const hit = [...pendingRead.items, ...historyRead.items].find((x) => x.clientId === intent.clientOrderId);
       if (hit) listed = { orderId: hit.orderId, status: hit.status };
+      const blocking = [...(pendingRead.skipped ?? []), ...(historyRead.skipped ?? [])].filter((k) => k.clientId === null || k.clientId === intent.clientOrderId);
+      if (!hit && blocking.length) {
+        await finish({ result: 'PENDING', exchangeOrderId: intent.exchangeOrderId, detail: `order list incomplete: ${blocking.length} unparseable row(s) could be this order (${blocking.map((k) => `order ${k.orderId ?? '?'}: ${k.error}`).join('; ').slice(0, 250)})` }, true);
+        continue;
+      }
     } catch (e) {
       await finish({ result: 'PENDING', exchangeOrderId: intent.exchangeOrderId, detail: `get_order_detail empty; order list read failed: ${(e as Error).message}`.slice(0, 300) }, true);
       continue;
@@ -237,27 +246,49 @@ export async function reconcileBitunixIntents(db: Db, conn: ConnectionRow, r: Bi
   return out;
 }
 
+/** NEW < PART_FILLED < final. A final status is never replaced by an earlier one, whatever its timestamp. */
+export const BITUNIX_ORDER_STATUS_RANK: Record<string, number> = { NEW: 1, PART_FILLED: 2, FILLED: 3, CANCELED: 3, CANCELLED: 3, PART_FILLED_CANCELED: 3, EXPIRED: 3 };
+export const bitunixStatusRank = (s: string | null | undefined): number => (s ? (BITUNIX_ORDER_STATUS_RANK[s.toUpperCase()] ?? 0) : 0);
+
 /**
  * A private order push for one of the connection owner's intents (matched by connection owner +
- * clientId): the exchange order ID is kept with the intent (first value wins) and the push noted.
- * Returns whether that intent is still unresolved, so the caller queues the reconciliation.
+ * clientId): the exchange order ID is kept with the intent (first value wins) and the reported
+ * status advances only forward (NEW → PART_FILLED → final). A push with an EARLIER status than the
+ * one stored (Bitunix may send NEW after FILLED, even with a later timestamp) changes nothing and is
+ * reported as a conflict, which the caller settles through REST. Returns null for any other order.
  */
-export async function noteBitunixOrderPush(db: Db, conn: Pick<ConnectionRow, 'id' | 'ownerId'>, e: { clientId: string | null; orderId: string; status: string; dealAmount: string | null; mtimeMs: number | null }, now: Date): Promise<{ intentId: string; unresolved: boolean } | null> {
+export async function noteBitunixOrderPush(
+  db: Db,
+  conn: Pick<ConnectionRow, 'id' | 'ownerId'>,
+  e: { clientId: string | null; orderId: string; status: string; dealAmount: string | null; mtimeMs: number | null },
+  now: Date
+): Promise<{ intentId: string; unresolved: boolean; advanced: boolean; conflict: boolean } | null> {
   if (!e.clientId) return null;
-  const [hit] = await db
-    .select({ id: orderIntents.id, state: orderIntents.state })
-    .from(orderIntents)
-    .innerJoin(paperAccounts, eq(paperAccounts.id, orderIntents.paperAccountId))
-    .where(and(eq(orderIntents.clientOrderId, e.clientId), eq(orderIntents.ownerId, conn.ownerId), eq(paperAccounts.ownerId, conn.ownerId), eq(paperAccounts.exchange, 'BITUNIX'), eq(orderIntents.mode, 'LIVE')));
-  if (!hit) return null;
-  const unresolved = (['INTENT', ...UNRESOLVED] as readonly string[]).includes(hit.state);
-  await db
-    .update(orderIntents)
-    .set({
-      exchangeOrderId: sql`coalesce(${orderIntents.exchangeOrderId}, ${e.orderId})`,
-      ...(unresolved ? { lastReconcileNote: `${now.toISOString()} WS order ${e.orderId} ${e.status}${e.dealAmount ? ` filled ${e.dealAmount}` : ''}${e.mtimeMs ? ` (exchange ${new Date(e.mtimeMs).toISOString()})` : ''}`.slice(0, 500) } : {}),
-      updatedAt: sql`now()`
-    })
-    .where(eq(orderIntents.id, hit.id));
-  return { intentId: hit.id, unresolved };
+  return db.transaction(async (tx) => {
+    const [hit] = await tx
+      .select({ id: orderIntents.id, state: orderIntents.state, status: orderIntents.exchangeOrderStatus, orderId: orderIntents.exchangeOrderId })
+      .from(orderIntents)
+      .innerJoin(paperAccounts, eq(paperAccounts.id, orderIntents.paperAccountId))
+      .where(and(eq(orderIntents.clientOrderId, e.clientId!), eq(orderIntents.ownerId, conn.ownerId), eq(paperAccounts.ownerId, conn.ownerId), eq(paperAccounts.exchange, 'BITUNIX'), eq(orderIntents.mode, 'LIVE')))
+      .for('update', { of: orderIntents });
+    if (!hit) return null;
+    const unresolved = (['INTENT', ...UNRESOLVED] as readonly string[]).includes(hit.state);
+    const before = bitunixStatusRank(hit.status);
+    const after = bitunixStatusRank(e.status);
+    const advanced = after > before;
+    // Same rank but a different final status (FILLED vs CANCELED) or another order ID: REST decides.
+    const conflict = after < before || (after === before && after === 3 && hit.status !== e.status.toUpperCase()) || (!!hit.orderId && hit.orderId !== e.orderId);
+    await tx
+      .update(orderIntents)
+      .set({
+        exchangeOrderId: sql`coalesce(${orderIntents.exchangeOrderId}, ${e.orderId})`,
+        ...(advanced ? { exchangeOrderStatus: e.status.toUpperCase(), exchangeOrderStatusAt: e.mtimeMs ? new Date(e.mtimeMs) : now } : {}),
+        ...(unresolved && (advanced || conflict)
+          ? { lastReconcileNote: `${now.toISOString()} WS order ${e.orderId} ${e.status}${e.dealAmount && Number(e.dealAmount) > 0 ? ` filled ${e.dealAmount}` : ''}${e.mtimeMs ? ` (exchange ${new Date(e.mtimeMs).toISOString()})` : ''}${conflict ? ` — conflicts with stored ${hit.status ?? '-'}${hit.orderId && hit.orderId !== e.orderId ? ` / order ${hit.orderId}` : ''}; REST decides` : ''}`.slice(0, 500) }
+          : {}),
+        updatedAt: sql`now()`
+      })
+      .where(eq(orderIntents.id, hit.id));
+    return { intentId: hit.id, unresolved, advanced, conflict };
+  });
 }

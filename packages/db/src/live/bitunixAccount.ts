@@ -64,9 +64,12 @@ const id = (v: unknown, field: string, what: string): string => {
   if (typeof v === 'number' && !Number.isSafeInteger(v)) throw new BitunixPrivateError(`${what}: ${field} lost precision (unsafe number)`, 'PARSE');
   return String(v);
 };
-const sideOf = (v: unknown, what: string): Side => {
+const sideOf = (v: unknown, what: string, history = false): Side => {
   const s = String(v ?? '').toUpperCase();
   if (s === 'LONG' || s === 'SHORT') return s;
+  // Position HISTORY reports the leg by its opening direction (production 19 Nov 2026: "BUY").
+  if (history && s === 'BUY') return 'LONG';
+  if (history && s === 'SELL') return 'SHORT';
   throw new BitunixPrivateError(`${what}: unknown position side ${JSON.stringify(v ?? null)}`, 'PARSE');
 };
 const modeOf = (v: unknown): BitunixPositionMode | null => {
@@ -142,7 +145,7 @@ export function normalizeBitunixHistoryPosition(r: Record<string, unknown>): Bit
   return {
     positionId: id(r.positionId, 'positionId', what),
     symbol: id(r.symbol, 'symbol', what),
-    side: sideOf(r.side, what),
+    side: sideOf(r.side, what, true),
     maxQty: decOrNull(r.maxQty, 'maxQty', what),
     entryPrice: decOrNull(r.entryPrice, 'entryPrice', what),
     closePrice: decOrNull(r.closePrice, 'closePrice', what),
@@ -164,7 +167,14 @@ export interface BitunixOrder {
   orderType: string | null;
   qty: string | null;
   tradeQty: string | null;
-  price: string | null;
+  /**
+   * The order's REQUESTED price: a limit price, or (get_order_detail of a market order) the price
+   * Bitunix recorded at placement. Null for a market order listed with `price: "MARKET"` or no price.
+   * Never an execution price: fills come from trade history, else `avgPrice`.
+   */
+  requestedPrice: string | null;
+  /** Executed average price as Bitunix reports it (`avgPrice`); null when not reported. */
+  avgPrice: string | null;
   status: string;
   reduceOnly: boolean | null;
   positionMode: BitunixPositionMode | null;
@@ -172,11 +182,29 @@ export interface BitunixOrder {
   realizedPNL: string | null;
   ctimeMs: number | null;
   mtimeMs: number | null;
+  /** Optional fields Bitunix sent in a form TrendPilot does not use (kept for evidence, never fatal). */
+  issues?: string[];
+}
+
+/** `price` of a Bitunix order: a decimal, or one of the documented market-order forms (no price). */
+function requestedPriceOf(v: unknown, issues: string[]): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'string' && v.trim().toUpperCase() === 'MARKET') return null;
+  try {
+    const d = new Decimal(v as Decimal.Value);
+    if (d.isFinite()) return d.toFixed();
+  } catch {
+    /* recorded below */
+  }
+  issues.push(`price ${JSON.stringify(v).slice(0, 40)} is not a price`);
+  return null;
 }
 
 export function normalizeBitunixOrder(r: Record<string, unknown>): BitunixOrder {
   const what = `order ${String(r?.orderId ?? '?')}`;
   const clientId = str(r.clientId);
+  const issues: string[] = [];
+  const requestedPrice = requestedPriceOf(r.price, issues);
   return {
     orderId: id(r.orderId, 'orderId', what),
     clientId,
@@ -187,14 +215,17 @@ export function normalizeBitunixOrder(r: Record<string, unknown>): BitunixOrder 
     orderType: str(r.orderType ?? r.type),
     qty: decOrNull(r.qty, 'qty', what),
     tradeQty: decOrNull(r.tradeQty, 'tradeQty', what),
-    price: decOrNull(r.price, 'price', what),
+    requestedPrice,
+    // Fill-establishing fields stay strict: a malformed executed price is a parse failure.
+    avgPrice: decOrNull(r.avgPrice ?? r.averagePrice, 'avgPrice', what),
     status: String(r.status ?? r.orderStatus ?? 'UNKNOWN'),
     reduceOnly: typeof r.reduceOnly === 'boolean' ? r.reduceOnly : null,
     positionMode: modeOf(r.positionMode),
     fee: decOrNull(r.fee, 'fee', what),
     realizedPNL: decOrNull(r.realizedPNL, 'realizedPNL', what),
     ctimeMs: ms(r.ctime),
-    mtimeMs: ms(r.mtime)
+    mtimeMs: ms(r.mtime),
+    ...(issues.length ? { issues } : {})
   };
 }
 
@@ -273,6 +304,35 @@ export interface ListRead<T> {
   /** Rows dropped because they belong to a sub-account. */
   excludedSubAccountRows: number;
   pages: number;
+  /** collectRowErrors only: rows that could not be parsed, with the identifiers they carried. */
+  skipped?: SkippedRow[];
+}
+
+export interface SkippedRow {
+  orderId: string | null;
+  clientId: string | null;
+  symbol: string | null;
+  error: string;
+}
+
+/**
+ * Bitunix tags rows of the API key's OWN account with that account's ID in `subAccountId` on some
+ * endpoints (production, 19 Nov 2026: every history order/position row carried "891435181", while
+ * get_order_detail for the same order said null). A requester may carry that verified tag
+ * (`accountTag`, see resolveBitunixAccountTag); rows with it are the main account's, rows with any
+ * other non-empty ID are a sub-account's.
+ */
+export type TaggedRequester = BitunixRequester & { accountTag?: string | null };
+const tagOf = (r: BitunixRequester): string | null => (r as TaggedRequester).accountTag ?? null;
+const otherAccountRow = (row: Record<string, unknown>, own: string | null) => isSubAccountRow(row) && !(own !== null && String(row.subAccountId) === own);
+
+export interface ReadOptions {
+  pageSize?: number;
+  maxPages?: number;
+  /** Keep rows tagged with any sub-account ID (clientId evidence searches). */
+  includeSubAccountRows?: boolean;
+  /** Collect unparseable rows (with their identifiers) instead of failing the whole read. */
+  collectRowErrors?: boolean;
 }
 
 /** Pulls rows out of `data` (a bare list, or an object holding `listKey`). Anything else is PARSE. */
@@ -301,21 +361,32 @@ export async function readAllPages<T>(
   params: Record<string, QueryValue>,
   listKey: string | null,
   normalize: (row: Record<string, unknown>) => T,
-  o: { pageSize?: number; maxPages?: number; includeSubAccountRows?: boolean } = {}
+  o: ReadOptions = {}
 ): Promise<ListRead<T>> {
   const limit = o.pageSize ?? BITUNIX_PAGE_SIZE;
   const maxPages = o.maxPages ?? BITUNIX_MAX_PAGES;
+  const own = tagOf(r);
   const items: T[] = [];
+  const skipped: SkippedRow[] = [];
   let excluded = 0;
   for (let page = 0; page < maxPages; page++) {
     const skip = page * limit;
     const { rows, total } = rowsOf(await r.get(path, { ...params, skip, limit }), listKey, path);
     for (const row of rows) {
       if (!row || typeof row !== 'object') throw new BitunixPrivateError(`${path}: a row is not an object`, 'PARSE');
-      if (isSubAccountRow(row) && !o.includeSubAccountRows) excluded += 1;
-      else items.push(normalize(row));
+      if (otherAccountRow(row, own) && !o.includeSubAccountRows) {
+        excluded += 1;
+        continue;
+      }
+      try {
+        items.push(normalize(row));
+      } catch (e) {
+        if (!o.collectRowErrors) throw e;
+        const idOf = (v: unknown) => (v === null || v === undefined || v === '' ? null : String(v));
+        skipped.push({ orderId: idOf(row.orderId), clientId: idOf(row.clientId), symbol: idOf(row.symbol), error: (e as Error).message.slice(0, 200) });
+      }
     }
-    if (rows.length < limit || (total !== null && skip + rows.length >= total)) return { items, excludedSubAccountRows: excluded, pages: page + 1 };
+    if (rows.length < limit || (total !== null && skip + rows.length >= total)) return { items, excludedSubAccountRows: excluded, pages: page + 1, ...(o.collectRowErrors ? { skipped } : {}) };
   }
   throw new BitunixPrivateError(`${path}: more than ${maxPages * limit} rows; the read is incomplete`, 'INCOMPLETE');
 }
@@ -327,16 +398,16 @@ export async function readPendingPositions(r: BitunixRequester, params: { symbol
   const items: BitunixPosition[] = [];
   for (const row of rows) {
     if (!row || typeof row !== 'object') throw new BitunixPrivateError('get_pending_positions: a row is not an object', 'PARSE');
-    if (isSubAccountRow(row)) excluded += 1;
+    if (otherAccountRow(row, tagOf(r))) excluded += 1;
     else items.push(normalizeBitunixPosition(row));
   }
   return { items, excludedSubAccountRows: excluded, pages: 1 };
 }
 
-export const readHistoryPositions = (r: BitunixRequester, params: { positionId?: string; symbol?: string; startTime?: number; endTime?: number }, o?: { maxPages?: number }) =>
+export const readHistoryPositions = (r: BitunixRequester, params: { positionId?: string; symbol?: string; startTime?: number; endTime?: number }, o?: ReadOptions) =>
   readAllPages(r, '/api/v1/futures/position/get_history_positions', params, 'positionList', normalizeBitunixHistoryPosition, o);
-export const readPendingOrders = (r: BitunixRequester, o?: { maxPages?: number; includeSubAccountRows?: boolean }) => readAllPages(r, '/api/v1/futures/trade/get_pending_orders', {}, 'orderList', normalizeBitunixOrder, o);
-export const readHistoryOrders = (r: BitunixRequester, params: { startTime?: number; endTime?: number; symbol?: string }, o?: { maxPages?: number; includeSubAccountRows?: boolean }) =>
+export const readPendingOrders = (r: BitunixRequester, o?: ReadOptions) => readAllPages(r, '/api/v1/futures/trade/get_pending_orders', {}, 'orderList', normalizeBitunixOrder, o);
+export const readHistoryOrders = (r: BitunixRequester, params: { startTime?: number; endTime?: number; symbol?: string }, o?: ReadOptions) =>
   readAllPages(r, '/api/v1/futures/trade/get_history_orders', params, 'orderList', normalizeBitunixOrder, o);
 /**
  * Trade history, each trade once: pages are offset-based, so a trade arriving during the read shifts
@@ -348,11 +419,38 @@ export async function readHistoryTrades(r: BitunixRequester, params: { startTime
   const seen = new Set<string>();
   return { ...read, items: read.items.filter((t) => (seen.has(t.tradeId) ? false : (seen.add(t.tradeId), true))) };
 }
-export const readPendingTpsl = (r: BitunixRequester, o?: { maxPages?: number }) => readAllPages(r, '/api/v1/futures/tpsl/get_pending_orders', {}, 'orderList', normalizeBitunixTpsl, o);
+export const readPendingTpsl = (r: BitunixRequester, o?: ReadOptions) => readAllPages(r, '/api/v1/futures/tpsl/get_pending_orders', {}, 'orderList', normalizeBitunixTpsl, o);
 
 export async function readOrderDetail(r: BitunixRequester, orderId: string): Promise<BitunixOrder | null> {
   const d = await r.get('/api/v1/futures/trade/get_order_detail', { orderId });
   return d && typeof d === 'object' && !Array.isArray(d) ? normalizeBitunixOrder(d as Record<string, unknown>) : null;
+}
+
+/**
+ * The ID Bitunix puts in `subAccountId` for the key's OWN account, established from evidence: a
+ * history order carrying a tag that get_order_detail (the key's own account; it reports no
+ * subAccountId) returns as the same order. Null when no tagged order exists or the detail does not
+ * confirm it — then every tagged row stays excluded, as before.
+ */
+export async function resolveBitunixAccountTag(r: BitunixRequester): Promise<{ tag: string | null; evidence: string }> {
+  const d = await r.get<unknown>('/api/v1/futures/trade/get_history_orders', { skip: 0, limit: 20 });
+  const rows = (d && typeof d === 'object' && Array.isArray((d as { orderList?: unknown }).orderList) ? (d as { orderList: Record<string, unknown>[] }).orderList : []).filter(isSubAccountRow);
+  for (const row of rows.slice(0, 3)) {
+    const tag = String(row.subAccountId);
+    const orderId = row.orderId === undefined || row.orderId === null ? '' : String(row.orderId);
+    if (!orderId) continue;
+    let detail: Record<string, unknown> | null = null;
+    try {
+      const x = await r.get<unknown>('/api/v1/futures/trade/get_order_detail', { orderId });
+      detail = x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : null;
+    } catch {
+      detail = null;
+    }
+    if (detail && String(detail.orderId) === orderId && (!isSubAccountRow(detail) || String(detail.subAccountId) === tag)) {
+      return { tag, evidence: `history order ${orderId} tagged subAccountId ${tag}; get_order_detail returns it for this key's own account (subAccountId ${detail.subAccountId ?? 'null'})` };
+    }
+  }
+  return { tag: null, evidence: rows.length ? 'tagged history orders not confirmed by get_order_detail' : 'no tagged history order' };
 }
 
 export interface BitunixSnapshot {

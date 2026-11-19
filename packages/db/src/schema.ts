@@ -702,6 +702,9 @@ export const orderIntents = pgTable(
     reconcileAttempts: integer('reconcile_attempts').notNull().default(0),
     lastReconcileAt: timestamp('last_reconcile_at', { withTimezone: true }),
     lastReconcileNote: text('last_reconcile_note'),
+    /** Exchange status last reported for this order, never regressed (NEW < PART_FILLED < final). */
+    exchangeOrderStatus: text('exchange_order_status'),
+    exchangeOrderStatusAt: timestamp('exchange_order_status_at', { withTimezone: true }),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     createdAt: createdAt(),

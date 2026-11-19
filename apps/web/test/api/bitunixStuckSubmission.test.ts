@@ -10,9 +10,10 @@
 //  - repeated reconciliation and duplicate pushes change nothing;
 //  - the private order frame parsed with Bitunix's actual fields.
 import { and, desc, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyBitunixEvent,
+  BitunixPrivateError,
   BitunixQuoteWriter,
   evaluateAndReserveEntry,
   ExchangePriceCache,
@@ -322,5 +323,125 @@ describe('stuck SUBMITTING Bitunix entries are settled from exchange evidence', 
     expect(later.intents).toEqual([expect.objectContaining({ result: 'PENDING', detail: expect.stringMatching(/its Bitunix order ID 777 is known|reported this clientId to TrendPilot before/) })]);
     expect(await intent(id)).toMatchObject({ state: 'SUBMITTING', exchangeOrderId: '777' });
     expect(D((await bxAccount()).orderReserve).eq(reserveBefore)).toBe(true);
+    // Test cleanup only (frees the scope for the next tests): not a recovery path.
+    await direct.db.update(schema.orderIntents).set({ state: 'CANCELLED', resolvedAt: clock.now }).where(eq(schema.orderIntents.id, id));
+    await unhalt();
+  });
+});
+
+/** Bitunix over HTTP for the REAL transport: signed requests in, the mock exchange answers, envelopes out. */
+function bitunixHttp() {
+  const seen: { method: string; path: string; headers: Record<string, string> }[] = [];
+  const f = vi.fn(async (url: string, init: RequestInit) => {
+    const u = new URL(url);
+    seen.push({ method: String(init.method), path: u.pathname, headers: init.headers as Record<string, string> });
+    try {
+      const data = init.method === 'POST' ? await x.post(u.pathname, JSON.parse(String(init.body))) : await x.get(u.pathname, Object.fromEntries(u.searchParams));
+      return new Response(JSON.stringify({ code: 0, msg: 'Success', data }), { status: 200 });
+    } catch (e) {
+      if (e instanceof BitunixPrivateError && e.kind === 'API') return new Response(JSON.stringify({ code: e.code, msg: e.message }), { status: 200 });
+      throw e;
+    }
+  });
+  return { f, seen };
+}
+
+describe('worker job entry point with production dependency construction', () => {
+  it('paper.submit builds the real Bitunix order transport (no clock/nonce/fetch overrides); the order is sent and booked', async () => {
+    // Same venue construction as production (liveMode: new BitunixOrderTransport({ credentials, baseUrl, env })),
+    // with HTTP mocked. Before the fix every attempt threw "this.o.now is not a function" here.
+    installLiveTestSeam({ requesterFor: () => mexc, transportEnabled: true, confirm: { attempts: 2, delayMs: 0 }, bitunixTransportEnv: { LIVE_ORDER_TRANSPORT: 'enabled', NODE_ENV: 'production' } });
+    const http = bitunixHttp();
+    vi.stubGlobal('fetch', http.f);
+    try {
+      const id = await enterLong();
+      await drain(clock.now);
+      const job = await jobOf(id);
+      expect({ status: job.status, attempts: job.attempts, lastError: job.lastError }).toEqual({ status: 'DONE', attempts: 1, lastError: null });
+      const i = await intent(id);
+      expect(i).toMatchObject({ state: 'FILLED', exchangeOrderId: x.orders.get(i.clientOrderId)!.orderId });
+      expect(i.venueRequest).toMatchObject({ path: '/api/v1/futures/trade/place_order', body: { clientId: i.clientOrderId, side: 'BUY', tradeSide: 'OPEN', orderType: 'MARKET' } });
+      expect(http.seen.filter((c) => c.method === 'POST').map((c) => c.path)).toEqual(['/api/v1/futures/trade/place_order']);
+      for (const c of http.seen) expect(c.headers).toMatchObject({ timestamp: expect.stringMatching(/^\d{13}$/), nonce: expect.stringMatching(/^[0-9a-f]{32}$/), sign: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      expect(await openPositions()).toHaveLength(1);
+      await closeAll();
+    } finally {
+      vi.unstubAllGlobals();
+      installLiveTestSeam({ requesterFor: () => mexc, bitunixRequesterFor: () => x, transportEnabled: true, confirm: { attempts: 2, delayMs: 0 } });
+    }
+  });
+});
+
+describe('production-shaped history (19 Nov 2026)', () => {
+  const tagged = (o: Record<string, unknown>) => ({ marginCoin: null, positionMode: 'HEDGE', marginMode: 'ISOLATION', leverage: 20, price: 'MARKET', orderType: 'MARKET', effect: 'IOC', status: 'FILLED', tpPrice: null, slPrice: null, subAccountId: '891435181', ...o });
+
+  it('a market order listed with price "MARKET" no longer stops the search; an unparseable row that could be ours keeps it incomplete', async () => {
+    const id = await enterLong();
+    x.detailFailures = 100; // pre-send lookup fails: nothing is sent
+    await drain(clock.now);
+    await killJob(id);
+    x.detailFailures = 0;
+    clock.now = plus(clock.now, 11 * 60);
+    const t = clock.now.getTime();
+    x.historyOrders = [
+      tagged({ orderId: '2123307529551073280', clientId: '2123307529555795969', symbol: 'BTCUSDT', qty: '0.024', tradeQty: '0.024', avgPrice: '64001.5', side: 'SELL', reduceOnly: true, fee: '0.04', ctime: t, mtime: t }),
+      tagged({ orderId: '2123300000000000009', clientId: null, subAccountId: null, symbol: 'BTCUSDT', qty: '0.0031', tradeQty: 'n/a', side: 'BUY', ctime: t, mtime: t })
+    ];
+    const r1 = await sync();
+    expect(r1.ok).toBe(true); // the mirror's history read no longer fails the whole sync
+    expect(r1.unparsedHistoryRows).toBe(1);
+    expect(r1.intents).toEqual([expect.objectContaining({ intentId: id, result: 'PENDING', detail: expect.stringContaining('order list incomplete: 1 unparseable row(s) could be this order (order 2123300000000000009: order 2123300000000000009: tradeQty is not a number)') })]);
+    expect(await intent(id)).toMatchObject({ state: 'SUBMITTING' });
+    // The same row, now carrying another clientId: it cannot be this order; absence is established.
+    x.historyOrders[1]!.clientId = '2123300000000000010';
+    const r2 = await sync();
+    expect(r2.intents).toEqual([expect.objectContaining({ intentId: id, result: 'NOT_AT_VENUE' })]);
+    expect(await intent(id)).toMatchObject({ state: 'EXPIRED' });
+    x.historyOrders = [];
+    await unhalt();
+  });
+
+  it('NEW pushed after FILLED (later timestamp) never regresses the order; REST settles it', async () => {
+    const id = await enterLong();
+    x.next = { timeout: 'AFTER_ACCEPT', lookupsFailAfterAccept: 100 };
+    await drain(clock.now);
+    await killJob(id);
+    x.detailFailures = 0;
+    const clientId = (await intent(id)).clientOrderId;
+    const filled = orderFrame(clientId, 'FILLED') as Extract<ReturnType<typeof orderFrame>, { channel: 'order' }>;
+    const lateNew = { ...orderFrame(clientId, 'NEW'), mtimeMs: (filled.mtimeMs ?? 0) + 110, tsMs: (filled.tsMs ?? 0) + 110, dealAmount: '0' } as typeof filled;
+    expect(await applyBitunixEvent(direct.db, await bxConn(), filled)).toMatchObject({ needsSync: true });
+    expect(await intent(id)).toMatchObject({ exchangeOrderStatus: 'FILLED' });
+    expect(await applyBitunixEvent(direct.db, await bxConn(), lateNew)).toMatchObject({ needsSync: true }); // conflict → REST
+    expect(await intent(id)).toMatchObject({ state: 'SUBMITTING', exchangeOrderStatus: 'FILLED' });
+    expect((await intent(id)).lastReconcileNote).toMatch(/WS order [0-9]+ NEW .*— conflicts with stored FILLED; REST decides/);
+    expect((await sync()).intents).toEqual([expect.objectContaining({ result: 'FILLED' })]);
+    expect(await intent(id)).toMatchObject({ state: 'FILLED', exchangeOrderStatus: 'FILLED' });
+    await closeAll();
+  });
+
+  it("an exchange-originated leg in rows tagged with the key's own account: its close is confirmed from its own position history", async () => {
+    const c = await bxConn();
+    // The manual BUY that opened the leg (Bitunix-generated clientId) and the leg itself, both tagged
+    // with the account's own ID; get_order_detail returns that order as this key's own.
+    const t = clock.now.getTime();
+    x.orders.set('2123290721968840706', { orderId: '2123290722031226880', clientId: '2123290721968840706', symbol: 'BTCUSDT', side: 'BUY', tradeSide: 'OPEN', orderType: 'MARKET', qty: '0.024', tradeQty: '0.024', price: '64000', status: 'FILLED', ctime: t, mtime: t });
+    x.historyOrders = [tagged({ orderId: '2123290722031226880', clientId: '2123290721968840706', symbol: 'BTCUSDT', qty: '0.024', tradeQty: '0.024', avgPrice: '64000', side: 'BUY', reduceOnly: false, ctime: t, mtime: t })];
+    x.positions.set('275788944450665588', { positionId: '275788944450665588', symbol: 'BTCUSDT', side: 'LONG', qty: '0.024', avgOpenPrice: '64000', ctime: t, mtime: t, subAccountId: '891435181' as unknown as number });
+    expect((await sync()).ok).toBe(true);
+    expect((await bxConn()).accountState).toMatchObject({ ownSubAccountId: '891435181', ownSubAccountEvidence: expect.stringContaining('history order 2123290722031226880 tagged subAccountId 891435181') });
+    const mirror = async () => (await direct.db.select().from(schema.exchangePositions).where(and(eq(schema.exchangePositions.connectionId, c.id), eq(schema.exchangePositions.exchangePositionId, '275788944450665588'))))[0]!;
+    expect(await mirror()).toMatchObject({ status: 'OPEN', origin: 'EXCHANGE', qty: '0.024' });
+    // Closed manually on Bitunix (reduce-only SELL, another Bitunix clientId): the history row is tagged too.
+    x.closeOnExchange('275788944450665588', { closePrice: '63990', mtime: t + 60_000, fee: '0.0897552', realizedPNL: '-0.0955152' });
+    x.history[0]!.subAccountId = '891435181';
+    await sync();
+    const closed = await mirror();
+    expect(closed.status).toBe('CLOSED');
+    expect(closed.closeCheck).not.toBe('PENDING');
+    // Never linked to a TrendPilot intent or position (different clientIds, order and position references).
+    expect(await openPositions()).toHaveLength(0);
+    x.historyOrders = [];
+    x.orders.delete('2123290721968840706');
   });
 });

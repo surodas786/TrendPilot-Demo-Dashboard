@@ -21,7 +21,7 @@ import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { createDb } from '../client';
 import { loadRootEnv, requireEnv } from '../env';
 import { exchangeAccountEvents, exchangeConnections, instruments, jobs, ledgerEntries, orderIntents, paperAccounts, serviceHeartbeats, signalDecisions, signalEvents, users } from '../schema';
-import { readHistoryOrders, readHistoryTrades, readPendingOrders, readPendingPositions, readPendingTpsl } from '../live/bitunixAccount';
+import { readHistoryOrders, readHistoryPositions, readHistoryTrades, readPendingOrders, readPendingPositions, readPendingTpsl } from '../live/bitunixAccount';
 import { bitunixRequesterFor } from '../live/bitunixConnection';
 import { reconcileBitunixIntents } from '../live/bitunixIntents';
 import type { BitunixRequester } from '../live/bitunixPrivate';
@@ -149,28 +149,46 @@ try {
     lastWsOrder.map((e) => ({ orderId: e.exchangeOrderId, symbol: e.symbol, businessTime: e.businessTime, receivedAt: e.createdAt, detail: e.detail }))
   );
 
-  // Bitunix, read-only, with the investor's stored key.
+  // Bitunix, read-only, with the investor's stored key (and its verified own-account tag, if any).
   const r: BitunixRequester = bitunixRequesterFor(conn);
   const symbol = inst?.exchangeSymbol ?? '';
-  const since = hit.createdAt.getTime() - 60 * 60_000;
-  const safe = async <T>(label: string, f: () => Promise<T>) => {
+  const safe = async <T>(label: string, f: () => Promise<T>): Promise<T | { error: string }> => {
     try {
       return await f();
     } catch (e) {
-      return { error: `${label}: ${(e as Error).name} ${(e as Error).message}` } as unknown as T;
+      return { error: `${label}: ${(e as Error).name} ${(e as Error).message}` };
     }
   };
+  const ok = <T>(v: T | { error: string }): v is T => !(v && typeof v === 'object' && 'error' in (v as object) && Object.keys(v as object).length === 1);
+  show('Own-account tag (account_state)', { ownSubAccountId: (conn.accountState as { ownSubAccountId?: string })?.ownSubAccountId ?? null, evidence: (conn.accountState as { ownSubAccountEvidence?: string })?.ownSubAccountEvidence ?? null });
   const detail = await safe('get_order_detail', () => r.get<unknown>('/api/v1/futures/trade/get_order_detail', { clientId: hit.clientOrderId }));
   show(`Bitunix get_order_detail {clientId: ${hit.clientOrderId}}`, detail ?? 'null (no order)');
-  const pending = await safe('get_pending_orders', async () => (await readPendingOrders(r, { maxPages: 5, includeSubAccountRows: true })).items.filter((o) => o.clientId === hit.clientOrderId || o.symbol === symbol));
-  show('Bitunix open orders (this clientId or symbol)', pending);
-  const history = await safe('get_history_orders', async () => (await readHistoryOrders(r, { symbol, startTime: since, endTime: Date.now() }, { maxPages: 20, includeSubAccountRows: true })).items);
-  const mine = Array.isArray(history) ? history.filter((o) => o.clientId === hit.clientOrderId) : history;
-  show(`Bitunix order history ${symbol} since ${new Date(since).toISOString()} — this clientId`, mine);
-  if (Array.isArray(history)) show(`Bitunix order history ${symbol} — all (${history.length})`, history.map((o) => ({ orderId: o.orderId, clientId: o.clientId, side: o.side, qty: o.qty, tradeQty: o.tradeQty, status: o.status, ctime: o.ctimeMs ? new Date(o.ctimeMs) : null })));
-  const orderId = (Array.isArray(mine) && mine[0]?.orderId) || hit.exchangeOrderId || (detail && typeof detail === 'object' && 'orderId' in (detail as object) ? String((detail as { orderId: unknown }).orderId) : null);
+  const opts = { maxPages: 50, includeSubAccountRows: true, collectRowErrors: true };
+  const pending = await safe('get_pending_orders', () => readPendingOrders(r, opts));
+  show('Bitunix open orders (all)', ok(pending) ? pending : pending);
+  // Complete order history of the symbol: no time bounds, every page, tagged rows included; rows that
+  // cannot be parsed are listed with their identifiers instead of aborting the read.
+  const read = await safe('get_history_orders', () => readHistoryOrders(r, { symbol }, opts));
+  const history = ok(read) ? read.items : [];
+  const mine = history.filter((o) => o.clientId === hit.clientOrderId);
+  show(`Bitunix order history ${symbol} — this clientId`, ok(read) ? mine : read);
+  if (ok(read)) {
+    show(
+      `Bitunix order history ${symbol} — all (${history.length} parsed, ${read.pages} page(s), ${read.skipped?.length ?? 0} unparseable)`,
+      history.map((o) => ({ orderId: o.orderId, clientId: o.clientId, origin: o.origin, side: o.side, type: o.orderType, qty: o.qty, tradeQty: o.tradeQty, requestedPrice: o.requestedPrice, avgPrice: o.avgPrice, reduceOnly: o.reduceOnly, status: o.status, ctime: o.ctimeMs ? new Date(o.ctimeMs).toISOString() : null, issues: o.issues }))
+    );
+    if (read.skipped?.length) show('Unparseable history rows (identifiers kept)', read.skipped);
+  }
+  const fromMs = hit.createdAt.getTime() - 60 * 60_000;
+  const trades = await safe('get_history_trades', () => readHistoryTrades(r, { startTime: fromMs }, { maxPages: 50 }));
+  show(
+    `Bitunix fills (all symbols) since ${new Date(fromMs).toISOString()}`,
+    ok(trades) ? trades.items.map((t) => ({ tradeId: t.tradeId, orderId: t.orderId, symbol: t.symbol, side: t.side, qty: t.qty, price: t.price, fee: t.fee, realizedPNL: t.realizedPNL, reduceOnly: t.reduceOnly, ctime: t.ctimeMs ? new Date(t.ctimeMs).toISOString() : null })) : trades
+  );
+  const orderId = mine[0]?.orderId || hit.exchangeOrderId || (detail && typeof detail === 'object' && 'orderId' in (detail as object) ? String((detail as { orderId: unknown }).orderId) : null);
   if (orderId) show(`Bitunix fills for order ${orderId}`, await safe('get_history_trades', async () => (await readHistoryTrades(r, { orderId }, { maxPages: 5 })).items.filter((t) => t.orderId === orderId)));
   show(`Bitunix open positions ${symbol}`, await safe('get_pending_positions', async () => (await readPendingPositions(r, { symbol })).items));
+  show(`Bitunix position history ${symbol}`, await safe('get_history_positions', async () => (await readHistoryPositions(r, { symbol }, { maxPages: 5, includeSubAccountRows: true })).items));
   show(`Bitunix open TP/SL ${symbol}`, await safe('tpsl/get_pending_orders', async () => (await readPendingTpsl(r)).items.filter((t) => t.symbol === symbol)));
 
   const out = await reconcileBitunixIntents(h.db, conn, r, new Date(), { clientOrderId: hit.clientOrderId, apply });
