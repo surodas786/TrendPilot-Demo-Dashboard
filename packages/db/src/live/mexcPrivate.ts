@@ -181,7 +181,7 @@ export class MexcHttpTransport implements MexcRequester {
     this.env = o.env ?? process.env;
     if (o.mode === 'ORDERS') openLiveOrderTransport(this.env);
     if (!o.credentials.apiKey || !o.credentials.secretKey) throw new MexcPrivateError('MEXC credentials are not configured', 'REFUSED');
-    this.o = { baseUrl: MEXC_PRIVATE_DEFAULT_BASE_URL, timeoutMs: 8_000, fetch, now: Date.now, ...o } as Required<Omit<MexcHttpOptions, 'env'>>;
+    this.o = { baseUrl: MEXC_PRIVATE_DEFAULT_BASE_URL, timeoutMs: 8_000, fetch, now: Date.now, ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) } as Required<Omit<MexcHttpOptions, 'env'>>;
   }
 
   async request<T>(method: 'GET' | 'POST', path: string, params: Record<string, unknown> | unknown[] | null = null): Promise<T> {

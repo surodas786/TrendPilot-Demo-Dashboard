@@ -26,6 +26,10 @@ function ModeBadge({ mode }: { mode: string }) {
   );
 }
 
+const UNRESOLVED_STATES = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'];
+/** One timestamp per request (server component). */
+const requestTime = () => new Date().toISOString();
+
 const money = (v: string, ccy: string) => `${Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${ccy}`;
 
 /** UI-04 My Trades: the signed-in investor's own positions and orders only, Paper or Live (separately). */
@@ -58,6 +62,23 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
   const open = positions.filter((p) => p.status !== 'CLOSED');
   const closed = positions.filter((p) => p.status === 'CLOSED');
   const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: user.timezone, dateStyle: 'medium', timeStyle: 'short' });
+  // Bitunix and Lighter quantities are base-asset amounts (e.g. 0.026 XAU); MEXC's are contracts.
+  const unitOf = (o: { exchange: string; base: string }) => (o.exchange === 'BITUNIX' || o.exchange === 'LIGHTER' ? o.base : 'contracts');
+  const unresolved = live
+    ? orders
+        .filter((o) => UNRESOLVED_STATES.includes(o.state))
+        .map((o) => ({
+          id: o.id,
+          clientOrderId: o.clientOrderId,
+          label: `${o.kind} ${o.side} ${o.symbol} · ${o.contracts} ${unitOf(o)}`,
+          state: o.state,
+          createdAt: o.createdAt,
+          lastReconcileAt: o.lastReconcileAt,
+          reason: o.lastReconcileNote ?? o.job?.lastError ?? o.stateReason,
+          job: o.job ? `${o.job.status}${o.job.status === 'DEAD' || o.job.status === 'PENDING' ? ` after ${o.job.attempts}/${o.job.maxAttempts} attempts` : ''}` : null,
+          exchangeOrderId: o.exchangeOrderId
+        }))
+    : [];
 
   return (
     <PageContainer
@@ -87,6 +108,8 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
           drift={(connection.drift ?? []) as { kind: string; symbol: string; detail: string }[]}
           timezone={user.timezone}
           unavailableReason={manualSyncUnavailable(exchange)}
+          unresolved={unresolved}
+          renderedAt={new Date(requestTime()).getTime()}
         />
       )}
       {live && (!connection || connection.status === 'REVOKED') && (
@@ -315,12 +338,15 @@ export default async function MyTradesPage({ searchParams }: { searchParams: Pro
             <li key={o.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2" data-testid="paper-order" data-state={o.state}>
               <span className="text-muted">{fmt(o.createdAt)}</span>
               <span className="text-ink">
-                {o.kind} {o.side} {o.symbol} · {o.kind === 'CLOSE' ? `${o.filledContracts}/${o.contracts}` : o.contracts} contracts
+                {o.kind} {o.side} {o.symbol} · {o.kind === 'CLOSE' ? `${o.filledContracts}/${o.contracts}` : o.contracts} {unitOf(o)}
                 {o.exitReason && <span className="text-subtle"> · {EXIT_LABEL[o.exitReason] ?? o.exitReason}</span>}
               </span>
               <StatusPill tone={o.state === 'FILLED' ? 'gain' : o.state === 'CANCELLED' || o.state === 'EXPIRED' || o.state === 'REJECTED' ? 'neutral' : 'warn'}>{o.state}</StatusPill>
               {o.stateReason && <span className="text-xs text-subtle">{o.stateReason}</span>}
-              <span className="font-mono text-xs text-subtle">{o.clientOrderId}</span>
+              <span className="font-mono text-xs text-subtle" title="TrendPilot client order ID (sent to the exchange as clientId)">
+                {o.clientOrderId}
+              </span>
+              {o.exchangeOrderId && <span className="font-mono text-xs text-subtle">{venue} order {o.exchangeOrderId}</span>}
             </li>
           ))}
           {orders.length === 0 && <li className="px-4 py-3 text-subtle">No {live ? 'Live' : 'paper'} orders yet.</li>}

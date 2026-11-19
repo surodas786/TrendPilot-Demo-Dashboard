@@ -26,7 +26,7 @@ import { fills, instruments, marketQuotes, orderBlocks, orderIntents, positions,
 import { accountExchangeFor, availableOf, book, lockPaperAccount, type PaperAccountRow } from './accounts';
 import { latestQuote, loadClosedCandles } from './market';
 import { instrumentSpec, lighterSpecGap } from './spec';
-import type { SimResult } from './simulator';
+import type { SimResult, VenueDiagnostics } from './simulator';
 import { lighterLiveRefusalFor, liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { requestExit } from './exits';
@@ -390,6 +390,11 @@ export function trailingAtEntry(side: 'LONG' | 'SHORT', entry: string, tr: NonNu
   };
 }
 
+/** Resolves an unfilled intent and releases its reservation (one ledger row per intent). Caller holds the intent lock. */
+export async function releaseIntent(tx: Executor, intent: IntentRow, state: 'CANCELLED' | 'EXPIRED' | 'REJECTED', reason: string, now: Date): Promise<void> {
+  return release(tx, intent, state, reason, now);
+}
+
 async function release(tx: Executor, intent: IntentRow, state: 'CANCELLED' | 'EXPIRED' | 'REJECTED', reason: string, now: Date) {
   await tx.update(orderIntents).set({ state, stateReason: reason, resolvedAt: now, updatedAt: sql`now()` }).where(eq(orderIntents.id, intent.id));
   await book(tx, { id: intent.paperAccountId, ownerId: intent.ownerId }, [
@@ -397,17 +402,35 @@ async function release(tx: Executor, intent: IntentRow, state: 'CANCELLED' | 'EX
   ]);
 }
 
-async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, now: Date, reconciled: boolean, venue: ExecutionVenue): Promise<SubmitSummary> {
+/**
+ * Books a venue outcome for an OPEN intent exactly once: under the intent row lock, only while the
+ * intent is unresolved. The submit job passes its claim (completed in the same transaction); the
+ * exchange reconciliation (REST sync, private order push, ops recovery) passes null. Whoever gets
+ * the lock first books; the other finds the intent FILLED or REJECTED and books nothing.
+ */
+export async function recordOpeningOutcome(db: Db, job: JobRow | null, intent: IntentRow, sim: SimResult, now: Date, reconciled: boolean, venue: ExecutionVenue): Promise<SubmitSummary> {
+  return record(db, job, intent, sim, now, reconciled, venue);
+}
+
+async function record(db: Db, job: JobRow | null, intent: IntentRow, sim: SimResult, now: Date, reconciled: boolean, venue: ExecutionVenue): Promise<SubmitSummary> {
   return db.transaction(async (tx) => {
     const [cur] = await tx.select().from(orderIntents).where(eq(orderIntents.id, intent.id)).for('update');
-    if (cur!.state === 'FILLED' || cur!.state === 'REJECTED') {
-      await completeJob(tx, job);
+    if (!(UNRESOLVED as readonly string[]).includes(cur!.state)) {
+      if (job) await completeJob(tx, job);
       const [p] = await tx.select({ id: positions.id }).from(positions).where(eq(positions.openIntentId, intent.id));
       return { intentId: intent.id, state: cur!.state, positionId: p?.id, reconciled };
     }
+    if ((sim.orderId && !cur!.exchangeOrderId) || sim.diagnostics)
+      await tx
+        .update(orderIntents)
+        .set({
+          ...(sim.orderId && !cur!.exchangeOrderId ? { exchangeOrderId: sim.orderId } : {}),
+          ...(sim.diagnostics ? { venueRequest: sim.diagnostics.request ?? null, venueResponse: sim.diagnostics.response ?? null } : {})
+        })
+        .where(eq(orderIntents.id, cur!.id));
     if (sim.status === 'REJECTED') {
       await release(tx, cur!, 'REJECTED', sim.reason, now);
-      await completeJob(tx, job);
+      if (job) await completeJob(tx, job);
       return { intentId: intent.id, state: 'REJECTED', reason: sim.reason, reconciled };
     }
 
@@ -505,7 +528,7 @@ async function record(db: Db, job: JobRow, intent: IntentRow, sim: SimResult, no
       const [row] = await tx.select().from(positions).where(eq(positions.id, pos.id));
       await requestExit(tx, { position: row!, reason: 'PROTECTION_FAILURE', now });
     }
-    await completeJob(tx, job);
+    if (job) await completeJob(tx, job);
     const [p] = pos ? [pos] : await tx.select({ id: positions.id }).from(positions).where(eq(positions.openIntentId, cur!.id));
     return { intentId: cur!.id, state: 'FILLED', positionId: p?.id, reconciled, ...(covers ? {} : { reason: 'PROTECTION_FAILED' }) };
   });
@@ -581,6 +604,33 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
 
   const intent = step.intent;
   if (!venue) throw new Error(`No venue for ${intent.clientOrderId}.`);
+  try {
+    return await submitOrReconcile(db, job, step, venue, now, hooks);
+  } catch (e) {
+    // Evidence for an unresolved order: what this attempt sent (sanitized) and why it failed. Kept
+    // with the intent, so a job that runs out of attempts never leaves the order unexplained.
+    await noteAttempt(db, intent.id, e, now).catch(() => undefined);
+    throw e;
+  }
+}
+
+/** Records a failed submit/reconcile attempt on the intent (never changes its state). */
+export async function noteAttempt(db: Executor, intentId: string, e: unknown, now: Date): Promise<void> {
+  const err = e as Error & { diagnostics?: VenueDiagnostics };
+  const note = `${now.toISOString()} ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}`.slice(0, 500);
+  await db
+    .update(orderIntents)
+    .set({
+      lastReconcileAt: now,
+      lastReconcileNote: note,
+      ...(err?.diagnostics ? { venueRequest: err.diagnostics.request ?? null, venueResponse: err.diagnostics.response ?? null } : {}),
+      updatedAt: sql`now()`
+    })
+    .where(eq(orderIntents.id, intentId));
+}
+
+async function submitOrReconcile(db: Db, job: JobRow, step: { kind: 'submit' | 'reconcile'; intent: IntentRow; quote?: Awaited<ReturnType<typeof latestQuote>> }, venue: ExecutionVenue, now: Date, hooks: SubmitHooks): Promise<SubmitSummary> {
+  const intent = step.intent;
   let sim: SimResult | null = null;
   let reconciled = false;
   if (step.kind === 'reconcile') {
@@ -594,7 +644,7 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
   }
   if (!sim) {
     const [inst] = await db.select().from(instruments).where(eq(instruments.id, intent.instrumentId));
-    const q = step.kind === 'submit' ? step.quote : await latestQuote(db, intent.instrumentId, now);
+    const q = step.kind === 'submit' && step.quote ? step.quote : await latestQuote(db, intent.instrumentId, now);
     if (!q) throw new Error('No quote available for submission.');
     sim = await venue.placeOpeningOrderWithStop({
       paperAccountId: intent.paperAccountId,
@@ -611,5 +661,5 @@ export async function processPaperSubmit(db: Db, job: JobRow, now: Date, hooks: 
     });
     if (sim.status === 'FILLED') await hooks.afterSimulatorFill?.();
   }
-  return record(db, job, intent, sim, now, reconciled, venue!);
+  return record(db, job, intent, sim, now, reconciled, venue);
 }

@@ -17,6 +17,7 @@ import { BitunixPrivateError, type BitunixRequester } from './bitunixPrivate';
 import type { BitunixPrivateEvent } from './bitunixPrivateWs';
 import { applyExchangeBalance, type ConnectionRow } from './liveMode';
 import { linkBitunixPositions, type BitunixPositionLink } from './bitunixPositionSync';
+import { noteBitunixOrderPush, reconcileBitunixIntents, type IntentReconcileResult, type ReconcileOptions } from './bitunixIntents';
 
 /**
  * Bitunix account reconciliation (Step 2, read-only). Mirrors the investor's Bitunix MAIN account
@@ -79,6 +80,8 @@ export interface BitunixSyncResult {
   excludedSubAccountRows: number;
   /** TrendPilot Live positions reconciled against the mirror (Step 4). */
   links?: BitunixPositionLink[];
+  /** Unresolved TrendPilot entries reconciled from Bitunix evidence in this run. */
+  intents?: IntentReconcileResult[];
 }
 
 /* ───────────────────────── Event log ───────────────────────── */
@@ -517,7 +520,12 @@ export async function applyBitunixEvent(db: Db, conn: ConnectionRow, e: BitunixP
         businessTimeMs: t,
         detail: { event: e.event, status: e.status, type: e.type, qty: e.qty, dealAmount: e.dealAmount, averagePrice: e.averagePrice, fee: e.fee, clientId: e.clientId }
       });
-      return { applied: fresh, needsSync: fresh && (e.status === 'FILLED' || e.status === 'PART_FILLED' || e.status === 'PART_FILLED_CANCELED') };
+      // A push for one of TrendPilot's own orders (connection owner + clientId): keep Bitunix's order
+      // ID with the intent. The intent itself is settled only by the REST reconciliation the push
+      // queues (one path for pushes, lost responses and missed pushes), never from the push alone.
+      const own = await noteBitunixOrderPush(db, conn, e, new Date());
+      const terminal = e.status === 'FILLED' || e.status === 'CANCELED' || e.status === 'PART_FILLED_CANCELED';
+      return { applied: fresh || !!own, needsSync: (fresh && (e.status === 'FILLED' || e.status === 'PART_FILLED' || e.status === 'PART_FILLED_CANCELED')) || (!!own?.unresolved && terminal) };
     }
     case 'balance': {
       if (e.coin !== 'USDT') return { applied: false, needsSync: false };
@@ -583,7 +591,7 @@ const errorText = (e: unknown) => (e instanceof BitunixPrivateError ? `${e.kind}
  * pending orders and TP/SL; pending closes confirmed against history; fills and orders since the
  * last window; triggered TP/SL execution checks. One run per connection at a time (lease).
  */
-export async function syncBitunixConnection(db: Db, connectionId: string, r: BitunixRequester, opts: { now?: () => Date } = {}): Promise<BitunixSyncResult> {
+export async function syncBitunixConnection(db: Db, connectionId: string, r: BitunixRequester, opts: { now?: () => Date; intents?: ReconcileOptions } = {}): Promise<BitunixSyncResult> {
   const now = opts.now ?? (() => new Date());
   const [conn] = await db.select().from(exchangeConnections).where(eq(exchangeConnections.id, connectionId));
   if (!conn) return { ...emptyResult({ id: connectionId, ownerId: '' }), error: 'no connection' };
@@ -622,6 +630,9 @@ export async function syncBitunixConnection(db: Db, connectionId: string, r: Bit
     }
     await syncHistory(db, conn, r, snap.takenAt, out);
     await confirmTriggeredTpsl(db, conn, r, out);
+    // Unresolved TrendPilot entries (a DEAD or crashed submit job, a lost response): settled from
+    // Bitunix evidence by their original client ID, before positions are linked.
+    out.intents = await reconcileBitunixIntents(db, conn, r, now(), opts.intents);
     // Exchange-side closes (manual, partial, stop, liquidation) → TrendPilot positions, exactly once.
     const [fresh] = await db.select().from(exchangeConnections).where(eq(exchangeConnections.id, conn.id));
     out.links = await linkBitunixPositions(db, fresh ?? conn, r, at);

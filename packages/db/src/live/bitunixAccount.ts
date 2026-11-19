@@ -30,7 +30,13 @@ export type Side = 'LONG' | 'SHORT';
 export type Origin = 'TRENDPILOT' | 'EXCHANGE';
 
 /** TrendPilot's client order IDs (`tp-<uuid>`, `tpx-<uuid>`); anything else was placed outside TrendPilot. */
-export const originOf = (clientId: string | null | undefined): Origin => (clientId && /^tpx?-/.test(clientId) ? 'TRENDPILOT' : 'EXCHANGE');
+/**
+ * TrendPilot's client IDs: `tp-…` / `tpx-…` (intents created before 13 Nov 2026) and, since then,
+ * 32 lowercase hex characters (newClientOrderId). The order intent table remains the authority:
+ * an order is TrendPilot's own only when an intent of the connection's owner carries that ID.
+ */
+export const isTrendPilotClientId = (clientId: string | null | undefined): boolean => !!clientId && (/^tpx?-/.test(clientId) || /^[0-9a-f]{32}$/.test(clientId));
+export const originOf = (clientId: string | null | undefined): Origin => (isTrendPilotClientId(clientId) ? 'TRENDPILOT' : 'EXCHANGE');
 
 const str = (v: unknown): string | null => (v === null || v === undefined || v === '' ? null : String(v));
 const decOrNull = (v: unknown, field: string, what: string): string | null => {
@@ -295,7 +301,7 @@ export async function readAllPages<T>(
   params: Record<string, QueryValue>,
   listKey: string | null,
   normalize: (row: Record<string, unknown>) => T,
-  o: { pageSize?: number; maxPages?: number } = {}
+  o: { pageSize?: number; maxPages?: number; includeSubAccountRows?: boolean } = {}
 ): Promise<ListRead<T>> {
   const limit = o.pageSize ?? BITUNIX_PAGE_SIZE;
   const maxPages = o.maxPages ?? BITUNIX_MAX_PAGES;
@@ -306,7 +312,7 @@ export async function readAllPages<T>(
     const { rows, total } = rowsOf(await r.get(path, { ...params, skip, limit }), listKey, path);
     for (const row of rows) {
       if (!row || typeof row !== 'object') throw new BitunixPrivateError(`${path}: a row is not an object`, 'PARSE');
-      if (isSubAccountRow(row)) excluded += 1;
+      if (isSubAccountRow(row) && !o.includeSubAccountRows) excluded += 1;
       else items.push(normalize(row));
     }
     if (rows.length < limit || (total !== null && skip + rows.length >= total)) return { items, excludedSubAccountRows: excluded, pages: page + 1 };
@@ -329,8 +335,8 @@ export async function readPendingPositions(r: BitunixRequester, params: { symbol
 
 export const readHistoryPositions = (r: BitunixRequester, params: { positionId?: string; symbol?: string; startTime?: number; endTime?: number }, o?: { maxPages?: number }) =>
   readAllPages(r, '/api/v1/futures/position/get_history_positions', params, 'positionList', normalizeBitunixHistoryPosition, o);
-export const readPendingOrders = (r: BitunixRequester, o?: { maxPages?: number }) => readAllPages(r, '/api/v1/futures/trade/get_pending_orders', {}, 'orderList', normalizeBitunixOrder, o);
-export const readHistoryOrders = (r: BitunixRequester, params: { startTime?: number; endTime?: number; symbol?: string }, o?: { maxPages?: number }) =>
+export const readPendingOrders = (r: BitunixRequester, o?: { maxPages?: number; includeSubAccountRows?: boolean }) => readAllPages(r, '/api/v1/futures/trade/get_pending_orders', {}, 'orderList', normalizeBitunixOrder, o);
+export const readHistoryOrders = (r: BitunixRequester, params: { startTime?: number; endTime?: number; symbol?: string }, o?: { maxPages?: number; includeSubAccountRows?: boolean }) =>
   readAllPages(r, '/api/v1/futures/trade/get_history_orders', params, 'orderList', normalizeBitunixOrder, o);
 /**
  * Trade history, each trade once: pages are offset-based, so a trade arriving during the read shifts

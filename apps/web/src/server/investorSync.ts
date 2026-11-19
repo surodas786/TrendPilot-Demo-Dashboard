@@ -46,6 +46,13 @@ export function bitunixLines(r: BitunixSyncResult): string[] {
   if (r.reduced) out.push(`${r.reduced} position(s) reduced on Bitunix`);
   if (r.increased) out.push(`${r.increased} position(s) increased on Bitunix`);
   if (r.opened) out.push(`${r.opened} position(s) on Bitunix not opened by TrendPilot`);
+  // Unresolved TrendPilot orders reconciled in this run: what Bitunix showed for each.
+  for (const i of r.intents ?? []) {
+    if (i.result === 'FILLED') out.push(`Order ${i.clientOrderId}: filled on Bitunix (order ${i.exchangeOrderId}) — position recorded`);
+    else if (i.result === 'REJECTED') out.push(`Order ${i.clientOrderId}: not filled on Bitunix — reservation released`);
+    else if (i.result === 'NOT_AT_VENUE') out.push(`Order ${i.clientOrderId}: Bitunix never accepted it — reservation released`);
+    else if (i.result === 'PENDING') out.push(`Order ${i.clientOrderId}: still unresolved — ${i.detail}`);
+  }
   return out;
 }
 

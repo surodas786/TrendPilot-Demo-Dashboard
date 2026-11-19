@@ -696,6 +696,12 @@ export const orderIntents = pgTable(
      */
     venueRequest: jsonb('venue_request'),
     venueResponse: jsonb('venue_response'),
+    /** The exchange's own order ID once the exchange reports it (REST lookup or private order push). */
+    exchangeOrderId: text('exchange_order_id'),
+    /** Reconciliation outside the submit job (sync, private order push, ops recovery). */
+    reconcileAttempts: integer('reconcile_attempts').notNull().default(0),
+    lastReconcileAt: timestamp('last_reconcile_at', { withTimezone: true }),
+    lastReconcileNote: text('last_reconcile_note'),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     createdAt: createdAt(),

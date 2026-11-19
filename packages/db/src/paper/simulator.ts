@@ -48,8 +48,10 @@ export type SimResult =
       stop: { orderId: string; clientOrderId: string; triggerPrice: string; basis: string; contracts: string; reduceOnly: boolean };
       /** Venue position the fill belongs to, when the venue reports it (Bitunix positionId). */
       positionRef?: string | null;
+      /** Sanitized venue request/response of the submission (Live venues). */
+      diagnostics?: VenueDiagnostics;
     }
-  | { status: 'REJECTED'; orderId: string; clientOrderId: string; reason: string };
+  | { status: 'REJECTED'; orderId: string; clientOrderId: string; reason: string; diagnostics?: VenueDiagnostics };
 
 const stopClientId = (clientOrderId: string) => `${clientOrderId}:sl`;
 
