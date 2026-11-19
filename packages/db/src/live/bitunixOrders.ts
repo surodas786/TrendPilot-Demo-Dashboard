@@ -395,8 +395,12 @@ export function bitunixVenue(o: BitunixVenueOptions): ExecutionVenue & { reconci
       const ord = await getOrder(clientOrderId);
       if (!ord) return null;
       if (!FINAL.has(ord.status)) throw new UncertainSubmissionError(clientOrderId, `order still ${ord.status}`);
-      // An opening order: BUY opened the Long leg, SELL the Short leg.
-      const side = ord.side === 'SELL' ? 'SHORT' : 'LONG';
+      // Only an OPENING order maps its trade direction to a leg (Hedge: BUY+OPEN = Long, SELL+OPEN =
+      // Short). A reduce-only order with this clientId closes a leg instead: never booked as an entry.
+      if (ord.reduceOnly === true) throw new UncertainSubmissionError(clientOrderId, `order ${ord.orderId} is reduce-only (a close), not the opening order`);
+      const dir = ord.side?.toUpperCase();
+      if (dir !== 'BUY' && dir !== 'SELL') throw new UncertainSubmissionError(clientOrderId, `order ${ord.orderId} has no BUY/SELL side (${JSON.stringify(ord.side)})`);
+      const side = dir === 'SELL' ? 'SHORT' : 'LONG';
       const detail = await r.get<Record<string, unknown>>('/api/v1/futures/trade/get_order_detail', { clientId: clientOrderId });
       const sl = detail && typeof detail === 'object' ? { price: String(detail.slPrice ?? '0'), basis: basisOf(detail.slStopType as string) } : { price: '0', basis: 'LAST' };
       return openResult(c.symbol, ord, clientOrderId, side, sl);

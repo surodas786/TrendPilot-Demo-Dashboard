@@ -14,7 +14,7 @@ import {
   type FundingStatus
 } from '@trendpilot/domain';
 import type { Executor } from '../client';
-import { fills, instruments, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions } from '../schema';
+import { exchangePositions, fills, instruments, ledgerEntries, orderIntents, paperAccounts, paperFunding, positionExits, positions } from '../schema';
 import { latestQuote } from './market';
 import { getMyPaperAccount, listMyPositions, type PositionDto } from './readModels';
 
@@ -54,6 +54,11 @@ export interface HoldingDto extends PositionDto {
   /** Funding booked to this position so far (sum) and how many settlements. */
   fundingUsdt: string;
   fundingSettlements: number;
+  /**
+   * LIVE Bitunix: the exchange leg this position manages, as Bitunix last reported it (the position
+   * mirror, by exchange positionId). Null when unlinked or not a Bitunix Live position.
+   */
+  venueLeg: { positionId: string; qty: string; avgOpenPrice: string | null; marginUsdt: string | null; liqPrice: string | null; leverage: number | null; marginMode: string | null; origin: string; reportedAt: string | null } | null;
 }
 
 async function priceFor(db: Executor, instrumentId: string, now: Date): Promise<HoldingPrice | null> {
@@ -93,6 +98,13 @@ export async function listMyHoldings(db: Executor, ownerId: string, now: Date, m
     .from(paperFunding)
     .where(and(eq(paperFunding.ownerId, ownerId), inArray(paperFunding.positionId, ids)))
     .groupBy(paperFunding.positionId);
+  const refs = open.filter((p) => p.mode === 'LIVE' && p.exchange === 'BITUNIX' && p.venueSync?.positionRef).map((p) => p.venueSync!.positionRef!);
+  const legs = refs.length
+    ? await db
+        .select()
+        .from(exchangePositions)
+        .where(and(eq(exchangePositions.ownerId, ownerId), eq(exchangePositions.exchange, 'BITUNIX'), inArray(exchangePositions.exchangePositionId, refs)))
+    : [];
   const prices = new Map<string, HoldingPrice | null>();
   const out: HoldingDto[] = [];
   for (const p of open) {
@@ -115,7 +127,13 @@ export async function listMyHoldings(db: Executor, ownerId: string, now: Date, m
             ? { price: p.liquidationEstimate, label: 'Estimated (isolated margin, paper simulator)' }
             : null,
       fundingUsdt: p.mode === 'LIVE' ? (p.venueSync?.fundingUsdt ?? '0') : f ? s(f.total) : '0',
-      fundingSettlements: p.mode === 'LIVE' ? 0 : (f?.n ?? 0)
+      fundingSettlements: p.mode === 'LIVE' ? 0 : (f?.n ?? 0),
+      venueLeg: (() => {
+        const l = p.mode === 'LIVE' && p.exchange === 'BITUNIX' ? legs.find((x) => x.exchangePositionId === p.venueSync?.positionRef && x.status !== 'DETACHED') : undefined;
+        return l
+          ? { positionId: l.exchangePositionId, qty: D(l.qty).toFixed(), avgOpenPrice: l.avgOpenPrice === null ? null : D(l.avgOpenPrice).toFixed(), marginUsdt: l.margin === null ? null : D(l.margin).toFixed(), liqPrice: l.liqPrice === null ? null : D(l.liqPrice).toFixed(), leverage: l.leverage, marginMode: l.marginMode, origin: l.origin, reportedAt: l.exchangeUpdatedAt?.toISOString() ?? null }
+          : null;
+      })()
     });
   }
   return out;

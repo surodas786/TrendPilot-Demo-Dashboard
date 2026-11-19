@@ -150,6 +150,8 @@ export async function linkBitunixPositions(db: Db, conn: ConnectionRow, r: Bitun
         updatedAt: sql`now()`
       })
       .where(eq(positions.id, p.id));
+    // The leg is managed by this TrendPilot position (linked from the opening order's fills by its clientId).
+    if (mirror.origin !== 'TRENDPILOT') await db.update(exchangePositions).set({ origin: 'TRENDPILOT', updatedAt: sql`now()` }).where(eq(exchangePositions.id, mirror.id));
     // Bitunix's size for this leg: CLOSED only once history confirmed it; a pending close check keeps the last size.
     const venueQty = mirror.status === 'CLOSED' ? D(0) : D(mirror.qty);
     let platformQty = D(p.contracts);
