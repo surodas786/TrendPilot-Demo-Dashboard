@@ -5,7 +5,11 @@ import { AlertTriangleIcon, CheckCircle2Icon, FlaskConicalIcon } from 'lucide-re
 import { exchangeLabel, type OrderPreview } from '@trendpilot/domain';
 import { StatusPill } from '../ui/StatusPill';
 
-export type PreviewResult = OrderPreview & { instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null; exchange?: string; quoteCurrency?: string } };
+export type PreviewResult = OrderPreview & {
+  instrument: { symbol: string; exchangeSymbol: string; fixtureLabel: string | null; exchange?: string; quoteCurrency?: string };
+  exitPlan?: { source: 'CUSTOM' | 'ADMIN'; adminVersion: number | null };
+  partialExitProtection?: { verified: boolean; limitation: string | null };
+};
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -67,11 +71,25 @@ export function PreviewPanel({ preview }: { preview: PreviewResult }) {
               ))}
               {s.trailing && (
                 <Row
-                  label={`Trailing take profit (${s.trailing.managesPct}%)`}
-                  value={<span data-testid={`preview-${s.side}-trailing`}>{`${s.trailing.contracts} contracts · activates at ${s.trailing.activationPrice ?? '—'} · trail ${s.trailing.distancePct}%`}</span>}
+                  label={`Trailing take profit pool (${s.trailing.managesPct}%)`}
+                  value={
+                    <span data-testid={`preview-${s.side}-trailing`}>{`${s.trailing.contracts} contracts · activates at ${s.trailing.activationPrice ?? '—'} · retracement ${s.trailing.distancePct}% · first trigger closes ${s.trailing.firstCloseContracts}${s.trailing.closePct ? ` (${s.trailing.closePct}%)` : ''}`}</span>
+                  }
                 />
               )}
+              {s.trailing?.targetClose && (
+                <Row label="Trailing target close (once)" value={<span data-testid={`preview-${s.side}-target-close`}>{`${s.trailing.targetClose.price} · ${s.trailing.targetClose.contracts} contracts (${s.trailing.targetClose.closePct}%)`}</span>} />
+              )}
             </dl>
+            {s.exitWarnings.length > 0 && (
+              <ul className="mt-2 space-y-1 text-warn" data-testid={`preview-${s.side}-exit-warnings`}>
+                {s.exitWarnings.map((w, i) => (
+                  <li key={i}>
+                    <span className="font-semibold">{w.exit}</span>: {w.message} It is reported and not sent at runtime (never turned into a full close).
+                  </li>
+                ))}
+              </ul>
+            )}
             {s.reasons.length > 0 && (
               <ul className="mt-2 space-y-1 text-loss">
                 {s.reasons.map((r, i) => (
@@ -84,6 +102,12 @@ export function PreviewPanel({ preview }: { preview: PreviewResult }) {
           </div>
         ))}
       </div>
+      {preview.exitPlan?.source === 'ADMIN' && <p className="text-xs text-muted">Exits from the admin Common Exit Definition version {preview.exitPlan.adminVersion}.</p>}
+      {preview.partialExitProtection && !preview.partialExitProtection.verified && (
+        <p className="text-xs text-warn" data-testid="preview-protection">
+          Partial exits not verified as protected: {preview.partialExitProtection.limitation}
+        </p>
+      )}
       <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-subtle">
         {preview.notes.map((n) => (
           <li key={n}>{n}</li>

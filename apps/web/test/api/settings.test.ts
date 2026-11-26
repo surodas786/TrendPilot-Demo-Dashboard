@@ -99,7 +99,8 @@ describe('optimistic concurrency', () => {
     const current = (await call(block.GET, { path: `/v1/me/order-blocks/${blk.id}`, cookie: a, params: { id: blk.id } })).body;
     const r = await patch(blk.id, current.revision, { trailing: { enabled: true, activationPct: null, distancePct: null, basis: 'MARK' } });
     expect(r.status).toBe(400);
-    expect(r.body.issues.map((i: any) => i.path)).toContain('trailing.distancePct');
+    // A legacy shared `trailing` is checked per side after the merge.
+    expect(r.body.issues.map((i: any) => i.path)).toContain('trailingLong.distancePct');
   });
 });
 

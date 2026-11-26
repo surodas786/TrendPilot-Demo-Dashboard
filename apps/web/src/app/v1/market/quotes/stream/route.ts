@@ -47,6 +47,8 @@ export const GET = route(async (req) => {
 
       const unsubscribe = quoteHub().subscribe((e: QuoteHubEvent) => {
         if (e.kind === 'resync') return void snapshot().catch(() => undefined);
+        // An admin published a Common Exit Definition: open Trade Settings screens refresh.
+        if (e.kind === 'exitDefinition') return void send('exit-definition', { version: e.version });
         if (!allowed.has(e.note.instrumentId)) return;
         send('quote', { ...e.note, sourceLabel: quoteSourceLabel(e.note.source, e.note.channel), pushedAt: new Date().toISOString() });
       });

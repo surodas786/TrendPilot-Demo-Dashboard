@@ -47,7 +47,8 @@ describe('Long and Short Take Profit on the same token', () => {
     expect(t!.triggerRule).toBe('ARM_PULLBACK');
     // 40 % to Trailing Take Profit (rounded down to the step), Take Profit the exact rest (60 %).
     const trailing = D(long.initialContracts).times('0.4').floor();
-    expect(n(long.trailingPlannedContracts)).toBe(trailing.toFixed());
+    // Per side: Take Profit manages 60 %; trailing closes 100 % of its pool (the other 40 %, rounded down).
+    expect([long.trailingPlannedContracts, n(long.trailingClosePct)]).toEqual([null, '100']);
     expect(n(t!.plannedContracts)).toBe(D(long.initialContracts).minus(trailing).toFixed());
     expect(long.protectionStatus).toBe('PROTECTED');
     expect(n(long.stopContracts)).toBe(n(long.contracts));
@@ -120,7 +121,7 @@ describe('Long and Short Take Profit on the same token', () => {
     const r = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: b!.revision, body: { takeProfitShort: { mode: 'OFF', levels: [] } } });
     expect(r.status).toBe(200);
     expect(r.body.takeProfitShort).toEqual({ mode: 'OFF', levels: [] });
-    expect(r.body.takeProfitLong).toEqual(LONG_FIXED);
+    expect(r.body.takeProfitLong).toMatchObject(LONG_FIXED);
     const after = (await openPositionOf(A))!;
     expect(snapshotOf(after).block.takeProfit.mode).toBe('SPLIT');
     expect((await targetsOf(short.id)).map((t) => [t.levelId, n(t.triggerPrice), n(t.plannedContracts)])).toEqual(before.map((t) => [t.levelId, n(t.triggerPrice), n(t.plannedContracts)]));
@@ -136,7 +137,8 @@ describe('Off on one side', () => {
     const long = (await openPositionOf(A))!;
     expect(await targetsOf(long.id)).toEqual([]);
     expect(snapshotOf(long)).toMatchObject({ takeProfitSide: 'LONG', block: { takeProfit: { mode: 'OFF' } } });
-    expect(n(long.trailingPlannedContracts)).toBe(D(long.initialContracts).times('0.4').floor().toFixed());
+    // Take Profit off on this side: trailing closes 40 % of the remaining quantity on each trigger.
+    expect(n(long.trailingClosePct)).toBe('40');
   });
 });
 
@@ -145,7 +147,7 @@ describe('Settings records', () => {
     await openFromAlert({ a: null, b: null });
     const r = await call(blocks.POST, { method: 'POST', path: '/x', cookie: cookies.a, body: blockBody({ weekdays: ALL_DAYS }) });
     expect(r.status).toBe(201);
-    expect(r.body.takeProfitLong).toEqual({ mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] });
+    expect(r.body.takeProfitLong).toEqual({ mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }], allocationPct: '100' });
     expect(r.body.takeProfitShort).toEqual(r.body.takeProfitLong);
     expect(r.body.takeProfit).toBeUndefined();
   });
@@ -157,9 +159,9 @@ describe('Settings records', () => {
     expect(r.status).toBe(200);
     r = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: r.body.revision, body: { direction: 'LONG_ONLY' } });
     expect(r.status).toBe(200);
-    expect(r.body.takeProfitShort).toEqual(SHORT_SPLIT);
+    expect(r.body.takeProfitShort).toMatchObject(SHORT_SPLIT);
     r = await call(block.PATCH, { method: 'PATCH', path: '/x', cookie: cookies.a, params: { id: b!.id }, ifMatch: r.body.revision, body: { direction: 'BOTH' } });
-    expect(r.body).toMatchObject({ takeProfitLong: { mode: 'FIXED' }, takeProfitShort: SHORT_SPLIT });
+    expect(r.body).toMatchObject({ takeProfitLong: { mode: 'FIXED' }, takeProfitShort: { ...SHORT_SPLIT } });
     // An invalid Short split is reported under its own path, inline.
     const bad = await call(block.PATCH, {
       method: 'PATCH',

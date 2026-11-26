@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRightIcon, CalculatorIcon, CopyIcon, InfoIcon, LockIcon, PencilIcon, RotateCcwIcon } from 'lucide-react';
+import { ArrowLeftRightIcon, CalculatorIcon, CopyIcon, InfoIcon, LockIcon, PencilIcon, RotateCcwIcon, ZapIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Decimal,
@@ -19,6 +19,7 @@ import {
   WEEKDAYS,
   sidesOf,
   type BlockMode,
+  type CommonExitDefinition,
   type Direction,
   type MarginMode,
   type OrderBlockDto,
@@ -34,14 +35,14 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { DecimalField } from '../ui/DecimalField';
 import { FilterSelect } from '../ui/FilterSelect';
 import { SegmentedControl } from '../ui/SegmentedControl';
-import { Switch } from '../ui/Switch';
 import { TextField } from '../ui/TextField';
 import { MultipleEntriesSection } from './MultipleEntriesSection';
 import { PreviewPanel, type PreviewResult } from './PreviewPanel';
 import { RiskSection } from './RiskSection';
-import { TakeProfitEditor } from './TakeProfitEditor';
+import { ExitPlanEditor } from './ExitPlanEditor';
 import {
   BASIS_LABELS,
+  exitDraftFrom,
   defaultLeverage,
   DIRECTION_LABELS,
   draftFromBlock,
@@ -55,7 +56,6 @@ import {
   exchangeName,
   supportsMode,
   settingsPayload,
-  TP_SIDES,
   validateDraft,
   versionChoices,
   versionLabel,
@@ -95,10 +95,14 @@ interface Props {
   onEditBlock?: (id: string) => void;
   /** Start a new block in `mode` from this block's saved settings. */
   onCopyToMode?: (block: OrderBlockDto, mode: BlockMode) => void;
+  /** The latest published admin Common Exit Definition (null = none published). */
+  adminExit?: { version: number; plan: CommonExitDefinition; publishedAt: string } | null;
+  /** Per exchange and mode: why partial exits are not verified as protected (null = verified). */
+  protectionLimitations?: Record<string, { PAPER: string | null; LIVE: string | null }>;
 }
 
 /** Adapted from the MagicPatterns TokenBlockEditor; persists through /v1/me/order-blocks. */
-export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [], copyFrom, timezone, onDone, onEditBlock, onCopyToMode }: Props) {
+export function OrderBlockEditor({ existing, instruments, versions, takenByMode, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [], copyFrom, timezone, onDone, onEditBlock, onCopyToMode, adminExit = null, protectionLimitations = {} }: Props) {
   /** The same rule as the server: Live needs a verified connection to the pair's exchange. */
   // Live entries can be CONFIGURED with any verified exchange connection (a Lighter one included);
   // activation is decided server-side.
@@ -106,10 +110,12 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
   let liveReason = liveUnavailableReason(liveConnectionStatus);
   const liveConnected = anyLive;
   const savedMode = existing ? (existing.mode as BlockMode) : undefined;
-  const [mode, setMode] = useState<BlockMode>(() => savedMode ?? copyFrom?.mode ?? (takenByMode.PAPER.length >= instruments.length && liveConnected ? 'LIVE' : 'PAPER'));
   const availableFor = (m: BlockMode) => instruments.filter((i) => i.status === 'PUBLISHED' && supportsMode(i, m) && !takenByMode[m].includes(i.id));
-  /** Published pairs that only Live can trade (Bitunix): named under the pair list in Paper. */
-  const liveOnlyPairs = instruments.filter((i) => i.status === 'PUBLISHED' && !supportsMode(i, 'PAPER'));
+  // A new entry starts in Paper when a Paper pair is free; otherwise in Live when Live is usable and
+  // has a free pair (e.g. an investor whose only approved pair is Live-only Bitunix XAUUSDT).
+  const [mode, setMode] = useState<BlockMode>(() => savedMode ?? copyFrom?.mode ?? (availableFor('PAPER').length === 0 && liveConnected && availableFor('LIVE').length > 0 ? 'LIVE' : 'PAPER'));
+  /** Free published pairs that only Live can trade (Bitunix): offered with "Switch to Live" in Paper. */
+  const liveOnlyPairs = instruments.filter((i) => i.status === 'PUBLISHED' && !supportsMode(i, 'PAPER') && !takenByMode.LIVE.includes(i.id));
   const available = availableFor(mode);
   const [draft, setDraft] = useState<Draft>(() =>
     existing ? draftFromBlock(existing) : copyFrom ? draftFromBlock(copyFrom.block) : newDraft(available[0], available[0] ? versionChoices(versions, available[0].id)[0] : undefined)
@@ -182,6 +188,25 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
     }));
   };
 
+  /**
+   * Trading mode first: switching it refreshes the pairs that mode can trade, keeps the pair (and
+   * its strategy) when it is still free in the new mode, and otherwise clears the incompatible
+   * selection by moving to the first free pair (strategy re-picked for it), or none.
+   */
+  const changeMode = (m: BlockMode) => {
+    setMode(m);
+    setServerIssues({});
+    setFormError(null);
+    if (existing || copyFrom) return;
+    const free = availableFor(m);
+    if (free.some((i) => i.id === draft.instrumentId)) return;
+    if (free[0]) changePair(free[0].id);
+    else {
+      setPreview(null);
+      setDraft((d) => ({ ...d, instrumentId: '', strategyVersionId: '' }));
+    }
+  };
+
   const changeVersion = (id: string) => {
     const v = versions.find((x) => x.id === id);
     setDraft((d) => ({ ...d, strategyVersionId: id, direction: v && !directionPermitted(d.direction, v.permittedDirections) ? v.permittedDirections : d.direction }));
@@ -208,8 +233,6 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
 
   const cost = isDecimalString(draft.orderCostUsdt.trim()) ? new Decimal(draft.orderCostUsdt.trim()) : null;
   const notional = cost && cost.gt(0) && draft.leverage ? cost.times(draft.leverage) : null;
-  /** Take Profit is on for at least one side this direction trades. */
-  const anyTpOn = sidesOf(draft.direction).some((side) => draft.tp[side].mode !== 'OFF');
 
   const fail = (f: ApiFailure) => {
     if (f.code === 'MODE_CHANGE_BLOCKED' && f.details?.blocker && savedMode && otherMode) {
@@ -287,70 +310,10 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
               New {MODE_LABELS[copyFrom.mode]} entry with the saved settings of your {MODE_LABELS[copyFrom.block.mode as BlockMode]} entry. That entry, its positions and orders stay as they are.
             </p>
           )}
-          <FilterSelect label="Trading pair" value={draft.instrumentId} onChange={changePair} options={pairOptions.length ? pairOptions : [{ value: '', label: 'No pairs available' }]} disabled={Boolean(fixedPair)} />
-          {err('instrumentId') && <p className="-mt-2 text-xs text-loss">{err('instrumentId')}</p>}
-          {!fixedPair && mode === 'PAPER' && liveOnlyPairs.length > 0 && (
-            <p className="-mt-2 text-xs text-subtle" data-testid="live-only-pairs">
-              Live only (Paper simulates MEXC contracts): {liveOnlyPairs.map((i) => pairOptionLabel(i)).join(', ')}. Choose Live under Trading mode to select {liveOnlyPairs.length === 1 ? 'it' : 'them'}.
-            </p>
-          )}
-          {instrument && (
-            <p className="-mt-2 text-xs text-subtle">
-              Exchange: {exchangeName(instrument.exchange)} {instrument.exchange === 'LIGHTER' ? `${instrument.quote} perpetual` : 'Futures'} (derived from the pair) · {instrument.exchange === 'LIGHTER' ? 'native symbol' : 'execution symbol'}{' '}
-              <span className="font-mono" data-testid="execution-symbol">
-                {instrument.exchangeSymbol}
-              </span>
-              {instrument.marketId !== null ? <span data-testid="market-id">{` · market ID ${instrument.marketId}`}</span> : null}
-              {instrument.exchange !== 'MEXC' ? ' · quantity in the base coin' : ''}
-              {instrument.exchange !== 'MEXC' ? ` · settles in ${instrument.quote}` : ''}
-              {instrument.isFixture ? ' · fixture metadata, not verified exchange limits' : ''}
-            </p>
-          )}
-          {instrument && instrument.signalSources !== undefined && (
-            <p className={`-mt-2 text-xs ${instrument.signalSources.length ? 'text-subtle' : 'text-warn'}`} data-testid="signal-sources">
-              {instrument.signalSources.length ? `TradingView signals: ${instrument.signalSources.join(', ')}` : 'No TradingView route delivers signals to this contract yet: entries will not open until an administrator routes one.'}
-            </p>
-          )}
-          <FilterSelect
-            label="Strategy"
-            value={draft.strategyVersionId}
-            onChange={changeVersion}
-            options={strategyOptions.length ? strategyOptions.map((v) => ({ value: v.id, label: versionLabel(v) })) : [{ value: '', label: 'No strategy is approved for this pair' }]}
-          />
-          {instrument && strategyOptions.length === 0 && (
-            <p className="-mt-2 text-xs text-warn" data-testid="no-strategy">
-              No published strategy version includes {pairOptionLabel(instrument)} yet. An administrator has to publish a strategy version with this pair (Admin → Strategies) before it can be saved.
-            </p>
-          )}
-          {err('strategyVersionId') && <p className="-mt-2 text-xs text-loss">{err('strategyVersionId')}</p>}
-          {newerForPinned && draft.strategyVersionId === existing?.strategyVersionId && (
-            <p className="-mt-2 flex items-start gap-1.5 text-xs text-muted" data-testid="pinned-notice">
-              <InfoIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-              This block stays pinned to v{version?.version}. Version {newerForPinned.version} is published; select it above to move this block.
-            </p>
-          )}
-          {version && (
-            <p className="rounded-lg bg-inset px-3 py-2 text-xs text-muted">
-              {version.timeframe} Supertrend (ATR {version.atrLength}, factor {version.atrFactor}) · EMA filter {version.emaFilter === 'OFF' ? 'off' : '200'} · Opposite signal: {OPPOSITE_LABELS[version.oppositePolicy]} · Signal max age {version.signalMaxAgeSeconds}s. Published by the administrator; a version never changes after publishing.
-            </p>
-          )}
-          <SegmentedControl<Direction>
-            label="Direction"
-            value={draft.direction}
-            onChange={(v) => update({ direction: v })}
-            options={(['LONG_ONLY', 'SHORT_ONLY', 'BOTH'] as const).map((d) => ({ value: d, label: DIRECTION_LABELS[d], disabled: version ? !directionPermitted(d, version.permittedDirections) : false }))}
-            error={err('direction')}
-          />
           <SegmentedControl<'PAPER' | 'LIVE'>
             label="Trading mode"
             value={mode}
-            onChange={(m) => {
-              setMode(m);
-              if (existing || copyFrom) return;
-              // One block per pair and mode: move to a pair that is still free in the new mode.
-              const free = availableFor(m);
-              if (!free.some((i) => i.id === draft.instrumentId) && free[0]) changePair(free[0].id);
-            }}
+            onChange={changeMode}
             options={
               existing
                 ? (['PAPER', 'LIVE'] as const).map((m) => ({ value: m, label: MODE_LABELS[m], disabled: m !== savedMode && !modeStatus?.allowed }))
@@ -377,7 +340,8 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
           />
           {!existing && !copyFrom && liveReason && (
             <p className="-mt-2 text-xs text-warn" data-testid="mode-unavailable">
-              Live unavailable: {liveReason}
+              {liveConnected && instrument ? `Live for ${pairOptionLabel(instrument)} unavailable (other pairs can still trade Live): ` : 'Live unavailable: '}
+              {liveReason}
             </p>
           )}
           {existing && otherMode && !modeStatus && (
@@ -416,6 +380,100 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
               </span>
             </p>
           )}
+          <FilterSelect label="Trading pair" value={draft.instrumentId} onChange={changePair} options={pairOptions.length ? pairOptions : [{ value: '', label: 'No pairs available' }]} disabled={Boolean(fixedPair)} />
+          {!fixedPair && pairOptions.length === 0 && (
+            <div className="-mt-2 space-y-2 rounded-lg border border-warn/40 bg-warn/5 px-3 py-2" data-testid="no-pairs-reason">
+              <p className="text-xs text-ink">
+                {mode === 'PAPER'
+                  ? liveOnlyPairs.length
+                    ? `No pair can be traded in Paper: ${liveOnlyPairs.map((i) => pairOptionLabel(i)).join(', ')} ${liveOnlyPairs.length === 1 ? 'is' : 'are'} Live only (Paper simulates MEXC and Lighter contracts).`
+                    : instruments.some((i) => i.status === 'PUBLISHED' && supportsMode(i, 'PAPER'))
+                      ? 'Every Paper pair already has a Paper entry (one entry per pair and mode). Edit that entry instead.'
+                      : 'No pair is published for Paper trading yet.'
+                  : !liveConnected
+                    ? `Live needs a verified exchange connection first. ${liveReason ?? ''}`
+                    : instruments.some((i) => i.status === 'PUBLISHED')
+                      ? 'Every published pair already has a Live entry (one entry per pair and mode). Edit that entry instead.'
+                      : 'No pair is published yet.'}
+              </p>
+              {mode === 'PAPER' && liveOnlyPairs.length > 0 && liveConnected && (
+                <Button size="sm" icon={ZapIcon} onClick={() => changeMode('LIVE')} data-testid="switch-to-live">
+                  Switch to Live
+                </Button>
+              )}
+              {mode === 'PAPER' && liveOnlyPairs.length > 0 && !liveConnected && (
+                <a href="/live-trading" className="inline-block text-xs font-semibold text-accent hover:underline">
+                  Connect and verify your exchange on Live Trading to use Live
+                </a>
+              )}
+            </div>
+          )}
+
+          {err('instrumentId') && <p className="-mt-2 text-xs text-loss">{err('instrumentId')}</p>}
+          {!fixedPair && mode === 'PAPER' && liveOnlyPairs.length > 0 && pairOptions.length > 0 && (
+            <p className="-mt-2 text-xs text-subtle" data-testid="live-only-pairs">
+              Live only (Paper simulates MEXC and Lighter contracts): {liveOnlyPairs.map((i) => pairOptionLabel(i)).join(', ')}.{' '}
+              {liveConnected ? (
+                <button type="button" className="font-semibold text-accent hover:underline" onClick={() => changeMode('LIVE')} data-testid="switch-to-live-inline">
+                  Switch to Live
+                </button>
+              ) : (
+                'Connect and verify the exchange on Live Trading to select it.'
+              )}
+            </p>
+          )}
+          {instrument && (
+            <p className="-mt-2 text-xs text-subtle">
+              Exchange: {exchangeName(instrument.exchange)} {instrument.exchange === 'LIGHTER' ? `${instrument.quote} perpetual` : 'Futures'} (derived from the pair) · {instrument.exchange === 'LIGHTER' ? 'native symbol' : 'execution symbol'}{' '}
+              <span className="font-mono" data-testid="execution-symbol">
+                {instrument.exchangeSymbol}
+              </span>
+              {instrument.marketId !== null ? <span data-testid="market-id">{` · market ID ${instrument.marketId}`}</span> : null}
+              {instrument.exchange !== 'MEXC' ? ' · quantity in the base coin' : ''}
+              {instrument.exchange !== 'MEXC' ? ` · settles in ${instrument.quote}` : ''}
+              {instrument.isFixture ? ' · fixture metadata, not verified exchange limits' : ''}
+            </p>
+          )}
+          {instrument && instrument.signalSources !== undefined && (
+            <p className={`-mt-2 text-xs ${instrument.signalSources.length ? 'text-subtle' : 'text-warn'}`} data-testid="signal-sources">
+              {instrument.signalSources.length ? `TradingView signals: ${instrument.signalSources.join(', ')}` : 'No TradingView route delivers signals to this contract yet: entries will not open until an administrator routes one.'}
+            </p>
+          )}
+          <FilterSelect
+            label="Strategy"
+            value={draft.strategyVersionId}
+            onChange={changeVersion}
+            options={strategyOptions.length ? strategyOptions.map((v) => ({ value: v.id, label: versionLabel(v) })) : [{ value: '', label: instrument ? 'No strategy is approved for this pair' : 'Select a trading pair first' }]}
+          />
+          {!instrument && !fixedPair && (
+            <p className="-mt-2 text-xs text-subtle" data-testid="no-strategy-no-pair">
+              Select a trading pair first: strategies are approved per pair.
+            </p>
+          )}
+          {instrument && strategyOptions.length === 0 && (
+            <p className="-mt-2 text-xs text-warn" data-testid="no-strategy">
+              No published strategy version includes {pairOptionLabel(instrument)} yet. An administrator has to publish a strategy version with this pair (Admin → Strategies) before it can be saved.
+            </p>
+          )}
+          {err('strategyVersionId') && <p className="-mt-2 text-xs text-loss">{err('strategyVersionId')}</p>}
+          {newerForPinned && draft.strategyVersionId === existing?.strategyVersionId && (
+            <p className="-mt-2 flex items-start gap-1.5 text-xs text-muted" data-testid="pinned-notice">
+              <InfoIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              This block stays pinned to v{version?.version}. Version {newerForPinned.version} is published; select it above to move this block.
+            </p>
+          )}
+          {version && (
+            <p className="rounded-lg bg-inset px-3 py-2 text-xs text-muted">
+              {version.timeframe} Supertrend (ATR {version.atrLength}, factor {version.atrFactor}) · EMA filter {version.emaFilter === 'OFF' ? 'off' : '200'} · Opposite signal: {OPPOSITE_LABELS[version.oppositePolicy]} · Signal max age {version.signalMaxAgeSeconds}s. Published by the administrator; a version never changes after publishing.
+            </p>
+          )}
+          <SegmentedControl<Direction>
+            label="Direction"
+            value={draft.direction}
+            onChange={(v) => update({ direction: v })}
+            options={(['LONG_ONLY', 'SHORT_ONLY', 'BOTH'] as const).map((d) => ({ value: d, label: DIRECTION_LABELS[d], disabled: version ? !directionPermitted(d, version.permittedDirections) : false }))}
+            error={err('direction')}
+          />
         </Section>
 
         <Section title="Trading days">
@@ -580,65 +638,47 @@ export function OrderBlockEditor({ existing, instruments, versions, takenByMode,
             trailing={draft.stopType === 'PERCENT' ? pct : <span className="pr-2 text-xs text-subtle">{ccy}</span>}
           />
           <p className="text-xs text-muted" data-testid="tp-sides-note">
-            Take profit is set separately for Long and Short positions. The side of each confirmed entry selects its plan, which is saved with the position (a reversal uses the new side&apos;s plan).
+            Take profit and Trailing take profit are set separately for Long and Short positions. The side of each confirmed entry selects its plan, which is saved with the position (a reversal uses the new side&apos;s plan).
             {draft.direction !== 'BOTH' &&
               ` This pair currently opens ${draft.direction === 'LONG_ONLY' ? 'Long' : 'Short'} positions only; the ${draft.direction === 'LONG_ONLY' ? 'Short' : 'Long'} settings are saved and apply once that side is allowed.`}
           </p>
-          {TP_SIDES.map((side) => (
-            <TakeProfitEditor key={side} side={side} draft={draft} err={err} commit={commit} onChange={updateExits} inactive={!sidesOf(draft.direction).includes(side)} />
-          ))}
-          <div className="space-y-3 rounded-lg border border-line p-3" data-testid="trailing-take-profit">
-            <Switch
-              label="Trailing take profit"
-              description="Locks in profit after a favourable move: it arms only once price has moved by Activate after profit, then closes its quantity at market when price pulls back by Trail distance from the best price since activation."
-              checked={draft.trailingEnabled}
-              onChange={(v) => updateExits({ trailingEnabled: v })}
-            />
-            {!draft.trailingEnabled && anyTpOn && <p className="text-xs text-subtle">Off: the position side&apos;s Take profit manages the whole position.</p>}
-            {draft.trailingEnabled && (
-              <>
-                <DecimalField
-                  label="Position to close (%)"
-                  value={draft.trailingClosePct}
-                  onChange={(v) => updateExits({ trailingClosePct: v })}
-                  onCommit={() => commit('trailing.closePct')}
-                  error={err('trailing.closePct')}
-                  hint={
-                    !anyTpOn
-                      ? 'Required, 0-100% of the confirmed opening quantity. Take profit is off, so the rest stays open under the stop loss and close signals.'
-                      : 'Required, 0-100% of the confirmed opening quantity. The position side\'s Take profit manages the rest (split shares divide that rest): 0% leaves everything to Take profit, 100% gives everything to Trailing take profit.'
-                  }
-                  trailing={pct}
-                />
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <DecimalField
-                    label="Activate after profit (%)"
-                    value={draft.trailingActivationPct}
-                    onChange={(v) => updateExits({ trailingActivationPct: v })}
-                    onCommit={() => commit('trailing.activationPct')}
-                    error={err('trailing.activationPct')}
-                    hint="Required. Long: price rises this much; Short: price falls this much."
-                    trailing={pct}
-                  />
-                  <DecimalField
-                    label="Trail distance (%)"
-                    value={draft.trailingPct}
-                    onChange={(v) => updateExits({ trailingPct: v })}
-                    onCommit={() => commit('trailing.distancePct')}
-                    error={err('trailing.distancePct')}
-                    hint="Required. Pullback from the highest (Long) or lowest (Short) price."
-                    trailing={pct}
-                  />
-                  <FilterSelect label="Trigger basis" value={draft.trailingBasis} onChange={(v) => updateExits({ trailingBasis: v as PriceBasis })} options={(['MARK', 'LAST'] as const).map((b) => ({ value: b, label: BASIS_LABELS[b] }))} />
-                </div>
-                <p className="text-xs text-subtle">
-                  Both percentages are price movement from the confirmed average entry, before fees and leverage. Until it activates it does nothing. The stop loss above
-                  stays in place for the whole position before and after activation.
-                </p>
-                {err('trailing') && <p className="text-xs text-loss">{err('trailing')}</p>}
-              </>
+          <div className="space-y-2 rounded-lg border border-line p-3" data-testid="sync-admin">
+            <label className="flex items-start gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-[var(--color-accent,#4f46e5)]"
+                checked={draft.syncAdminExit}
+                disabled={!adminExit && !draft.syncAdminExit}
+                onChange={(e) => updateExits({ syncAdminExit: e.target.checked })}
+                data-testid="sync-admin-checkbox"
+              />
+              <span>
+                <span className="font-medium">Sync Admin Setting</span>
+                <span className="block text-xs text-subtle">
+                  Checked: Take profit and Trailing take profit follow the administrator&apos;s latest published Common Exit Definition, and later admin changes apply automatically. Unchecked: your own exit plan below applies. Your own values are kept while sync is on and come back when you turn it off.
+                </span>
+              </span>
+            </label>
+            {!adminExit && (
+              <p className="text-xs text-warn" data-testid="sync-admin-unavailable">
+                No Common Exit Definition is published yet, so there is no admin setting to follow. Your own exit plan applies.
+              </p>
+            )}
+            {draft.syncAdminExit && adminExit && (
+              <p className="text-xs text-muted" data-testid="sync-admin-version">
+                Using admin rule version {adminExit.version}, published {new Date(adminExit.publishedAt).toLocaleString()}. The fields below are inherited and read-only. Open positions keep the version they were opened with unless the administrator applies a change to them.
+              </p>
             )}
           </div>
+          <ExitPlanEditor
+            draft={draft.syncAdminExit && adminExit ? exitDraftFrom(adminExit.plan) : draft}
+            err={draft.syncAdminExit && adminExit ? () => undefined : err}
+            commit={commit}
+            onChange={updateExits}
+            readOnly={draft.syncAdminExit && !!adminExit}
+            inactiveSides={(['LONG', 'SHORT'] as const).filter((x) => !sidesOf(draft.direction).includes(x))}
+            protectionLimitation={instrument ? (protectionLimitations[instrument.exchange]?.[mode] ?? null) : null}
+          />
         </Section>
 
         <MultipleEntriesSection draft={draft} errors={errors} showErrors={touched} onChange={update} />

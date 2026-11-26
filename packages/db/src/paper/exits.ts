@@ -3,6 +3,8 @@ import { and, asc, desc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   advanceTarget,
   advanceTrailing,
+  partialCloseContracts,
+  partialExitCheck,
   trailingTakeProfitContracts,
   basisPrice,
   Decimal,
@@ -50,6 +52,12 @@ import { listStopFills, triggerStops, type CloseResult, type VenueQuote } from '
  *   confirmed opening quantity), tracked by confirmed fills.
  * - Take-profit targets of current positions arm when reached (persisted) and close their
  *   allocation on a later pullback through the target; arming alone never closes anything.
+ * - Partial Trailing Take Profit (positions opened from migration 0037): each trigger closes its
+ *   share of the trailing pool (remaining quantity no unfinished target reserves). The quantity is
+ *   fixed and persisted when the trigger fires, before any submission; retries and partial fills
+ *   complete that quantity and never recalculate a new percentage. A completed cycle rearms only
+ *   after a new best price beyond the cycle's extreme. The optional target close inside trailing
+ *   is one-shot per position. The fixed stop keeps covering the remainder (resized after each fill).
  * - Live: a trigger that stays true re-evaluates on every price, so a rejected close must not
  *   become a new order per tick (13 Nov 2026: trailing TP resent with MEXC 2001). A deterministic
  *   rejection halts automatic exits for the position (`exitHaltedAt`); other rejections of the
@@ -67,6 +75,8 @@ type IntentRow = typeof orderIntents.$inferSelect;
 type TargetRow = typeof positionTargets.$inferSelect;
 const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
 const D = (v: Decimal.Value) => new Decimal(v);
+/** Intent `targetLevelId` of the one-shot target close inside Trailing Take Profit (no position_targets row). */
+export const TRAIL_TARGET_ID = 'TRAIL_TARGET';
 
 export type ExitRequestResult =
   | { status: 'REQUESTED'; intentId: string }
@@ -260,13 +270,35 @@ export async function recordExitFill(
 
   // Trailing Take Profit with an explicit allocation advances by the confirmed fill only, capped
   // at its allocation; once all of it is filled it is DONE.
-  let trailingFill: { trailingFilledContracts: string; trailingStatus?: string } | null = null;
-  if (input.reason === 'TRAILING_TAKE_PROFIT' && p.trailingPlannedContracts !== null) {
+  let trailingFill: Partial<typeof positions.$inferInsert> | null = null;
+  if (input.reason === 'TRAILING_TAKE_PROFIT' && p.trailingClosePct !== null) {
+    if (input.targetLevelId === TRAIL_TARGET_ID) {
+      // One-shot target close: done once its fixed quantity is filled; a partial fill resumes the rest.
+      const planned = p.trailingTargetContracts ?? qty.toFixed();
+      const filled = Decimal.min(D(p.trailingTargetFilled).plus(qty), planned);
+      trailingFill = { trailingTargetFilled: filled.toFixed(), trailingTargetStatus: filled.gte(planned) ? 'DONE' : 'PENDING' };
+    } else if (p.trailingCycleContracts !== null) {
+      // The current cycle's fixed quantity advances by confirmed fills only; once complete the cycle
+      // is recorded and trailing waits for a new best price (or is DONE at 100%).
+      const filled = Decimal.min(D(p.trailingCycleFilled).plus(qty), p.trailingCycleContracts);
+      trailingFill = filled.gte(p.trailingCycleContracts)
+        ? {
+            trailingCycle: p.trailingCycle + 1,
+            trailingCycleContracts: null,
+            trailingCycleFilled: '0',
+            trailingCycleExtreme: p.trailingWatermark,
+            trailingStatus: D(p.trailingClosePct).gte(100) ? 'DONE' : 'REARM',
+            trailingUpdatedAt: input.now
+          }
+        : { trailingCycleFilled: filled.toFixed() };
+    }
+  } else if (input.reason === 'TRAILING_TAKE_PROFIT' && p.trailingPlannedContracts !== null) {
     const filled = Decimal.min(D(p.trailingFilledContracts).plus(qty), p.trailingPlannedContracts);
     trailingFill = { trailingFilledContracts: filled.toFixed(), ...(filled.gte(p.trailingPlannedContracts) ? { trailingStatus: 'DONE' } : {}) };
   }
 
   let protection: { status: 'PROTECTED' | 'UNPROTECTED' | 'PENDING'; stopContracts: string | null } = { status: p.protectionStatus, stopContracts: p.stopContracts };
+  let stopNotice: string | null = null;
   let closed = false;
   const stopId = p.stopOrderRef ? await venue.stopOrderIdFor(p.stopOrderRef, tx) : null;
   let newStopRef: string | null = null;
@@ -292,8 +324,18 @@ export async function recordExitFill(
     }
     if (current !== stopId) newStopRef = current;
     const s = await venue.inspectProtection(current, p.instrumentId);
-    const ok = !!s && s.status === 'ACTIVE' && D(s.contracts).eq(remaining);
-    protection = { status: ok ? 'PROTECTED' : 'UNPROTECTED', stopContracts: s?.contracts ?? null };
+    // Coverage is verified against the actual remaining quantity at the SAME stop price. A
+    // reduce-only stop that was not shrunk (resize refused or unconfirmed) still covers the
+    // remainder: it can only close what is open. It is reported, never cancelled first.
+    const sameTrigger = !!s && (s.triggerPrice === null || D(s.triggerPrice).eq(p.stopPrice));
+    const exact = !!s && s.status === 'ACTIVE' && sameTrigger && D(s.contracts).eq(remaining);
+    const covers = !!s && s.status === 'ACTIVE' && sameTrigger && s.reduceOnly && D(s.contracts).gte(remaining);
+    protection = { status: exact || covers ? 'PROTECTED' : 'UNPROTECTED', stopContracts: s?.contracts ?? null };
+    if (!exact) {
+      stopNotice = covers
+        ? `Stop kept at ${p.stopPrice} for ${s!.contracts} (reduce-only, covers the ${remaining.toFixed()} left); the exchange did not confirm a resize to the remainder.`
+        : `The stop could not be confirmed for the ${remaining.toFixed()} left (${s ? `${s.status}, ${s.contracts} at ${s.triggerPrice ?? '?'}` : 'not found'}).`;
+    }
   }
 
   await tx
@@ -308,6 +350,7 @@ export async function recordExitFill(
       protectionStatus: protection.status,
       ...(newStopRef ? { stopOrderRef: newStopRef } : {}),
       ...(trailingFill ?? {}),
+      ...(stopNotice ? { exitNotice: stopNotice.slice(0, 500), exitNoticeAt: input.now } : {}),
       protectionVerifiedAt: input.now,
       ...(closed ? { status: 'CLOSED' as const, closeReason: input.reason, closedAt: input.fill.filledAt } : {}),
       updatedAt: sql`now()`
@@ -319,6 +362,10 @@ export async function recordExitFill(
       .update(positionTargets)
       .set({ status: 'CANCELLED', updatedAt: sql`now()` })
       .where(and(eq(positionTargets.positionId, p.id), ne(positionTargets.status, 'DONE')));
+    await tx
+      .update(positions)
+      .set({ trailingTargetStatus: 'CANCELLED' })
+      .where(and(eq(positions.id, p.id), inArray(positions.trailingTargetStatus, ['PENDING', 'REQUESTED'])));
   }
   return { recorded: true, remaining: remaining.toFixed(), closed };
 }
@@ -326,6 +373,11 @@ export async function recordExitFill(
 /** A target whose close ended without a fill returns to PENDING/PARTIAL so it can resume. */
 async function releaseTarget(tx: Executor, intent: IntentRow) {
   if (!intent.targetLevelId || !intent.positionId) return;
+  if (intent.targetLevelId === TRAIL_TARGET_ID) {
+    // Its fixed quantity stays persisted: the next evaluation resumes it (never recalculated).
+    await tx.update(positions).set({ trailingTargetStatus: 'PENDING', updatedAt: sql`now()` }).where(and(eq(positions.id, intent.positionId), eq(positions.trailingTargetStatus, 'REQUESTED')));
+    return;
+  }
   await tx
     .update(positionTargets)
     .set({ status: sql`CASE WHEN ${positionTargets.filledContracts} > 0 THEN 'PARTIAL' ELSE 'PENDING' END`, updatedAt: sql`now()` })
@@ -560,6 +612,8 @@ export interface PositionExitStep {
   targetsArmed: number;
   /** Live: a trigger fired but automatic exits are halted or backing off (nothing was sent). */
   held?: 'HALTED' | 'BACKOFF';
+  /** Partial trailing: a new best price beyond the completed cycle's extreme started a new cycle. */
+  trailingRearmed?: boolean;
 }
 
 /**
@@ -568,12 +622,144 @@ export interface PositionExitStep {
  * unfinished target reserves. Legacy trailing stop: the whole remaining position.
  */
 export function trailingContractsFor(
-  p: Pick<PositionRow, 'contracts' | 'trailingKind' | 'trailingPlannedContracts' | 'trailingFilledContracts'>,
+  p: Pick<PositionRow, 'contracts' | 'trailingKind' | 'trailingPlannedContracts' | 'trailingFilledContracts'> & { trailingClosePct?: string | null },
   targets: { status: string; plannedContracts: string; filledContracts: string }[]
 ): string {
   if ((p.trailingKind as TrailingKind) !== 'TAKE_PROFIT') return D(p.contracts).toFixed();
+  if (p.trailingClosePct !== null && p.trailingClosePct !== undefined) return trailingTakeProfitContracts(p.contracts, targets);
   if (p.trailingPlannedContracts !== null) return Decimal.max(0, Decimal.min(D(p.trailingPlannedContracts).minus(p.trailingFilledContracts), p.contracts)).toFixed();
   return trailingTakeProfitContracts(p.contracts, targets);
+}
+
+/** Records a runtime exit report on the position (shown on the position; latest wins). */
+async function noteExit(tx: Executor, positionId: string, text: string, now: Date) {
+  await tx.update(positions).set({ exitNotice: text.slice(0, 500), exitNoticeAt: now, updatedAt: sql`now()` }).where(eq(positions.id, positionId));
+}
+
+/** Completes a cycle without a close (its quantity is not a valid order): recorded once, then rearm. */
+async function skipCycle(tx: Executor, p: PositionRow, why: string, now: Date) {
+  await tx
+    .update(positions)
+    .set({
+      trailingCycle: p.trailingCycle + 1,
+      trailingCycleContracts: null,
+      trailingCycleFilled: '0',
+      trailingCycleExtreme: p.trailingWatermark,
+      trailingStatus: 'REARM',
+      trailingUpdatedAt: now,
+      exitNotice: `Trailing take profit cycle ${p.trailingCycle + 1} closed nothing: ${why}`.slice(0, 500),
+      exitNoticeAt: now,
+      updatedAt: sql`now()`
+    })
+    .where(eq(positions.id, p.id));
+}
+
+/**
+ * Partial Trailing Take Profit for one locked position at one price. Returns true when it requested
+ * (or tried to request) a close, so the caller stops (one close per evaluation).
+ *
+ * 1. Target close (one-shot): when price first reaches the target, its quantity (share of the pool)
+ *    is fixed and persisted; it then completes whatever price does next, and never fires again.
+ * 2. A trigger whose fixed quantity is not filled yet (partial fill, rejection, busy scope) is
+ *    completed first, without recalculating.
+ * 3. Otherwise the trailing state advances (WAITING → ACTIVE, tighten, REARM → ACTIVE on a new best
+ *    beyond the completed cycle's extreme). A trigger fixes and persists `closePct` of the pool,
+ *    rounded down to the contract step, then requests it. A quantity the exchange limits refuse is
+ *    reported and the cycle completes without a close (it is never widened into a full close).
+ */
+async function evaluatePartialTrailing(tx: Executor, p: PositionRow, quote: VenueQuote, targets: TargetRow[], now: Date, out: PositionExitStep): Promise<boolean> {
+  const side = p.side as 'LONG' | 'SHORT';
+  const [inst] = await tx.select({ tick: instruments.priceTick, qtyStep: instruments.qtyStep, minQty: instruments.minQty }).from(instruments).where(eq(instruments.id, p.instrumentId));
+  const limits = { qtyStep: inst!.qtyStep, minQty: inst!.minQty };
+  const pool = trailingContractsFor(p, targets);
+  const basis = (p.trailingBasis ?? p.stopBasis) as PriceBasis;
+  const price = basisPrice(quote, basis);
+  const request = async (contracts: string, targetLevelId: string | null) => {
+    const r = await requestExit(tx, { position: p, reason: 'TRAILING_TAKE_PROFIT', now, contracts, targetLevelId });
+    if (r.status === 'REQUESTED') out.requested = 'TRAILING_TAKE_PROFIT';
+    else if (r.status === 'HALTED' || r.status === 'BACKOFF') out.held = r.status;
+    else out.inProgress = r.status === 'IN_PROGRESS';
+    return r;
+  };
+
+  // 1. Target close inside trailing.
+  if (p.trailingTargetStatus === 'REQUESTED') {
+    out.inProgress = true;
+    return true;
+  }
+  if (p.trailingTargetStatus === 'PENDING' && p.trailingTargetPrice) {
+    const fired = p.trailingTargetContracts !== null;
+    if (fired || takeProfitReached(side, price, p.trailingTargetPrice)) {
+      out.trailingTriggered = true;
+      let planned = p.trailingTargetContracts;
+      if (planned === null) {
+        planned = partialCloseContracts(pool, p.trailingTargetClosePct ?? '100', limits.qtyStep);
+        await tx.update(positions).set({ trailingTargetContracts: planned, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+      }
+      const want = Decimal.min(D(planned).minus(p.trailingTargetFilled), p.contracts);
+      const check = partialExitCheck(want.toFixed(), p.contracts, limits);
+      if (!check.ok) {
+        await tx.update(positions).set({ trailingTargetStatus: 'SKIPPED', updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+        await noteExit(tx, p.id, `Trailing target close at ${p.trailingTargetPrice} was not sent (${want.toFixed()} of ${D(p.contracts).toFixed()}): ${check.message}`, now);
+        return false;
+      }
+      const r = await request(want.toFixed(), TRAIL_TARGET_ID);
+      if (r.status === 'REQUESTED') await tx.update(positions).set({ trailingTargetStatus: 'REQUESTED', updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+      return true;
+    }
+  }
+
+  if (!['WAITING', 'ACTIVE', 'REARM'].includes(p.trailingStatus) || !p.trailingDistancePct) return false;
+
+  // 2. A fixed cycle quantity not filled yet: complete it (no recalculation).
+  if (p.trailingCycleContracts !== null && D(p.trailingCycleFilled).lt(p.trailingCycleContracts)) {
+    out.trailingTriggered = true;
+    const want = Decimal.min(D(p.trailingCycleContracts).minus(p.trailingCycleFilled), p.contracts);
+    const check = partialExitCheck(want.toFixed(), p.contracts, limits);
+    if (want.lte(0) || !check.ok) {
+      await skipCycle(tx, p, check.ok ? 'nothing left to close' : `the unfilled ${want.toFixed()} cannot be sent: ${check.message}`, now);
+      return false;
+    }
+    await request(want.toFixed(), null);
+    return true;
+  }
+
+  // 3. Advance the trailing state.
+  if (D(pool).lte(0) && !targets.some((t) => t.status !== 'DONE' && t.status !== 'CANCELLED')) {
+    await tx.update(positions).set({ trailingStatus: 'DONE', trailingUpdatedAt: now, updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+    return false;
+  }
+  const state: TrailingState = { status: p.trailingStatus as TrailingState['status'], activationPrice: p.trailingActivationPrice, watermark: p.trailingWatermark, level: p.trailingStopPrice, cycleExtreme: p.trailingCycleExtreme };
+  const step = advanceTrailing(side, state, price, { distancePct: p.trailingDistancePct, tick: inst!.tick });
+  if (step.state !== state) {
+    await tx
+      .update(positions)
+      .set({
+        trailingStatus: step.state.status,
+        trailingWatermark: step.state.watermark,
+        trailingStopPrice: step.state.level,
+        ...(step.activated ? { trailingActivatedAt: now } : {}),
+        trailingUpdatedAt: now,
+        updatedAt: sql`now()`
+      })
+      .where(eq(positions.id, p.id));
+  }
+  out.trailingActivated = step.activated;
+  out.trailingTightened = step.tightened && !step.activated && !step.rearmed;
+  if (step.rearmed) out.trailingRearmed = true;
+  if (!step.triggered) return false;
+
+  out.trailingTriggered = true;
+  const qty = partialCloseContracts(pool, p.trailingClosePct!, limits.qtyStep);
+  const check = partialExitCheck(qty, p.contracts, limits);
+  if (!check.ok) {
+    await skipCycle(tx, p, `${D(p.trailingClosePct!).toFixed()}% of ${pool} is ${qty}: ${check.message}`, now);
+    return false;
+  }
+  // Persist the trigger's quantity BEFORE anything is submitted.
+  await tx.update(positions).set({ trailingCycleContracts: qty, trailingCycleFilled: '0', updatedAt: sql`now()` }).where(eq(positions.id, p.id));
+  await request(qty, null);
+  return true;
 }
 
 /**
@@ -614,8 +800,11 @@ export async function evaluatePositionExits(tx: Executor, p: PositionRow, quote:
     } else if (step.trigger) pulledBack.push(t);
   }
 
-  // 2. Trailing exit.
-  if ((p.trailingStatus === 'WAITING' || p.trailingStatus === 'ACTIVE') && p.trailingDistancePct && p.trailingBasis) {
+  // 2. Trailing exit. Partial Trailing Take Profit (current positions) has its own cycle rules.
+  if (p.trailingClosePct !== null) {
+    const done = await evaluatePartialTrailing(tx, p, quote, targets, now, out);
+    if (done) return out;
+  } else if ((p.trailingStatus === 'WAITING' || p.trailingStatus === 'ACTIVE') && p.trailingDistancePct && p.trailingBasis) {
     const takeProfit = (p.trailingKind as TrailingKind) === 'TAKE_PROFIT';
     const manages = trailingContractsFor(p, targets);
     if (takeProfit && D(manages).lte(0)) {

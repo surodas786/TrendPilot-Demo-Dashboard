@@ -39,3 +39,4 @@ coverage
 backups/
 # Database exports (contain user data and password hashes). Never commit.
 database-export/
+repo/

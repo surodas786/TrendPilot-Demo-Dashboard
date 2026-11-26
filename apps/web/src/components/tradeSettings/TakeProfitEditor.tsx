@@ -2,24 +2,26 @@
 
 import React from 'react';
 import { PlusIcon, Trash2Icon } from 'lucide-react';
-import { Decimal, exitAllocation, isDecimalString, type TakeProfitMode } from '@trendpilot/domain';
+import { Decimal, exitAllocation, isDecimalString, MAX_TP_LEVELS, type TakeProfitMode } from '@trendpilot/domain';
 import { cn } from '@/lib/cn';
 import { Button } from '../ui/Button';
 import { DecimalField } from '../ui/DecimalField';
 import { SegmentedControl } from '../ui/SegmentedControl';
-import { MAX_TARGETS, newTargetId, TP_KEY, type Draft, type SideTakeProfit, type TpSide } from './draft';
+import { MAX_TARGETS, newTargetId, TP_KEY, type ExitDraft, type SideTakeProfit, type TpSide } from './draft';
 
 interface Props {
-  draft: Draft;
+  draft: ExitDraft;
   /** Which side's Take Profit this section edits. */
   side: TpSide;
   /** Inline message for a field path (shown once the field was left or Save was pressed). */
   err: (path: string) => string | undefined;
   /** Marks a field as left (blur), so its message shows. */
   commit: (path: string) => void;
-  onChange: (patch: Partial<Draft>) => void;
+  onChange: (patch: Partial<ExitDraft>) => void;
   /** The pair's direction does not currently open this side; its settings are still edited and saved. */
   inactive?: boolean;
+  /** Inherited from the admin Common Exit Definition: shown, not editable. */
+  readOnly?: boolean;
 }
 
 const pct = <span className="pr-2 text-xs text-subtle">%</span>;
@@ -28,22 +30,24 @@ function sharesTotal(t: SideTakeProfit): string {
   return t.targets.reduce((s, x) => (isDecimalString(x.closePct.trim()) ? s.plus(x.closePct.trim()) : s), new Decimal(0)).toFixed();
 }
 
-/** "Take Profit 60% · Trailing take profit 40%" for one side — shared by the editor and its tests. */
-export function allocationText(d: Draft, side: TpSide = 'LONG'): string {
-  const a = exitAllocation({ takeProfit: { mode: d.tp[side].mode }, trailing: { enabled: d.trailingEnabled, closePct: d.trailingClosePct } });
+/** "Take Profit 60% · Trailing take profit pool 40%" for one side — shared by the editor and its tests. */
+export function allocationText(d: ExitDraft, side: TpSide = 'LONG'): string {
+  const tp = d.tp[side];
+  const tr = d.trailing[side];
+  const a = exitAllocation({ takeProfit: { mode: tp.mode, allocationPct: isDecimalString(tp.allocationPct.trim()) ? tp.allocationPct.trim() : null }, trailing: { enabled: tr.enabled } });
   const parts = [`Take profit ${a.takeProfitPct}%`];
-  if (d.trailingEnabled) parts.push(`Trailing take profit ${a.trailingPct}%`);
+  if (tr.enabled) parts.push(`Trailing take profit pool ${a.trailingPct}%`);
   if (a.unallocatedPct !== '0') parts.push(`${a.unallocatedPct}% unallocated (stop loss and signal closes only)`);
   return parts.join(' · ');
 }
 
 /**
- * Adapted from the MagicPatterns TakeProfitEditor: Fixed, Split (2–3 targets) or Off (CFG-03),
- * for ONE position side. Long and Short are configured independently; the side of the actual
- * entry selects one, saved with the position. How much of the position Take Profit manages is
- * set in Trailing take profit ("Position to close (%)"); split targets divide that share.
+ * Fixed, Split (2–5 targets) or Off for ONE position side, plus its overall Take Profit allocation
+ * (share of the confirmed opening quantity the targets manage; split shares divide it). Long and
+ * Short are configured independently; the side of the actual entry selects one, saved with the
+ * position. Target IDs are stable, so editing or reordering never re-fires a completed target.
  */
-export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive = false }: Props) {
+export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive = false, readOnly = false }: Props) {
   const tp = draft.tp[side];
   const key = TP_KEY[side];
   const long = side === 'LONG';
@@ -51,13 +55,13 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
   const setTarget = (i: number, patch: Partial<SideTakeProfit['targets'][number]>) => setSide({ ...tp, targets: tp.targets.map((t, j) => (j === i ? { ...t, ...patch } : t)) });
 
   const setMode = (mode: TakeProfitMode) => {
-    if (mode === tp.mode) return;
+    if (mode === tp.mode || readOnly) return;
     const first = tp.targets[0] ?? { id: newTargetId(), movePct: '', closePct: '100' };
     if (mode === 'SPLIT') {
       const further = isDecimalString(first.movePct) ? new Decimal(first.movePct).times(2).toFixed() : '';
-      setSide({ mode, targets: [{ ...first, closePct: '50' }, { id: newTargetId(), movePct: further, closePct: '50' }] });
+      setSide({ ...tp, mode, targets: [{ ...first, closePct: '50' }, { id: newTargetId(), movePct: further, closePct: '50' }] });
     } else {
-      setSide({ mode, targets: [{ ...first, closePct: '100' }] });
+      setSide({ ...tp, mode, targets: [{ ...first, closePct: '100' }] });
     }
   };
 
@@ -66,7 +70,7 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
   const label = long ? 'Long take profit' : 'Short take profit';
 
   return (
-    <div className="space-y-3 rounded-lg border border-line p-3" data-testid={`tp-${side}`} data-inactive={inactive || undefined} role="group" aria-label={label}>
+    <div className="space-y-3 rounded-lg border border-line p-3" data-testid={`tp-${side}`} data-inactive={inactive || undefined} data-readonly={readOnly || undefined} role="group" aria-label={label}>
       {inactive && (
         <p className="text-xs text-warn" data-testid={`tp-${side}-inactive`}>
           Not used while this pair opens {long ? 'Short' : 'Long'} positions only. Saved for when {long ? 'Long' : 'Short'} entries are allowed.
@@ -76,11 +80,7 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
         label={label}
         value={tp.mode}
         onChange={setMode}
-        options={[
-          { value: 'FIXED', label: 'Fixed' },
-          { value: 'SPLIT', label: 'Split' },
-          { value: 'OFF', label: 'Off' }
-        ]}
+        options={(['FIXED', 'SPLIT', 'OFF'] as const).map((m) => ({ value: m, label: m === 'FIXED' ? 'Fixed' : m === 'SPLIT' ? 'Split' : 'Off', disabled: readOnly && m !== tp.mode }))}
         hint={
           tp.mode === 'OFF'
             ? `No take-profit target for ${long ? 'Long' : 'Short'} positions. The stop loss still applies.`
@@ -90,6 +90,19 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
         }
       />
 
+      {tp.mode !== 'OFF' && (
+        <DecimalField
+          label={`${long ? 'Long' : 'Short'} take profit allocation (%)`}
+          value={tp.allocationPct}
+          onChange={(v) => setSide({ ...tp, allocationPct: v })}
+          onCommit={() => commit(`${key}.allocationPct`)}
+          error={err(`${key}.allocationPct`)}
+          readOnly={readOnly}
+          hint="Share of the confirmed opening quantity the targets manage, 0-100 (each target's quantity is rounded down to the contract step and capped at what is still open). With Trailing take profit on, the rest is its pool."
+          trailing={pct}
+        />
+      )}
+
       {tp.mode === 'FIXED' && (
         <DecimalField
           label={`${long ? 'Long' : 'Short'} target — price move`}
@@ -97,7 +110,8 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
           onChange={(v) => setTarget(0, { movePct: v })}
           onCommit={() => commit(`${key}.levels.0.movePct`)}
           error={err(`${key}.levels.0.movePct`) ?? err(`${key}.levels`)}
-          hint={`One target for the whole Take Profit share, ${long ? 'above' : 'below'} entry.`}
+          readOnly={readOnly}
+          hint={`One target for the whole Take Profit allocation, ${long ? 'above' : 'below'} entry.`}
           trailing={pct}
         />
       )}
@@ -106,13 +120,14 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
         <>
           <ol className="space-y-3">
             {tp.targets.map((t, i) => (
-              <li key={t.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-2">
+              <li key={t.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-2" data-testid={`tp-${side}-level`} data-level-id={t.id}>
                 <DecimalField
                   label={`${long ? 'Long' : 'Short'} target ${i + 1} — move`}
                   value={t.movePct}
                   onChange={(v) => setTarget(i, { movePct: v })}
                   onCommit={() => commit(`${key}.levels.${i}.movePct`)}
                   error={err(`${key}.levels.${i}.movePct`)}
+                  readOnly={readOnly}
                   trailing={pct}
                 />
                 <DecimalField
@@ -121,12 +136,13 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
                   onChange={(v) => setTarget(i, { closePct: v })}
                   onCommit={() => commit(`${key}.levels.${i}.closePct`)}
                   error={err(`${key}.levels.${i}.closePct`)}
+                  readOnly={readOnly}
                   trailing={pct}
                 />
                 <button
                   type="button"
                   onClick={() => setSide({ ...tp, targets: tp.targets.filter((_, j) => j !== i) })}
-                  disabled={tp.targets.length <= 2}
+                  disabled={readOnly || tp.targets.length <= 2}
                   aria-label={`Remove ${long ? 'Long' : 'Short'} target ${i + 1}`}
                   className="mt-7 flex h-10 w-10 items-center justify-center rounded-lg text-subtle transition-colors duration-150 hover:bg-inset hover:text-loss disabled:pointer-events-none disabled:opacity-40"
                 >
@@ -136,9 +152,11 @@ export function TakeProfitEditor({ draft, side, err, commit, onChange, inactive 
             ))}
           </ol>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <Button size="sm" icon={PlusIcon} disabled={tp.targets.length >= MAX_TARGETS} onClick={() => setSide({ ...tp, targets: [...tp.targets, { id: newTargetId(), movePct: '', closePct: '' }] })}>
-              Add {long ? 'Long' : 'Short'} target
-            </Button>
+            {!readOnly && (
+              <Button size="sm" icon={PlusIcon} disabled={tp.targets.length >= MAX_TARGETS} onClick={() => setSide({ ...tp, targets: [...tp.targets, { id: newTargetId(), movePct: '', closePct: '' }] })}>
+                Add {long ? 'Long' : 'Short'} target ({tp.targets.length} of {MAX_TP_LEVELS})
+              </Button>
+            )}
             <p className={cn('text-sm tabular-nums', splitOk ? 'text-gain' : 'text-warn')} aria-live="polite" data-testid="split-shares">
               Shares {total}% of 100% of the Take Profit quantity
             </p>

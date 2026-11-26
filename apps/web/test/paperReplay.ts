@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 // Deterministic paper replay harness: a controlled clock, fixture prices and the real job loop.
 import { and, eq, sql } from 'drizzle-orm';
-import { processNextJob, recordMarketTick, schema, writeMarketFixture } from '@trendpilot/db';
+import { MIGRATIONS_DIR, processNextJob, recordMarketTick, schema, writeMarketFixture } from '@trendpilot/db';
 import { buildTradingViewPayload, Decimal, PAPER_TEMPLATE, type SignalAction } from '@trendpilot/domain';
 import * as webhook from '@/app/v1/webhooks/tradingview/[ingressToken]/route';
 import * as blocks from '@/app/v1/me/order-blocks/route';
@@ -124,4 +126,16 @@ export async function openFromAlert(o: OpenOptions = {}) {
   if ((await deliver(o.side === 'SHORT' ? 'BEARISH_FLIP' : 'BULLISH_FLIP', bar, o.price ?? '65000.5')) !== 202) throw new Error('alert not accepted');
   await drain(clock.now, direct.db, o.hooks);
   return blocksOut;
+}
+
+/** Re-runs migration 0037's per-side exit conversion for rows a test wrote in the pre-0037 (shared trailing) shape. */
+export async function reapply0037(): Promise<void> {
+  const text = readFileSync(path.join(MIGRATIONS_DIR, '0037_m27_exit_plan_per_side_admin.sql'), 'utf8');
+  const stmts = text.split('--> statement-breakpoint').map((x) => x.replace(/^\s*--.*$/gm, '').trim());
+  const c = await direct.pool.connect();
+  try {
+    for (const st of stmts) if (st.startsWith('CREATE OR REPLACE FUNCTION pg_temp.') || st.startsWith('UPDATE "order_blocks" SET')) await c.query(st);
+  } finally {
+    c.release();
+  }
 }

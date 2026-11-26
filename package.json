@@ -42,6 +42,7 @@
     "ops:live-preflight": "npm run live-preflight -w @trendpilot/db --",
     "ops:alert-trace": "npm run alert-trace -w @trendpilot/db --",
     "ops:live-position-check": "npm run live-position-check -w @trendpilot/db --",
+    "ops:trade-settings-check": "npm run trade-settings-check -w @trendpilot/db --",
     "ops:live-sync": "npm run live-sync -w @trendpilot/db --",
     "ops:lighter-sync": "npm run lighter-sync -w @trendpilot/db --",
     "ops:lighter-readiness": "npm run lighter-readiness -w @trendpilot/db --",

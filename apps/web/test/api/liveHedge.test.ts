@@ -212,8 +212,10 @@ describe('Hedge: one leg closes, the other leg and its stop stay', () => {
     await drain(clock.now, direct.db);
     const after = await posById(p.id);
     expect(D(after.contracts).toFixed()).toBe('6');
+    // Never cancel-first: MEXC refuses a replacement while the old stop rests (closable quantity),
+    // so the original reduce-only stop stays at its price and covers the remainder (reported).
     expect(after).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
-    expect(D(after.stopContracts!).toFixed()).toBe('6');
+    expect(D(after.stopContracts!).toFixed()).toBe('12');
     expect(leg('LONG')!.holdVol).toBe('9');
     expect(mx.stops.get(longStop)).toMatchObject({ state: 1, vol: '9' });
   });

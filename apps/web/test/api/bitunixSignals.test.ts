@@ -215,7 +215,8 @@ describe('exits on Bitunix (same strategy rules as MEXC)', () => {
   it('Long: target close, then trailing take profit, each through BUY+CLOSE on the long positionId', async () => {
     const x = exOf(idA);
     const p = (await openPos(idA))!;
-    expect(p.trailingPlannedContracts && D(p.trailingPlannedContracts).toFixed()).toBe('0.0078');
+    // Trailing closes 100 % of its pool (the share Take Profit does not reserve).
+    expect(p.trailingClosePct && D(p.trailingClosePct).toFixed()).toBe('100');
     await bitunixTick('64700'); // arms tp1 (64640.1)
     await bitunixTick('64600'); // pullback through it: closes the target share
     let closes = x.posts.filter((b) => b.tradeSide === 'CLOSE');

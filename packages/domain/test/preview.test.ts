@@ -1,6 +1,6 @@
 // EXE-01 sizing with fixture inputs (AT-06 units and rounding, minimum failures).
 import { describe, expect, it } from 'vitest';
-import { EMPTY_RISK, previewOrder, type ContractSpec, type Quote } from '../src';
+import { EMPTY_RISK, liftLegacyExitPlan, previewOrder, type ContractSpec, type Quote } from '../src';
 
 const BTC: ContractSpec = { contractMultiplier: '0.0001', qtyStep: '1', minQty: '1', maxQty: '1000000', priceTick: '0.1', takerFeeRate: '0.0004' };
 const quote: Quote = { bid: '64990.5', ask: '65000.0', mark: '64995.2', asOf: '2026-11-08T00:00:00Z', source: 'FIXTURE' };
@@ -9,7 +9,8 @@ const settings = (o: Record<string, unknown> = {}) => {
   const tp = (o.takeProfit ?? { mode: 'FIXED', levels: [{ id: 'tp1', movePct: '3', closePct: '100' }] }) as unknown;
   const { takeProfit: _shared, ...rest } = o;
   void _shared;
-  return {
+  // Fixtures use the shared (pre per-side) trailing shape; it is converted exactly as a legacy save would be.
+  return liftLegacyExitPlan({
     orderCostUsdt: '100',
     leverage: 10,
     direction: 'BOTH',
@@ -19,7 +20,7 @@ const settings = (o: Record<string, unknown> = {}) => {
     trailing: { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' },
     risk: EMPTY_RISK,
     ...rest
-  } as Parameters<typeof previewOrder>[0];
+  }) as Parameters<typeof previewOrder>[0];
 };
 
 describe('previewOrder', () => {
@@ -55,7 +56,7 @@ describe('previewOrder', () => {
     // 153 × 40 % = 61.2 → 61 trail (rounded down to the step); the fixed target gets the exact other 92.
     expect(long.takeProfits).toEqual([{ id: 'tp1', price: '66950', closePct: '100', contracts: '92' }]);
     // Activation is never closer than configured: Long 65000 × 1.01 rounded up, Short 64990.5 × 0.99 rounded down.
-    expect(long.trailing).toEqual({ activationPrice: '65650', distancePct: '0.5', managesPct: '40', contracts: '61' });
+    expect(long.trailing).toMatchObject({ activationPrice: '65650', distancePct: '0.5', managesPct: '40', contracts: '61', closePct: '100', firstCloseContracts: '61', targetClose: null });
     expect(short.trailing).toMatchObject({ activationPrice: '64340.5', managesPct: '40' });
     // 0 %: Take Profit manages everything; 100 %: Trailing Take Profit does and the target gets nothing.
     const zero = previewOrder(settings({ takeProfit: FIXED, trailing: trailing('0') }), BTC, quote).sides[0]!;

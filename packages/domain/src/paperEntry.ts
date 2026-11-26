@@ -75,7 +75,7 @@ export interface PaperQuote {
 
 export interface EntryInput {
   side: 'LONG' | 'SHORT';
-  settings: Pick<OrderBlockSettings, 'orderCostUsdt' | 'leverage' | 'stop' | 'takeProfitLong' | 'takeProfitShort' | 'trailing' | 'risk' | 'marginMode'>;
+  settings: Pick<OrderBlockSettings, 'orderCostUsdt' | 'leverage' | 'stop' | 'takeProfitLong' | 'takeProfitShort' | 'trailingLong' | 'trailingShort' | 'risk' | 'marginMode'>;
   version: { emaFilter: 'OFF' | 'EMA200'; maxPriceDeviationPct: string };
   referencePrice: string;
   quote: PaperQuote | null;

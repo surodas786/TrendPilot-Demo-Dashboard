@@ -252,8 +252,11 @@ describe('ambiguous responses, partial fills and manual closes', () => {
     await px(SHORT_TRIGGER);
     const pos = await posById(p.id);
     expect(D(pos.contracts).toFixed()).toBe('6');
+    // Never cancel-first: MEXC refuses a replacement while the old stop rests (closable quantity),
+    // so the original reduce-only stop stays at its price and covers the remainder (reported).
     expect(pos).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
-    expect(D(pos.stopContracts!).toFixed()).toBe('6');
+    expect(D(pos.stopContracts!).toFixed()).toBe('12');
+    expect(pos.exitNotice).toMatch(/covers the 6 left/);
     expect(pos.exitHaltedAt).toBeNull();
     await px(SHORT_TRIGGER);
     const bodies = closeCreates().map((c) => c.body as Record<string, unknown>);
@@ -425,8 +428,11 @@ describe('exact serialized close request: fixed take profit and close-on-signal,
     expect(closeCreates().map((c) => (c.body as Record<string, unknown>).vol)).toEqual(['8']);
     const after = await posById(p.id);
     expect(D(after.contracts).toFixed()).toBe('4');
+    // Never cancel-first: MEXC refuses a replacement while the old stop rests (closable quantity),
+    // so the original reduce-only stop stays at its price and covers the remainder (reported).
     expect(after).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
-    expect(D(after.stopContracts!).toFixed()).toBe('4');
+    expect(D(after.stopContracts!).toFixed()).toBe('12');
+    expect(after.exitNotice).toMatch(/covers the 4 left/);
   });
 
   it('every contract frozen: nothing is sent and automatic exits pause with an actionable reason', async () => {

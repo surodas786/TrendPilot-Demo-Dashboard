@@ -68,9 +68,13 @@ describe('same token, different settings', () => {
       leverage: 3,
       direction: 'LONG_ONLY',
       weekdays: ['SUN', 'SAT'],
-      takeProfitLong: { mode: 'SPLIT' },
-      takeProfitShort: { mode: 'SPLIT' },
-      trailing: { enabled: true, activationPct: '1', distancePct: '1.2', closePct: '20', basis: 'MARK' },
+      // The shared trailing B saved (20 % of the opening quantity) is stored per side: Take Profit
+      // manages the other 80 %, trailing closes 100 % of its pool.
+      takeProfitLong: { mode: 'SPLIT', allocationPct: '80' },
+      takeProfitShort: { mode: 'SPLIT', allocationPct: '80' },
+      trailingLong: { enabled: true, activationPct: '1', distancePct: '1.2', closePct: '100', basis: 'MARK' },
+      trailingShort: { enabled: true, activationPct: '1', distancePct: '1.2', closePct: '100', basis: 'MARK' },
+      syncAdminExit: false,
       trailingConversionRequired: false
     });
   });

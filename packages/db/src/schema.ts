@@ -279,7 +279,17 @@ export const orderBlocks = pgTable(
     takeProfitLong: jsonb('take_profit').notNull(),
     /** Short Take Profit. Backfilled from the shared configuration by migration 0021. */
     takeProfitShort: jsonb('take_profit_short').notNull(),
-    trailing: jsonb('trailing').notNull(),
+    /** Legacy shared Trailing Take Profit (before per-side trailing, migration 0037). No longer written. */
+    trailing: jsonb('trailing'),
+    /** EXT-04 Trailing Take Profit per position side (migration 0037 converted the shared setting). */
+    trailingLong: jsonb('trailing_long').notNull(),
+    trailingShort: jsonb('trailing_short').notNull(),
+    /**
+     * "Sync Admin Setting": new entries use the latest published Common Exit Definition for Take
+     * Profit and Trailing Take Profit. The block's own exit columns are kept as the custom plan and
+     * apply again when sync is turned off.
+     */
+    syncAdminExit: boolean('sync_admin_exit').notNull().default(false),
     weekdays: text('weekdays')
       .array()
       .notNull()
@@ -863,6 +873,33 @@ export const positions = pgTable(
      */
     trailingPlannedContracts: qty('trailing_planned_contracts'),
     trailingFilledContracts: qty('trailing_filled_contracts').notNull().default('0'),
+    /**
+     * Partial Trailing Take Profit (positions opened from migration 0037; non-null marks them): each
+     * trigger closes this share of the trailing pool (remaining quantity no unfinished target
+     * reserves). `trailingCycle` counts completed cycles; `trailingCycleContracts` is the quantity
+     * the current trigger fixed when it fired (persisted before submission, completed by retries
+     * and partial fills without recalculating) and `trailingCycleFilled` its confirmed fills. Once
+     * complete the status is REARM until price makes a new best beyond `trailingCycleExtreme`.
+     */
+    trailingClosePct: numeric('trailing_close_pct', { precision: 12, scale: 8 }),
+    trailingCycle: integer('trailing_cycle').notNull().default(0),
+    trailingCycleExtreme: price('trailing_cycle_extreme'),
+    trailingCycleContracts: qty('trailing_cycle_contracts'),
+    trailingCycleFilled: qty('trailing_cycle_filled').notNull().default('0'),
+    /** One-shot target close inside Trailing Take Profit (status null = none configured). */
+    trailingTargetPrice: price('trailing_target_price'),
+    trailingTargetClosePct: numeric('trailing_target_close_pct', { precision: 12, scale: 8 }),
+    trailingTargetStatus: text('trailing_target_status'),
+    trailingTargetContracts: qty('trailing_target_contracts'),
+    trailingTargetFilled: qty('trailing_target_filled').notNull().default('0'),
+    /** Latest runtime exit report (e.g. a partial close the exchange limits refuse). */
+    exitNotice: text('exit_notice'),
+    exitNoticeAt: timestamp('exit_notice_at', { withTimezone: true }),
+    /** Which exit plan the position uses: its block's own (CUSTOM) or an admin Common Exit Definition version. */
+    exitPlanSource: text('exit_plan_source').notNull().default('CUSTOM'),
+    exitPlanAdminVersion: integer('exit_plan_admin_version'),
+    /** Set when an admin revision was applied to this open position ("Apply to existing linked positions"). */
+    exitPlanAppliedAt: timestamp('exit_plan_applied_at', { withTimezone: true }),
     realizedPnlUsdt: money('realized_pnl_usdt').notNull().default('0'),
     feesUsdt: money('fees_usdt').notNull().default('0'),
     closeReason: text('close_reason'),
@@ -908,7 +945,10 @@ export const positions = pgTable(
     uniqueIndex('positions_open_intent_key').on(t.openIntentId),
     uniqueIndex('positions_one_open_per_scope').on(t.paperAccountId, t.instrumentId, t.mode).where(sql`${t.status} = 'OPEN'`),
     index('positions_owner_idx').on(t.ownerId, t.openedAt),
-    check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE', 'DONE')`),
+    check('positions_trailing_status_valid', sql`${t.trailingStatus} IN ('OFF', 'WAITING', 'ACTIVE', 'REARM', 'DONE')`),
+    check('positions_trailing_target_status_valid', sql`${t.trailingTargetStatus} IS NULL OR ${t.trailingTargetStatus} IN ('PENDING', 'REQUESTED', 'DONE', 'SKIPPED', 'CANCELLED')`),
+    check('positions_trailing_cycle_valid', sql`${t.trailingCycle} >= 0 AND ${t.trailingCycleFilled} >= 0 AND (${t.trailingCycleContracts} IS NULL OR ${t.trailingCycleFilled} <= ${t.trailingCycleContracts})`),
+    check('positions_exit_plan_source_valid', sql`${t.exitPlanSource} IN ('CUSTOM', 'ADMIN')`),
     check('positions_trailing_kind_valid', sql`${t.trailingKind} IN ('TAKE_PROFIT', 'STOP')`),
     check('positions_exchange_close_state_valid', sql`${t.exchangeCloseState} IS NULL OR ${t.exchangeCloseState} IN ('FILLS_PENDING')`),
     check('positions_trailing_alloc_valid', sql`${t.trailingFilledContracts} >= 0 AND (${t.trailingPlannedContracts} IS NULL OR ${t.trailingFilledContracts} <= ${t.trailingPlannedContracts})`)
@@ -1502,4 +1542,51 @@ export const lighterTxs = pgTable(
     check('lighter_txs_state_valid', sql`${t.state} IN ('PREPARED', 'SENDING', 'ACCEPTED', 'API_REJECTED', 'EXECUTED', 'FAILED', 'UNKNOWN')`),
     check('lighter_txs_client_order_index_valid', sql`${t.clientOrderIndex} BETWEEN 1 AND 281474976710655`)
   ]
+);
+
+/* ───────────────────────── Admin → Common Exit Definition, in-app notifications ───────────────────────── */
+
+/** Published revisions of the admin's Common Exit Definition. Append-only; the highest version is current. */
+export const commonExitDefinitions = pgTable(
+  'common_exit_definitions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    version: integer('version').notNull(),
+    /** takeProfitLong, takeProfitShort, trailingLong, trailingShort (commonExitDefinitionSchema). */
+    plan: jsonb('plan').notNull(),
+    /** [{ field, before, after }] against the previous version. */
+    changes: jsonb('changes').notNull(),
+    scope: text('scope').notNull(),
+    note: text('note'),
+    /** EXISTING_POSITIONS: per-position outcome (applied, skipped with reason). */
+    applyResult: jsonb('apply_result'),
+    authorId: uuid('author_id')
+      .notNull()
+      .references(() => users.id),
+    publishedAt: timestamp('published_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('common_exit_definitions_version_key').on(t.version),
+    check('common_exit_definitions_scope_valid', sql`${t.scope} IN ('FUTURE_ENTRIES', 'EXISTING_POSITIONS')`),
+    check('common_exit_definitions_version_positive', sql`${t.version} > 0`)
+  ]
+);
+
+/** In-app notifications shown to a signed-in user (e.g. an admin exit rule change that affects them). */
+export const userNotifications = pgTable(
+  'user_notifications',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    kind: text('kind').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    data: jsonb('data'),
+    dedupeKey: text('dedupe_key'),
+    readAt: timestamp('read_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [index('user_notifications_user_idx').on(t.userId, t.createdAt), uniqueIndex('user_notifications_dedupe_key').on(t.userId, t.dedupeKey).where(sql`${t.dedupeKey} IS NOT NULL`)]
 );

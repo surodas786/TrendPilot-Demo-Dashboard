@@ -50,6 +50,15 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
             : `${venue} now holds ${t.venueSync!.contracts} of these ${t.contracts} contracts · fill details pending; the next sync books them.`}
         </p>
       )}
+      <p className="text-xs text-muted" data-testid="exit-plan-version">
+        Exit plan: {t.exitPlan.source === 'ADMIN' ? `admin Common Exit Definition version ${t.exitPlan.adminVersion}` : "this order block's own plan"}
+        {t.exitPlan.appliedAt ? ` (applied to this open position ${fmt(t.exitPlan.appliedAt)})` : ' (saved at entry)'}
+      </p>
+      {t.status !== 'CLOSED' && t.exitNotice && (
+        <p className="rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-ink" data-testid="exit-notice" role="status">
+          {t.exitNotice.text} <span className="text-subtle">({fmt(t.exitNotice.at)})</span>
+        </p>
+      )}
       {t.status !== 'CLOSED' && t.exitHalt && (
         <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink" data-testid="exit-halt" role="alert">
           {t.exitHalt.text} <span className="text-subtle">({t.exitHalt.reason}, {fmt(t.exitHalt.at)})</span>
@@ -211,12 +220,27 @@ export default async function TradeDetailPage({ params }: { params: Promise<{ id
               <Row label="Closes at (only tightens)" value={t.trailing.level ?? '—'} testId="trailing-level" />
               <Row label="Quantity it manages" value={t.trailing.contracts !== null ? `${t.trailing.contracts} contracts` : '—'} testId="trailing-contracts" />
               <Row label="Activated" value={t.trailing.activatedAt ? fmt(t.trailing.activatedAt) : '—'} />
+              {t.trailing.partial && (
+                <>
+                  <Row label="Close on each trigger" value={`${t.trailing.partial.closePct}% of the pool`} testId="trailing-close-pct" />
+                  <Row label="Completed cycles" value={String(t.trailing.partial.cycles)} testId="trailing-cycles" />
+                  <Row label={t.side === 'LONG' ? 'Rearms above' : 'Rearms below'} value={t.trailing.status === 'REARM' ? (t.trailing.partial.cycleExtreme ?? '—') : '—'} testId="trailing-rearm" />
+                  <Row label="Trigger completing" value={t.trailing.partial.pendingContracts ? `${t.trailing.partial.pendingFilled}/${t.trailing.partial.pendingContracts} contracts` : '—'} testId="trailing-pending" />
+                  <Row
+                    label="Target close"
+                    value={t.trailing.partial.targetClose ? `${t.trailing.partial.targetClose.price} · ${t.trailing.partial.targetClose.closePct}% · ${t.trailing.partial.targetClose.status}${t.trailing.partial.targetClose.contracts ? ` (${t.trailing.partial.targetClose.filled}/${t.trailing.partial.targetClose.contracts})` : ''}` : 'none'}
+                    testId="trailing-target-close"
+                  />
+                </>
+              )}
             </dl>
           )}
           <p className="mt-2 text-xs text-subtle">
             {t.trailing?.kind === 'STOP'
               ? 'Legacy trailing stop saved with this position: it closes the whole remaining quantity at market. The fixed stop stays at the venue.'
-              : 'Arms after the activation move from the average entry, then closes its quantity at market when price pulls back by the trail distance from the best level. Targets keep their own quantity; the fixed stop loss stays at the venue for the whole position.'}
+              : t.trailing?.partial
+                ? 'Arms after the activation move, then on each pullback by the retracement closes its share of the pool (what the targets do not reserve). The rest stays open under the same stop loss at its original price; trailing rearms only after a new best price beyond the completed cycle.'
+                : 'Arms after the activation move from the average entry, then closes its quantity at market when price pulls back by the trail distance from the best level. Targets keep their own quantity; the fixed stop loss stays at the venue for the whole position.'}
           </p>
         </section>
         <section className="rounded-xl border border-line bg-surface p-4 text-sm lg:col-span-2" data-testid="exits">
