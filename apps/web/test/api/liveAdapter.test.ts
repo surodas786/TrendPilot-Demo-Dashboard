@@ -270,7 +270,7 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     expect(D(mockPos(1)!.holdVol).isZero()).toBe(true);
   });
 
-  it('a split take-profit partial close keeps the stop equal to the remaining contracts (explicit resize)', async () => {
+  it('a split take-profit partial close never cancels first: MEXC refuses the replacement while the old stop rests, so the old stop keeps covering the remainder', async () => {
     const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '1', closePct: '50' }, { id: 'tp2', movePct: '10', closePct: '50' }] };
     await openFromAlert({ a: { takeProfit: SPLIT }, b: null, hooks: hooks() });
     const before = (await positionsOf(A))[0]!;
@@ -281,11 +281,12 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     const p = (await positionsOf(A))[0]!;
     expect(D(p.contracts).lt(before.contracts)).toBe(true);
     expect(p).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
-    expect(D(p.stopContracts!).eq(p.contracts)).toBe(true);
-    expect(p.stopOrderRef).not.toBe(before.stopOrderRef); // MEXC replaced the stop order
-    expect(activeStops().map((s) => s.vol)).toEqual([D(p.contracts).toFixed()]);
+    expect(p.stopOrderRef).toBe(before.stopOrderRef);
+    expect(activeStops().map((s) => s.vol)).toEqual([D(before.contracts).toFixed()]); // covers the remainder (reduce-only)
     expect(activeStops()[0]!.stopLossPrice).toBe(String(createBodies()[0]!.stopLossPrice)); // same trigger, never widened
-    expect(mexc.calls.filter((c) => c.path === '/api/v1/private/stoporder/cancel')).toHaveLength(1);
+    expect(mexc.calls.filter((c) => c.path === '/api/v1/private/stoporder/place')).toHaveLength(1); // replacement attempted first
+    expect(mexc.calls.filter((c) => c.path === '/api/v1/private/stoporder/cancel')).toHaveLength(0); // nothing cancelled
+    expect(p.exitNotice).toMatch(/did not confirm a resize/);
   });
 
   it('when the exchange shrinks the stop itself, nothing is re-placed', async () => {
@@ -303,7 +304,7 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     expect(activeStops().map((x) => x.vol)).toEqual([D(p.contracts).toFixed()]);
   });
 
-  it('if the stop cannot be resized (capability unverified), the remainder is flagged UNPROTECTED, not silently left', async () => {
+  it('if the stop cannot be resized (capability unverified), the original stop keeps covering the remainder and the gap is reported', async () => {
     const SPLIT = { mode: 'SPLIT', levels: [{ id: 'tp1', movePct: '1', closePct: '50' }, { id: 'tp2', movePct: '10', closePct: '50' }] };
     const noResize = venue({ OPEN_WITH_ATTACHED_STOP: 'VERIFIED', REDUCE_ONLY_CLOSE: 'VERIFIED' });
     await openFromAlert({ a: { takeProfit: SPLIT }, b: null, hooks: hooks(noResize) });
@@ -311,7 +312,11 @@ describe('closes: TP, signal, manual — reduce only, never flipping, stop kept 
     await drain(clock.now, direct.db, hooks(noResize));
     await tick('65600'); // the pullback through tp1 closes its share
     await drain(clock.now, direct.db, hooks(noResize));
-    expect((await positionsOf(A))[0]).toMatchObject({ status: 'OPEN', protectionStatus: 'UNPROTECTED' });
+    const p = (await positionsOf(A))[0]!;
+    expect(p).toMatchObject({ status: 'OPEN', protectionStatus: 'PROTECTED' });
+    expect(D(p.stopContracts!).gt(p.contracts)).toBe(true);
+    expect(p.exitNotice).toMatch(/did not confirm a resize/);
+    expect(mexc.calls.filter((c) => c.path === '/api/v1/private/stoporder/place' || c.path === '/api/v1/private/stoporder/cancel')).toHaveLength(0);
   });
 
   it('a rejected close (e.g. 2008) leaves the position open and protected', async () => {

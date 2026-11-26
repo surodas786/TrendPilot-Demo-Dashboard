@@ -14,7 +14,8 @@ export const TP_MODES = ['FIXED', 'SPLIT', 'OFF'] as const;
 export const STOP_TYPES = ['PERCENT', 'PRICE'] as const;
 /** Exchange price stream a trigger compares against (MKT-01). */
 export const PRICE_BASES = ['MARK', 'LAST'] as const;
-export const MAX_TP_LEVELS = 3;
+/** Split Take Profit levels per side (raised from 3; one-, two- and three-level plans stay valid). */
+export const MAX_TP_LEVELS = 5;
 export const MAX_ADDS = 10;
 
 export type Mode = (typeof MODES)[number];
@@ -47,6 +48,17 @@ const closeFraction = z
   .refine((v) => !isDecimalString(v) || (new Decimal(v).gt(0) && new Decimal(v).lte(100)), 'Enter a value above 0 and up to 100.')
   .transform(normDecimal);
 
+/**
+ * Share of a quantity an exit closes when it fires: 1 to 100 inclusive, decimals up to 8 places
+ * (the resulting quantity is rounded down to the contract step).
+ */
+export const exitClosePct = z
+  .string({ error: 'Enter the value as a decimal string.' })
+  .trim()
+  .refine(isDecimalString, 'Enter a number from 1 to 100 with up to 8 decimal places.')
+  .refine((v) => !isDecimalString(v) || (new Decimal(v).gte(1) && new Decimal(v).lte(100)), 'Enter a value from 1 to 100.')
+  .transform(normDecimal);
+
 /** Share of the confirmed opening quantity, 0 to 100 inclusive (0 is a real value, not "empty"). */
 export const allocationPct = z
   .string({ error: 'Enter the value as a decimal string.' })
@@ -73,19 +85,20 @@ export const takeProfitLevelSchema = z
 export const takeProfitSchema = z
   .object({
     mode: z.enum(TP_MODES),
-    levels: z.array(takeProfitLevelSchema).max(MAX_TP_LEVELS, `At most ${MAX_TP_LEVELS} targets.`)
+    levels: z.array(takeProfitLevelSchema).max(MAX_TP_LEVELS, `At most ${MAX_TP_LEVELS} targets.`),
+    /**
+     * Overall Take Profit allocation: share of the confirmed opening quantity the targets manage
+     * (split shares divide it). The rest is Trailing Take Profit's pool (or stays under the stop
+     * loss when trailing is off). Omitted = 100% (plans saved before the field existed).
+     */
+    allocationPct: allocationPct.optional()
   })
   .strict();
 
 /**
- * EXT-04 Trailing Take Profit. When enabled, all three values are required (refineSettings):
- * - activationPct: favourable price move from the confirmed average entry before it arms;
- * - distancePct: pullback from the best price since activation that closes its quantity;
- * - closePct ("Position to close (%)"): its share of the confirmed opening quantity, 0-100.
- *   Take Profit (when on) manages the rest; with Take Profit off the rest stays under the
- *   stop loss and signal closes only.
- * Percentages are price movement, before fees and leverage. `basis` is the trigger price stream.
- * The fields are nullable only so that old saved blocks still parse; a save never accepts null.
+ * Legacy shared EXT-04 Trailing Take Profit (one setting for both sides). `closePct` was its share
+ * of the confirmed opening quantity. Still parsed from old clients and old snapshots; a save lifts
+ * it to per-side settings (liftLegacyExitPlan).
  */
 export const trailingSchema = z
   .object({
@@ -96,6 +109,47 @@ export const trailingSchema = z
     basis: z.enum(PRICE_BASES)
   })
   .strict();
+
+/**
+ * Target close inside Trailing Take Profit: once price reaches `movePct` from the confirmed
+ * average entry, close `closePct` of the trailing pool at market, once per position (it does not
+ * wait for activation or a pullback). Trailing keeps running on what is left.
+ */
+export const targetCloseSchema = z
+  .object({
+    enabled: z.boolean(),
+    movePct: percentDistance.nullable(),
+    closePct: exitClosePct.nullable()
+  })
+  .strict();
+
+/**
+ * EXT-04 Trailing Take Profit for ONE position side (Long and Short are set independently).
+ * - activationPct: favourable price move from the confirmed average entry before it arms;
+ * - distancePct (retracement): pullback from the best price since activation that triggers a close;
+ * - closePct: share of the trailing pool to close on each trigger, 1-100. The trailing pool is the
+ *   confirmed remaining quantity that unfinished Take Profit targets do not reserve. Below 100%
+ *   the rest stays open under the same stop loss and trailing rearms only after a new best price;
+ * - targetClose: optional one-shot target inside trailing (targetCloseSchema).
+ * Percentages of price are movement from entry, before fees and leverage. `basis` is the trigger
+ * price stream. Fields are nullable only so a disabled side can be stored; a save of an enabled
+ * side never accepts null (refineSettings).
+ */
+export const trailingSideSchema = z
+  .object({
+    enabled: z.boolean(),
+    activationPct: percentDistance.nullable(),
+    distancePct: percentDistance.nullable(),
+    closePct: exitClosePct.nullable(),
+    targetClose: targetCloseSchema.nullable().optional(),
+    basis: z.enum(PRICE_BASES)
+  })
+  .strict();
+
+export type TrailingSideSettings = z.output<typeof trailingSideSchema>;
+export type LegacyTrailingSettings = z.output<typeof trailingSchema>;
+
+export const TRAILING_OFF: TrailingSideSettings = { enabled: false, activationPct: null, distancePct: null, closePct: null, targetClose: null, basis: 'MARK' };
 
 const optionalCap = (max: string, label: string) =>
   positiveDecimal
@@ -149,7 +203,15 @@ const settingsBase = z.object({
    */
   takeProfitLong: takeProfitSchema,
   takeProfitShort: takeProfitSchema,
-  trailing: trailingSchema,
+  /** EXT-04 Trailing Take Profit per position side, selected at entry like Take Profit. */
+  trailingLong: trailingSideSchema,
+  trailingShort: trailingSideSchema,
+  /**
+   * "Sync Admin Setting": entries use the latest published Common Exit Definition for Take Profit
+   * and Trailing Take Profit instead of the four fields above, which are kept (and restored when
+   * sync is turned off). Omitted = unchanged on update, off on create.
+   */
+  syncAdminExit: z.boolean().optional(),
   weekdays: weekdaysSchema,
   /** Optional daily window for new exposure (null or omitted = All day). */
   tradingWindow: tradingWindowSchema.nullable().optional(),
@@ -186,7 +248,7 @@ function refineTakeProfit(tp: SettingsBase['takeProfitLong'], key: 'takeProfitLo
     }
   }
   if (tp.mode === 'SPLIT') {
-    if (tp.levels.length < 2) add([key, 'levels'], 'Split take profit needs 2 or 3 targets.');
+    if (tp.levels.length < 2) add([key, 'levels'], `Split take profit needs 2 to ${MAX_TP_LEVELS} targets.`);
     tp.levels.forEach((l, i) => {
       const prev = tp.levels[i - 1];
       const cur = dec(l.movePct);
@@ -207,24 +269,46 @@ function refineTakeProfit(tp: SettingsBase['takeProfitLong'], key: 'takeProfitLo
 /** Sides a direction can open. */
 export const sidesOf = (d: Direction): ('LONG' | 'SHORT')[] => (d === 'LONG_ONLY' ? ['LONG'] : d === 'SHORT_ONLY' ? ['SHORT'] : ['LONG', 'SHORT']);
 
-function refineSettings(s: SettingsBase, ctx: IssueSink): void {
-  const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
+/** Rules for one side's Trailing Take Profit; issues are reported under `key`. */
+function refineTrailing(t: TrailingSideSettings, key: 'trailingLong' | 'trailingShort', add: (path: (string | number)[], message: string) => void): void {
+  if (t.enabled) {
+    // All values are explicit: activation is never assumed or derived from the retracement.
+    if (t.activationPct === null) add([key, 'activationPct'], 'Enter Activate after profit (%).');
+    if (t.distancePct === null) add([key, 'distancePct'], 'Enter Retracement (%).');
+    if (t.closePct === null) add([key, 'closePct'], 'Enter Close on each trigger (%), from 1 to 100.');
+    const tc = t.targetClose;
+    if (tc?.enabled) {
+      if (tc.movePct === null) add([key, 'targetClose', 'movePct'], 'Enter the target close move (%).');
+      if (tc.closePct === null) add([key, 'targetClose', 'closePct'], 'Enter the target close share (%), from 1 to 100.');
+    } else if (tc && (tc.movePct !== null || tc.closePct !== null)) add([key, 'targetClose'], 'Clear the target close values while it is off.');
+  } else if (t.distancePct !== null || t.activationPct !== null || t.closePct !== null || (t.targetClose && (t.targetClose.enabled || t.targetClose.movePct !== null || t.targetClose.closePct !== null))) {
+    add([key], 'Clear the Trailing Take Profit values while it is off.');
+  }
+}
+
+/** The exit-plan part of the settings (Take Profit and Trailing Take Profit per side). */
+export interface ExitPlanSettings {
+  takeProfitLong: TakeProfitSettings;
+  takeProfitShort: TakeProfitSettings;
+  trailingLong: TrailingSideSettings;
+  trailingShort: TrailingSideSettings;
+}
+
+export const EXIT_PLAN_FIELDS = ['takeProfitLong', 'takeProfitShort', 'trailingLong', 'trailingShort'] as const;
+
+/** Cross-field exit-plan rules shared by order blocks and the admin Common Exit Definition. */
+export function refineExitPlan(s: ExitPlanSettings, add: (path: (string | number)[], message: string) => void): void {
   // Both sides are always editable (and saved) whatever the direction, so both are validated:
   // a side the direction does not trade yet must still be a usable plan once it is allowed.
   refineTakeProfit(s.takeProfitLong, 'takeProfitLong', add);
   refineTakeProfit(s.takeProfitShort, 'takeProfitShort', add);
-  const trailingOn = s.trailing.enabled;
+  refineTrailing(s.trailingLong, 'trailingLong', add);
+  refineTrailing(s.trailingShort, 'trailingShort', add);
+}
 
-  if (trailingOn) {
-    // All values are explicit: activation is never assumed or derived from the distance, and
-    // an empty "Position to close" is not the same as 0.
-    if (s.trailing.activationPct === null) add(['trailing', 'activationPct'], 'Enter Activate after profit (%).');
-    if (s.trailing.distancePct === null) add(['trailing', 'distancePct'], 'Enter Trail distance (%).');
-    if (s.trailing.closePct === null || s.trailing.closePct === undefined) add(['trailing', 'closePct'], 'Enter Position to close (%), from 0 to 100.');
-  } else if (s.trailing.distancePct !== null || s.trailing.activationPct !== null || (s.trailing.closePct !== null && s.trailing.closePct !== undefined)) {
-    add(['trailing'], 'Clear the Trailing Take Profit values while it is off.');
-  }
-
+function refineSettings(s: SettingsBase, ctx: IssueSink): void {
+  const add = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
+  refineExitPlan(s, add);
   if (s.allowAdds) {
     if (s.maxAdds === null || s.maxAdds < 1 || s.maxAdds > MAX_ADDS) add(['maxAdds'], `Enter a whole number from 1 to ${MAX_ADDS}.`);
   } else if (s.maxAdds !== null) {
@@ -242,6 +326,56 @@ export function liftSharedTakeProfit(raw: unknown): unknown {
   return { takeProfitLong: takeProfit, takeProfitShort: takeProfit, ...rest };
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * One side of a legacy shared Trailing Take Profit, converted to the per-side model with the same
+ * effect on the first trigger:
+ * - Take Profit on: the old "Position to close (%)" (c, share of the opening quantity) becomes the
+ *   Take Profit allocation 100 - c, and trailing closes 100% of its pool (= the old c% allocation);
+ * - Take Profit off: trailing closes c% of the remaining quantity. Unlike before, it may close c%
+ *   of what is left again after a new best price (rearm on the remainder).
+ * A side with Take Profit on and no allocation yet gets 100 - c (trailing on) or 100 (off).
+ */
+export function liftLegacyTrailingSide(legacy: unknown, tp: unknown): { trailing: unknown; takeProfit: unknown } {
+  if (!isObj(legacy)) return { trailing: legacy, takeProfit: tp };
+  const tpOn = isObj(tp) && tp.mode !== undefined && tp.mode !== 'OFF';
+  const c = typeof legacy.closePct === 'string' ? legacy.closePct : null;
+  const cOk = c !== null && isDecimalString(c.trim()) && new Decimal(c.trim()).gte(0) && new Decimal(c.trim()).lte(100);
+  const enabled = legacy.enabled === true;
+  // An invalid legacy value is passed through unchanged so it is reported under trailing*.closePct.
+  const trailing = enabled
+    ? { enabled: true, activationPct: legacy.activationPct ?? null, distancePct: legacy.distancePct ?? null, closePct: c === null ? null : !cOk ? c : tpOn ? '100' : c, targetClose: null, basis: legacy.basis ?? 'MARK' }
+    : // Off: stray values are carried over so validation still asks for them to be cleared.
+      { enabled: false, activationPct: legacy.activationPct ?? null, distancePct: legacy.distancePct ?? null, closePct: c, targetClose: null, basis: legacy.basis ?? 'MARK' };
+  let takeProfit = tp;
+  if (tpOn && isObj(tp) && tp.allocationPct === undefined) {
+    const share = enabled && cOk ? new Decimal(100).minus(new Decimal(c!.trim())) : new Decimal(100);
+    takeProfit = { ...tp, allocationPct: share.toFixed() };
+  }
+  return { trailing, takeProfit };
+}
+
+/**
+ * Clients and snapshots written before per-side Trailing Take Profit send one `trailing`: it is
+ * converted for each side against that side's Take Profit (liftLegacyTrailingSide). A side the
+ * request sends itself wins.
+ */
+export function liftLegacyExitPlan(raw: unknown): unknown {
+  const r = liftSharedTakeProfit(raw);
+  if (!isObj(r) || !('trailing' in r)) return r;
+  const { trailing, ...rest } = r;
+  const long = liftLegacyTrailingSide(trailing, rest.takeProfitLong);
+  const short = liftLegacyTrailingSide(trailing, rest.takeProfitShort);
+  return {
+    ...rest,
+    ...(rest.takeProfitLong !== undefined && !('trailingLong' in rest) ? { takeProfitLong: long.takeProfit } : {}),
+    ...(rest.takeProfitShort !== undefined && !('trailingShort' in rest) ? { takeProfitShort: short.takeProfit } : {}),
+    ...(!('trailingLong' in rest) ? { trailingLong: long.trailing } : {}),
+    ...(!('trailingShort' in rest) ? { trailingShort: short.trailing } : {})
+  };
+}
+
 const settingsStrict = settingsBase.strict().superRefine((s, ctx) => refineSettings(s, ctx));
 const createStrict = settingsBase
   .extend({
@@ -253,9 +387,9 @@ const createStrict = settingsBase
 /** PATCH: any subset of settings, plus an optional change of trading mode (checked by the server). */
 const patchStrict = settingsBase.partial().extend({ mode: z.enum(MODES).optional() }).strict();
 
-export const orderBlockSettingsSchema = z.preprocess(liftSharedTakeProfit, settingsStrict);
-export const orderBlockCreateSchema = z.preprocess(liftSharedTakeProfit, createStrict);
-/** PATCH body: any subset of settings and optionally `mode`. The instrument cannot change. */
+export const orderBlockSettingsSchema = z.preprocess(liftLegacyExitPlan, settingsStrict);
+export const orderBlockCreateSchema = z.preprocess(liftLegacyExitPlan, createStrict);
+/** PATCH body: any subset of settings and optionally `mode`. The instrument cannot change. The server lifts a legacy `trailing` against the merged Take Profit before parsing. */
 export const orderBlockPatchSchema = z.preprocess(liftSharedTakeProfit, patchStrict);
 
 export type OrderBlockSettings = z.output<typeof settingsStrict>;
@@ -268,6 +402,10 @@ export type TakeProfitSettings = OrderBlockSettings['takeProfitLong'];
 /** The Take Profit configuration a position on `side` uses (selected at entry from the actual side). */
 export const takeProfitFor = (s: Pick<OrderBlockSettings, 'takeProfitLong' | 'takeProfitShort'>, side: 'LONG' | 'SHORT'): TakeProfitSettings =>
   side === 'LONG' ? s.takeProfitLong : s.takeProfitShort;
+
+/** The Trailing Take Profit configuration a position on `side` uses (selected at entry from the actual side). */
+export const trailingFor = (s: Pick<OrderBlockSettings, 'trailingLong' | 'trailingShort'>, side: 'LONG' | 'SHORT'): TrailingSideSettings =>
+  side === 'LONG' ? s.trailingLong : s.trailingShort;
 
 export function issuesFromZod(error: z.ZodError): Issue[] {
   return error.issues.map((i) => ({ path: i.path.map(String).join('.'), message: i.message }));
@@ -311,10 +449,26 @@ export function assertModeAllowed(mode: Mode): void {
   }
 }
 
+/**
+ * The exit plan entries of a block actually use: its own (custom) Take Profit and Trailing Take
+ * Profit, or the latest published Common Exit Definition while "Sync Admin Setting" is on.
+ */
+export interface EffectiveExitPlanDto extends ExitPlanSettings {
+  source: 'CUSTOM' | 'ADMIN';
+  /** Admin rule version in use (source ADMIN), else null. */
+  adminVersion: number | null;
+  adminPublishedAt: string | null;
+  /** Sync is on but no Common Exit Definition is published: the custom plan applies meanwhile. */
+  adminUnavailable?: boolean;
+}
+
 /** API representation of an order block (§10: decimals as strings, opaque IDs). */
-export interface OrderBlockDto extends Omit<OrderBlockSettings, 'tradingWindow'> {
+export interface OrderBlockDto extends Omit<OrderBlockSettings, 'tradingWindow' | 'syncAdminExit'> {
   /** null = All day. */
   tradingWindow: TradingWindow | null;
+  syncAdminExit: boolean;
+  /** What new entries use (custom or the admin definition). */
+  effectiveExit: EffectiveExitPlanDto;
   id: string;
   instrumentId: string;
   symbol: string;
@@ -332,38 +486,45 @@ export interface OrderBlockDto extends Omit<OrderBlockSettings, 'tradingWindow'>
   updatedAt: string;
 }
 
+/** Overall Take Profit allocation of a side, in % of the confirmed opening quantity. */
+export function takeProfitAllocationPct(tp: { mode: TakeProfitMode; allocationPct?: string | null }): Decimal {
+  if (tp.mode === 'OFF') return new Decimal(0);
+  return Decimal.min(100, Decimal.max(0, dec(tp.allocationPct) ?? new Decimal(100)));
+}
+
 /**
  * Share of each new position, in % of the confirmed opening quantity, that each exit manages.
- * With Trailing Take Profit on, its "Position to close (%)" is its share and Take Profit (when
- * on) manages the rest. With it off, Take Profit manages everything when on. Anything left is
+ * Take Profit (when on) manages its overall allocation. With Trailing Take Profit on, the rest is
+ * its pool (it closes "Close on each trigger (%)" of that pool per trigger). Anything left is
  * unallocated: it stays open under the stop loss and signal or manual closes. The fixed Stop
  * Loss always covers the whole open quantity.
  */
-export function exitAllocation(s: { takeProfit: { mode: TakeProfitMode }; trailing: { enabled: boolean; closePct?: string | null } }): {
+export function exitAllocation(s: { takeProfit: { mode: TakeProfitMode; allocationPct?: string | null }; trailing: { enabled: boolean } }): {
   takeProfitPct: string;
   trailingPct: string;
   unallocatedPct: string;
 } {
-  const trailing = s.trailing.enabled ? Decimal.min(100, dec(s.trailing.closePct) ?? 0) : new Decimal(0);
-  const takeProfit = s.takeProfit.mode === 'OFF' ? new Decimal(0) : new Decimal(100).minus(trailing);
+  const takeProfit = takeProfitAllocationPct(s.takeProfit);
+  const trailing = s.trailing.enabled ? new Decimal(100).minus(takeProfit) : new Decimal(0);
   return { takeProfitPct: takeProfit.toFixed(), trailingPct: trailing.toFixed(), unallocatedPct: new Decimal(100).minus(trailing).minus(takeProfit).toFixed() };
 }
 
 /**
- * Contracts of a confirmed opening quantity assigned to Trailing Take Profit and to Take Profit.
- * The trailing share is rounded down to the contract step; Take Profit (when on) gets the exact
- * rest, so together they never exceed the position.
+ * Contracts of a confirmed opening quantity assigned to Take Profit and to the trailing pool. The
+ * non-Take-Profit share is rounded down to the contract step and Take Profit (when on) gets the
+ * exact rest, so together they never exceed the position (the same rounding as before per-side
+ * trailing, so converted plans size identically).
  */
 export function allocateContracts(
   baseContracts: string,
-  s: { takeProfit: { mode: TakeProfitMode }; trailing: { enabled: boolean; closePct?: string | null } },
+  s: { takeProfit: { mode: TakeProfitMode; allocationPct?: string | null }; trailing: { enabled: boolean } },
   qtyStep: string
 ): { takeProfitContracts: string; trailingContracts: string } {
   const base = new Decimal(baseContracts);
-  const pct = exitAllocation(s).trailingPct;
-  const trailing = Decimal.min(base, base.times(pct).div(100).div(qtyStep).floor().times(qtyStep));
-  const takeProfit = s.takeProfit.mode === 'OFF' ? new Decimal(0) : base.minus(trailing);
-  return { takeProfitContracts: takeProfit.toFixed(), trailingContracts: trailing.toFixed() };
+  if (s.takeProfit.mode === 'OFF') return { takeProfitContracts: '0', trailingContracts: s.trailing.enabled ? base.toFixed() : '0' };
+  const rest = new Decimal(100).minus(takeProfitAllocationPct(s.takeProfit));
+  const nonTp = Decimal.min(base, base.times(rest).div(100).div(qtyStep).floor().times(qtyStep));
+  return { takeProfitContracts: base.minus(nonTp).toFixed(), trailingContracts: s.trailing.enabled ? nonTp.toFixed() : '0' };
 }
 
 /** Editable settings of a stored block, used to merge a PATCH before validating the result. */
@@ -377,7 +538,9 @@ export function settingsOf(dto: OrderBlockDto): OrderBlockSettingsInput {
     stop: dto.stop,
     takeProfitLong: dto.takeProfitLong,
     takeProfitShort: dto.takeProfitShort,
-    trailing: dto.trailing,
+    trailingLong: dto.trailingLong,
+    trailingShort: dto.trailingShort,
+    syncAdminExit: dto.syncAdminExit,
     weekdays: dto.weekdays as Weekday[],
     tradingWindow: dto.tradingWindow,
     allowAdds: dto.allowAdds,
@@ -396,7 +559,9 @@ export const AUDITED_FIELDS = [
   'stop',
   'takeProfitLong',
   'takeProfitShort',
-  'trailing',
+  'trailingLong',
+  'trailingShort',
+  'syncAdminExit',
   'weekdays',
   'tradingWindow',
   'allowAdds',
@@ -415,4 +580,50 @@ export function changedFields(before: Partial<OrderBlockDto>, after: Partial<Ord
     }
   }
   return { before: b, after: a };
+}
+
+/* ───────────────────────── Admin → Common Exit Definition ───────────────────────── */
+
+/**
+ * The admin's central exit plan: the same Take Profit and Trailing Take Profit fields and rules as
+ * an investor's Exit Plan (independent Long and Short, Fixed / Split / Off, up to five split levels,
+ * overall Take Profit allocation, trailing activation, retracement, target close, close share).
+ */
+export const commonExitDefinitionSchema = z
+  .object({
+    takeProfitLong: takeProfitSchema,
+    takeProfitShort: takeProfitSchema,
+    trailingLong: trailingSideSchema,
+    trailingShort: trailingSideSchema
+  })
+  .strict()
+  .superRefine((s, ctx) => refineExitPlan(s, (path, message) => ctx.addIssue({ code: 'custom', path, message })));
+
+export type CommonExitDefinition = z.output<typeof commonExitDefinitionSchema>;
+
+/** Where a published admin revision applies. */
+export const EXIT_APPLY_SCOPES = ['FUTURE_ENTRIES', 'EXISTING_POSITIONS'] as const;
+export type ExitApplyScope = (typeof EXIT_APPLY_SCOPES)[number];
+
+export const commonExitPublishSchema = z
+  .object({
+    plan: z.unknown(),
+    /** FUTURE_ENTRIES (default): open positions keep their snapshot. EXISTING_POSITIONS: also update linked open positions. */
+    scope: z.enum(EXIT_APPLY_SCOPES).default('FUTURE_ENTRIES'),
+    /** The version the admin edited (optimistic concurrency). null = first publish. */
+    expectedVersion: z.number().int().nonnegative().nullable(),
+    note: z.string().trim().max(500).optional()
+  })
+  .strict();
+
+/** Fields of an exit plan that differ (for the audit log and notifications). */
+export function exitPlanChanges(before: Partial<ExitPlanSettings> | null, after: ExitPlanSettings): { field: string; before: unknown; after: unknown }[] {
+  return EXIT_PLAN_FIELDS.filter((k) => canonicalJson(before?.[k] ?? null) !== canonicalJson(after[k])).map((k) => ({ field: k, before: before?.[k] ?? null, after: after[k] }));
+}
+
+/** JSON with object keys sorted (stored jsonb does not keep key order). */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v as object).sort().filter((k) => (v as Record<string, unknown>)[k] !== undefined).map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(',')}}`;
+  return JSON.stringify(v ?? null);
 }

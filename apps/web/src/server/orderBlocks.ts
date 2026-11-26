@@ -1,4 +1,4 @@
-import { connectionFor, fixtureQuote, lighterLiveRefusalFor, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, recordAudit, type BlockRemovalReason, type Executor, type InstrumentDto, type PublicUser } from '@trendpilot/db';
+import { connectionFor, effectiveExitPlan, fixtureQuote, latestCommonExit, lighterLiveRefusalFor, getDb, getInstrument, latestQuote, getVersion, orderBlocksFor, partialCloseProtection, recordAudit, type BlockRemovalReason, type Executor, type InstrumentDto, type PartialCloseProtection, type PublicUser } from '@trendpilot/db';
 import {
   assertModeAllowed,
   catalogIssues,
@@ -8,6 +8,7 @@ import {
   exchangeLabel,
   exchangeUnavailableReason,
   isTradableExchange,
+  liftLegacyExitPlan,
   paperUnsupportedReason,
   DomainError,
   ErrorCode,
@@ -54,6 +55,32 @@ async function catalogCheck(db: Executor, instrumentId: string, s: { strategyVer
   return issues;
 }
 
+/** "Sync Admin Setting" can only be turned on once a Common Exit Definition is published. */
+async function syncCheck(db: Executor, turningOn: boolean): Promise<Issue[]> {
+  if (!turningOn) return [];
+  return (await latestCommonExit(db)) ? [] : [{ path: 'syncAdminExit', message: 'No Common Exit Definition is published yet, so there is no admin setting to follow. Keep your own exit plan until an administrator publishes one.' }];
+}
+
+/**
+ * A PATCH from a client written before per-side trailing sends one `trailing`: it is converted per
+ * side against the Take Profit the merged block will have, with that Take Profit's allocation
+ * re-derived from the old "Position to close (%)" (unless the request sets one itself).
+ */
+function liftLegacyPatch(raw: unknown, current: OrderBlockDto): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('trailing' in raw)) return raw;
+  const r = raw as Record<string, unknown>;
+  const strip = (tp: OrderBlockDto['takeProfitLong']) => {
+    const { allocationPct: _drop, ...rest } = tp;
+    void _drop;
+    return rest;
+  };
+  const shared = r.takeProfit;
+  return liftLegacyExitPlan({
+    ...r,
+    ...(shared === undefined ? { takeProfitLong: r.takeProfitLong ?? strip(current.takeProfitLong), takeProfitShort: r.takeProfitShort ?? strip(current.takeProfitShort) } : {})
+  });
+}
+
 export async function listBlocks(owner: PublicUser): Promise<OrderBlockDto[]> {
   return orderBlocksFor(getDb(), owner.id).list();
 }
@@ -71,7 +98,7 @@ export async function createBlock(owner: PublicUser, raw: unknown, correlationId
   assertModeAllowed(input.mode);
 
   const db = getDb();
-  const issues = await catalogCheck(db, input.instrumentId, input, input.mode as BlockMode);
+  const issues = [...(await catalogCheck(db, input.instrumentId, input, input.mode as BlockMode)), ...(await syncCheck(db, input.syncAdminExit === true))];
   if (issues.length) throw validationError(issues);
 
   return db.transaction(async (tx) => {
@@ -151,13 +178,12 @@ export async function modeChangeStatus(owner: PublicUser, id: string, to: string
 }
 
 export async function updateBlock(owner: PublicUser, id: string, revision: number, raw: unknown, correlationId: string): Promise<OrderBlockDto> {
-  const patch = parseWith(orderBlockPatchSchema, raw);
-  if (!patch.ok) throw validationError(patch.issues);
-  const { mode: requestedMode, ...settingsPatch } = patch.value;
-
   const db = getDb();
   const repo = orderBlocksFor(db, owner.id);
   const current = await repo.get(id);
+  const patch = parseWith(orderBlockPatchSchema, current ? liftLegacyPatch(raw, current) : raw);
+  if (!patch.ok) throw validationError(patch.issues);
+  const { mode: requestedMode, ...settingsPatch } = patch.value;
   if (!current) return deny(owner, 'ORDER_BLOCK_UPDATE', id, correlationId);
   if (current.revision !== revision) throw conflict();
   const toMode = requestedMode !== undefined && requestedMode !== current.mode ? requestedMode : undefined;
@@ -166,12 +192,12 @@ export async function updateBlock(owner: PublicUser, id: string, revision: numbe
   // CFG-05: the merged result must be a complete, valid configuration.
   const merged = parseWith(orderBlockSettingsSchema, { ...settingsOf(current), ...settingsPatch });
   if (!merged.ok) throw validationError(merged.issues);
-  const issues = await catalogCheck(db, current.instrumentId, merged.value);
+  const issues = [...(await catalogCheck(db, current.instrumentId, merged.value)), ...(await syncCheck(db, merged.value.syncAdminExit === true && !current.syncAdminExit))];
   if (issues.length) throw validationError(issues);
 
   // A legacy trailing stop converts only when this save carries trailing settings, which the
   // merged validation above held to Trailing Take Profit rules (explicit activation value).
-  const trailingConverted = current.trailingConversionRequired && settingsPatch.trailing !== undefined;
+  const trailingConverted = current.trailingConversionRequired && (settingsPatch.trailingLong !== undefined || settingsPatch.trailingShort !== undefined);
 
   return db.transaction(async (tx) => {
     if (toMode) {
@@ -327,13 +353,21 @@ async function previewWith(instrument: InstrumentDto, settings: OrderBlockSettin
 }
 
 /** Preview unsaved settings (the editor). Validates exactly like create; persists nothing. */
+/** The exit plan a draft or block would use (the admin definition while synced, when published). */
+async function withEffectiveExit<T extends OrderBlockSettings>(db: Executor, s: T): Promise<T & { exitPlanSource: 'CUSTOM' | 'ADMIN'; exitPlanAdminVersion: number | null }> {
+  const e = effectiveExitPlan({ ...s, syncAdminExit: s.syncAdminExit === true }, s.syncAdminExit ? await latestCommonExit(db) : null);
+  return { ...s, takeProfitLong: e.takeProfitLong, takeProfitShort: e.takeProfitShort, trailingLong: e.trailingLong, trailingShort: e.trailingShort, exitPlanSource: e.source, exitPlanAdminVersion: e.adminVersion };
+}
+
 export async function previewDraft(raw: unknown) {
   const parsed = parseWith(orderBlockCreateSchema, raw);
   if (!parsed.ok) throw validationError(parsed.issues);
   const db = getDb();
   const issues = await catalogCheck(db, parsed.value.instrumentId, parsed.value);
   if (issues.length) throw validationError(issues);
-  return previewWith((await getInstrument(db, parsed.value.instrumentId))!, parsed.value, parsed.value.mode as BlockMode);
+  const instrument = (await getInstrument(db, parsed.value.instrumentId))!;
+  const s = await withEffectiveExit(db, parsed.value);
+  return { ...(await previewWith(instrument, s, parsed.value.mode as BlockMode)), exitPlan: { source: s.exitPlanSource, adminVersion: s.exitPlanAdminVersion }, partialExitProtection: partialCloseProtection(instrument.exchange, parsed.value.mode as BlockMode) };
 }
 
 /** Preview a saved block. Owner-scoped: an unowned ID is 404. */
@@ -342,7 +376,19 @@ export async function previewSaved(owner: PublicUser, id: string) {
   if (!block) throw notFound();
   const instrument = await getInstrument(getDb(), block.instrumentId);
   if (!instrument) throw notFound();
-  return previewWith(instrument, block, block.mode as BlockMode);
+  const e = block.effectiveExit;
+  return {
+    ...(await previewWith(instrument, { ...block, takeProfitLong: e.takeProfitLong, takeProfitShort: e.takeProfitShort, trailingLong: e.trailingLong, trailingShort: e.trailingShort }, block.mode as BlockMode)),
+    exitPlan: { source: e.source, adminVersion: e.adminVersion },
+    partialExitProtection: partialCloseProtection(instrument.exchange, block.mode as BlockMode)
+  };
+}
+
+/** Per exchange and mode: whether a partial exit keeps the remainder under a verified, resized stop. */
+export function partialExitProtectionMatrix(): Record<string, { PAPER: PartialCloseProtection; LIVE: PartialCloseProtection }> {
+  const out: Record<string, { PAPER: PartialCloseProtection; LIVE: PartialCloseProtection }> = {};
+  for (const x of ['MEXC', 'BITUNIX', 'LIGHTER']) out[x] = { PAPER: partialCloseProtection(x, 'PAPER'), LIVE: partialCloseProtection(x, 'LIVE') };
+  return out;
 }
 
 /* ─────────────────────────── Removal (Trade Settings → Remove) ─────────────────────────── */

@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { PlusIcon, SlidersHorizontalIcon, Trash2Icon } from 'lucide-react';
+import { BellIcon, PlusIcon, SlidersHorizontalIcon, Trash2Icon } from 'lucide-react';
 import { toast } from 'sonner';
-import { liveUnavailableReason, MODE_LABELS, type BlockMode, type OrderBlockDto } from '@trendpilot/domain';
+import { liveUnavailableReason, MODE_LABELS, type BlockMode, type CommonExitDefinition, type OrderBlockDto } from '@trendpilot/domain';
 import type { InstrumentDto, StrategyVersionDto } from '@trendpilot/db';
 import { api, request } from '@/lib/api';
 import { PageContainer } from '../layout/PageContainer';
@@ -31,6 +31,12 @@ interface Props {
   lighterLiveIds?: string[];
   /** Server-decided: which blocks can be removed now (and how), and why the others are kept. Rechecked when applied. */
   removal?: RemovalPreview;
+  /** Latest published admin Common Exit Definition (null = none). */
+  adminExit?: { version: number; plan: CommonExitDefinition; publishedAt: string } | null;
+  /** Per exchange and mode: why partial exits are not verified as protected (null = verified). */
+  protectionLimitations?: Record<string, { PAPER: string | null; LIVE: string | null }>;
+  /** Unread in-app notifications (e.g. admin exit rule changes). */
+  notifications?: { id: string; title: string; body: string; createdAt: string }[];
 }
 
 type RemovalReason = { code: string; text: string };
@@ -42,7 +48,7 @@ interface RemovalPreview {
 const actionText = (a: 'DELETE' | 'ARCHIVE') => (a === 'ARCHIVE' ? 'archived: its trade and signal history stays' : 'deleted: it has no trade or signal history');
 
 /** UI-03 Trade Settings for the signed-in investor only. All data arrives owner-scoped from the server. */
-export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [], removal = { removable: [], excluded: [] } }: Props) {
+export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, versions, liveConnectionStatus, bitunixConnectionStatus = null, lighterConnectionStatus = null, lighterLiveIds = [], removal = { removable: [], excluded: [] }, adminExit = null, protectionLimitations = {}, notifications = [] }: Props) {
   const router = useRouter();
   /** One block to remove (row action) or the bulk "Remove unused tokens" preview. */
   const [removing, setRemoving] = useState<OrderBlockDto | 'bulk' | null>(null);
@@ -50,6 +56,33 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
   /** A saved block id, 'new', or a new block prefilled from a saved one in the other mode. */
   const [editing, setEditing] = useState<string | 'new' | { copyFrom: OrderBlockDto; mode: BlockMode } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // Admin publishes a Common Exit Definition → refresh (existing live update stream, Postgres NOTIFY).
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return;
+    const es = new EventSource('/v1/market/quotes/stream');
+    const onExit = (e: MessageEvent) => {
+      const v = (() => {
+        try {
+          return (JSON.parse(e.data) as { version: number }).version;
+        } catch {
+          return null;
+        }
+      })();
+      toast('Admin exit rule updated', { description: `Version ${v ?? '?'} is published. Order blocks with Sync Admin Setting now use it for new entries.` });
+      router.refresh();
+    };
+    es.addEventListener('exit-definition', onExit as EventListener);
+    return () => {
+      es.removeEventListener('exit-definition', onExit as EventListener);
+      es.close();
+    };
+  }, [router]);
+
+  const dismissNotifications = async () => {
+    await request('POST', '/v1/me/notifications/read', { body: { ids: notifications.map((n) => n.id) } });
+    router.refresh();
+  };
 
   const existing = typeof editing === 'string' && editing !== 'new' ? blocks.find((b) => b.id === editing) : undefined;
   const copy = editing && typeof editing === 'object' ? editing : undefined;
@@ -130,6 +163,23 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
         </div>
       }
     >
+      {notifications.length > 0 && (
+        <div className="mb-4 space-y-2 rounded-xl border border-accent/40 bg-accent/5 p-3" role="status" data-testid="notifications">
+          {notifications.map((n) => (
+            <div key={n.id} className="flex items-start gap-2 text-sm">
+              <BellIcon className="mt-0.5 h-4 w-4 shrink-0 text-accent" aria-hidden />
+              <div>
+                <p className="font-medium text-ink">{n.title}</p>
+                <p className="text-xs text-muted">{n.body}</p>
+                <p className="text-[11px] text-subtle">{new Date(n.createdAt).toLocaleString()}</p>
+              </div>
+            </div>
+          ))}
+          <Button size="sm" variant="ghost" onClick={() => void dismissNotifications()} data-testid="notifications-dismiss">
+            Mark as read
+          </Button>
+        </div>
+      )}
       {blocks.length === 0 ? (
         <EmptyState icon={SlidersHorizontalIcon} title="No order blocks yet" body="Add a token to configure how it trades on shared signals. New blocks start paused." />
       ) : (
@@ -227,6 +277,8 @@ export function TradeSettingsClient({ ownerName, timezone, blocks, instruments, 
             bitunixConnectionStatus={bitunixConnectionStatus}
             lighterConnectionStatus={lighterConnectionStatus}
             lighterLiveIds={lighterLiveIds}
+            adminExit={adminExit}
+            protectionLimitations={protectionLimitations}
             timezone={timezone}
             onDone={(saved) => {
               setEditing(null);

@@ -101,6 +101,10 @@ export interface PositionDto {
   } | null;
   /** Live: automatic exits are paused for this position after the exchange rejected a close. */
   exitHalt: { at: string; reason: string; text: string } | null;
+  /** The exit plan the position actually uses: its block's own, or an admin Common Exit Definition version (and when it was applied to this open position). */
+  exitPlan: { source: 'CUSTOM' | 'ADMIN'; adminVersion: number | null; appliedAt: string | null };
+  /** Latest runtime exit report (e.g. a partial close the exchange limits refused, or an unconfirmed stop resize). */
+  exitNotice: { text: string; at: string } | null;
 }
 
 export interface TargetDto {
@@ -141,6 +145,19 @@ export interface TrailingDto {
   /** Allocated contracts ("Position to close (%)" of the opening quantity) and confirmed fills. Null planned = legacy. */
   plannedContracts: string | null;
   filledContracts: string;
+  /**
+   * Partial Trailing Take Profit (positions opened from this release; null for older ones): share
+   * of the pool each trigger closes, completed cycles, the best price of the last completed cycle
+   * (a new cycle needs a new best beyond it), and the fixed quantity of a trigger still completing.
+   */
+  partial: {
+    closePct: string;
+    cycles: number;
+    cycleExtreme: string | null;
+    pendingContracts: string | null;
+    pendingFilled: string;
+    targetClose: { price: string; closePct: string; status: string; contracts: string | null; filled: string } | null;
+  } | null;
 }
 
 const toTarget = (t: typeof positionTargets.$inferSelect): TargetDto => ({
@@ -179,9 +196,11 @@ function withTargets(pos: PositionDto, targets: TargetDto[]): PositionDto {
   const contracts =
     t.kind !== 'TAKE_PROFIT'
       ? pos.contracts
-      : t.plannedContracts !== null
-        ? Decimal.max(0, Decimal.min(new Decimal(t.plannedContracts).minus(t.filledContracts), pos.contracts)).toFixed()
-        : trailingTakeProfitContracts(pos.contracts, targets);
+      : t.partial
+        ? trailingTakeProfitContracts(pos.contracts, targets)
+        : t.plannedContracts !== null
+          ? Decimal.max(0, Decimal.min(new Decimal(t.plannedContracts).minus(t.filledContracts), pos.contracts)).toFixed()
+          : trailingTakeProfitContracts(pos.contracts, targets);
   return { ...pos, targets, trailing: { ...pos.trailing, contracts } };
 }
 
@@ -261,8 +280,24 @@ function toPosition({ p, symbol, inst, ev }: { p: typeof positions.$inferSelect;
             level: n(p.trailingStopPrice),
             updatedAt: p.trailingUpdatedAt?.toISOString() ?? null,
             plannedContracts: n(p.trailingPlannedContracts),
-            filledContracts: n(p.trailingFilledContracts)!
-          }
+            filledContracts: n(p.trailingFilledContracts)!,
+            partial:
+              p.trailingClosePct === null
+                ? null
+                : {
+                    closePct: n(p.trailingClosePct)!,
+                    cycles: p.trailingCycle,
+                    cycleExtreme: n(p.trailingCycleExtreme),
+                    pendingContracts: n(p.trailingCycleContracts),
+                    pendingFilled: n(p.trailingCycleFilled)!,
+                    targetClose:
+                      p.trailingTargetStatus && p.trailingTargetPrice
+                        ? { price: n(p.trailingTargetPrice)!, closePct: n(p.trailingTargetClosePct)!, status: p.trailingTargetStatus, contracts: n(p.trailingTargetContracts), filled: n(p.trailingTargetFilled)! }
+                        : null
+                  }
+          },
+    exitPlan: { source: p.exitPlanSource as 'CUSTOM' | 'ADMIN', adminVersion: p.exitPlanAdminVersion, appliedAt: p.exitPlanAppliedAt?.toISOString() ?? null },
+    exitNotice: p.exitNotice && p.exitNoticeAt ? { text: p.exitNotice, at: p.exitNoticeAt.toISOString() } : null
   };
 }
 

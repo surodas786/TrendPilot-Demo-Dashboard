@@ -2,9 +2,11 @@ import {
   ALL_WEEKDAYS,
   catalogIssues,
   exchangeLabel,
+  MAX_TP_LEVELS,
   orderBlockSettingsSchema,
   parseWith,
   type Direction,
+  type ExitPlanSettings,
   type Issue,
   type MarginMode,
   type OrderBlockDto,
@@ -22,12 +24,34 @@ export const TP_SIDES: readonly TpSide[] = ['LONG', 'SHORT'];
 export interface SideTakeProfit {
   mode: TakeProfitMode;
   targets: { id: string; movePct: string; closePct: string }[];
+  /** Overall Take Profit allocation (% of the confirmed opening quantity). '' = not entered. */
+  allocationPct: string;
 }
-/** API field and validation path prefix of each side's Take Profit. */
+/** One side's Trailing Take Profit, as typed. */
+export interface SideTrailing {
+  enabled: boolean;
+  activationPct: string;
+  /** Retracement (pullback from the best price since activation). */
+  distancePct: string;
+  /** Close on each trigger: share of the trailing pool, 1-100. */
+  closePct: string;
+  basis: PriceBasis;
+  targetCloseEnabled: boolean;
+  targetMovePct: string;
+  targetClosePct: string;
+}
+/** API field and validation path prefix of each side's Take Profit / Trailing Take Profit. */
 export const TP_KEY: Record<TpSide, 'takeProfitLong' | 'takeProfitShort'> = { LONG: 'takeProfitLong', SHORT: 'takeProfitShort' };
+export const TRAILING_KEY: Record<TpSide, 'trailingLong' | 'trailingShort'> = { LONG: 'trailingLong', SHORT: 'trailingShort' };
+
+/** The exit plan part of a form (investor order block or admin Common Exit Definition). */
+export interface ExitDraft {
+  tp: Record<TpSide, SideTakeProfit>;
+  trailing: Record<TpSide, SideTrailing>;
+}
 
 /** Form state for one order block. Strings mirror the inputs; validation is shared with the server. */
-export interface Draft {
+export interface Draft extends ExitDraft {
   instrumentId: string;
   strategyVersionId: string;
   direction: Direction;
@@ -38,14 +62,8 @@ export interface Draft {
   /** Percent distance or absolute price, depending on stopType. */
   stopPct: string;
   stopBasis: PriceBasis;
-  /** Take Profit per position side, edited independently; both are kept whatever the direction. */
-  tp: Record<TpSide, SideTakeProfit>;
-  trailingEnabled: boolean;
-  trailingActivationPct: string;
-  trailingPct: string;
-  /** "Position to close (%)": Trailing Take Profit's share of the opening quantity. '' = not entered (0 is a value). */
-  trailingClosePct: string;
-  trailingBasis: PriceBasis;
+  /** "Sync Admin Setting": entries use the admin Common Exit Definition; `tp` / `trailing` stay the custom plan. */
+  syncAdminExit: boolean;
   weekdays: Weekday[];
   /** CFG-04 trading window: All day, or Start–End (HH:mm) in the block timezone. */
   windowMode: 'ALL_DAY' | 'HOURS';
@@ -70,7 +88,7 @@ const emptyRisk = (): Draft['risk'] => Object.fromEntries(RISK_FIELDS.map((f) =>
 
 export const BASIS_LABELS: Record<PriceBasis, string> = { MARK: 'Mark price', LAST: 'Last price' };
 
-export const MAX_TARGETS = 3;
+export const MAX_TARGETS = MAX_TP_LEVELS;
 
 export const DIRECTION_LABELS: Record<Direction, string> = { LONG_ONLY: 'Long only', SHORT_ONLY: 'Short only', BOTH: 'Long and Short' };
 export const OPPOSITE_LABELS = { KEEP_OPEN: 'Keep position open', CLOSE_ONLY: 'Close position only', CLOSE_AND_REVERSE: 'Close and reverse' } as const;
@@ -98,22 +116,22 @@ export const costCurrency = (i: Pick<InstrumentDto, 'quote'> | undefined) => i?.
  */
 export const supportsMode = (i: Pick<InstrumentDto, 'exchange'>, mode: 'PAPER' | 'LIVE') => (mode === 'LIVE' ? true : i.exchange === 'MEXC' || i.exchange === 'LIGHTER');
 
+export const trailingOff = (distancePct = ''): SideTrailing => ({ enabled: false, activationPct: '', distancePct, closePct: '', basis: 'MARK', targetCloseEnabled: false, targetMovePct: '', targetClosePct: '' });
+
 /**
  * Exit fields prefilled from the administrator's published pair suggestions (CFG-05).
  * Trailing Take Profit starts off: it needs an explicit activation value and a quantity left
- * by the targets, neither of which a suggestion can choose. Its trail distance is prefilled
- * from the suggestion for when the investor turns it on.
+ * by the targets, neither of which a suggestion can choose. Its retracement is prefilled from the
+ * suggestion for when the investor turns it on.
  */
-export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tp' | 'trailingEnabled' | 'trailingPct' | 'trailingActivationPct' | 'trailingClosePct'> {
-  const fixed = (): SideTakeProfit => ({ mode: 'FIXED', targets: [{ id: newTargetId(), movePct: i?.suggested.takeProfitPct ?? '', closePct: '100' }] });
+export function exitDefaults(i: InstrumentDto | undefined): Pick<Draft, 'stopType' | 'stopPct' | 'tp' | 'trailing'> {
+  const fixed = (): SideTakeProfit => ({ mode: 'FIXED', targets: [{ id: newTargetId(), movePct: i?.suggested.takeProfitPct ?? '', closePct: '100' }], allocationPct: '100' });
+  const trail = i?.suggested.trailingPct ?? '';
   return {
     stopType: 'PERCENT',
     stopPct: i?.suggested.stopPct ?? '',
-    trailingActivationPct: '',
-    trailingClosePct: '',
     tp: { LONG: fixed(), SHORT: fixed() },
-    trailingEnabled: false,
-    trailingPct: i?.suggested.trailingPct ?? ''
+    trailing: { LONG: trailingOff(trail), SHORT: trailingOff(trail) }
   };
 }
 
@@ -132,7 +150,7 @@ export function newDraft(i: InstrumentDto | undefined, v: StrategyVersionDto | u
     marginMode: 'ISOLATED',
     ...exitDefaults(i),
     stopBasis: 'MARK',
-    trailingBasis: 'MARK',
+    syncAdminExit: false,
     weekdays: [...ALL_WEEKDAYS],
     windowMode: 'ALL_DAY',
     windowStart: '',
@@ -145,14 +163,58 @@ export function newDraft(i: InstrumentDto | undefined, v: StrategyVersionDto | u
 
 const sideFromSaved = (t: OrderBlockDto['takeProfitLong']): SideTakeProfit => ({
   mode: t.mode,
-  targets: t.levels.length ? t.levels.map((l) => ({ ...l })) : [{ id: newTargetId(), movePct: '', closePct: '100' }]
+  targets: t.levels.length ? t.levels.map((l) => ({ ...l })) : [{ id: newTargetId(), movePct: '', closePct: '100' }],
+  allocationPct: t.mode === 'OFF' ? '100' : (t.allocationPct ?? '100')
 });
+
+const trailingFromSaved = (t: OrderBlockDto['trailingLong'] | undefined): SideTrailing => ({
+  enabled: !!t?.enabled,
+  activationPct: t?.activationPct ?? '',
+  distancePct: t?.distancePct ?? '',
+  closePct: t?.closePct ?? '',
+  basis: t?.basis ?? 'MARK',
+  targetCloseEnabled: !!t?.targetClose?.enabled,
+  targetMovePct: t?.targetClose?.movePct ?? '',
+  targetClosePct: t?.targetClose?.closePct ?? ''
+});
+
+/** Form state of a stored exit plan (block or admin definition). */
+export function exitDraftFrom(p: ExitPlanSettings): ExitDraft {
+  return {
+    tp: { LONG: sideFromSaved(p.takeProfitLong), SHORT: sideFromSaved(p.takeProfitShort) },
+    trailing: { LONG: trailingFromSaved(p.trailingLong), SHORT: trailingFromSaved(p.trailingShort) }
+  };
+}
 
 /** The API shape of one side: a fixed target manages the whole Take Profit share; split targets divide it. */
 const sidePayload = (t: SideTakeProfit) => {
   const levels = t.mode === 'OFF' ? [] : t.mode === 'FIXED' ? [{ ...t.targets[0]!, closePct: '100' }] : t.targets;
-  return { mode: t.mode, levels: levels.map((l) => ({ id: l.id, movePct: l.movePct.trim(), closePct: l.closePct.trim() })) };
+  return {
+    mode: t.mode,
+    levels: levels.map((l) => ({ id: l.id, movePct: l.movePct.trim(), closePct: l.closePct.trim() })),
+    ...(t.mode === 'OFF' ? {} : { allocationPct: t.allocationPct.trim() })
+  };
 };
+
+const opt = (on: boolean, v: string) => (on && v.trim() !== '' ? v.trim() : null);
+const trailingPayload = (t: SideTrailing) => ({
+  enabled: t.enabled,
+  activationPct: opt(t.enabled, t.activationPct),
+  distancePct: opt(t.enabled, t.distancePct),
+  closePct: opt(t.enabled, t.closePct),
+  targetClose: t.enabled && t.targetCloseEnabled ? { enabled: true, movePct: opt(true, t.targetMovePct), closePct: opt(true, t.targetClosePct) } : null,
+  basis: t.basis
+});
+
+/** API exit-plan fields (Take Profit and Trailing Take Profit, both sides). */
+export function exitPlanPayload(d: ExitDraft) {
+  return {
+    takeProfitLong: sidePayload(d.tp.LONG),
+    takeProfitShort: sidePayload(d.tp.SHORT),
+    trailingLong: trailingPayload(d.trailing.LONG),
+    trailingShort: trailingPayload(d.trailing.SHORT)
+  };
+}
 
 export function draftFromBlock(b: OrderBlockDto): Draft {
   return {
@@ -165,12 +227,8 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
     stopType: b.stop.type,
     stopPct: b.stop.value,
     stopBasis: b.stop.basis,
-    tp: { LONG: sideFromSaved(b.takeProfitLong), SHORT: sideFromSaved(b.takeProfitShort) },
-    trailingEnabled: b.trailing.enabled,
-    trailingPct: b.trailing.distancePct ?? '',
-    trailingActivationPct: b.trailing.activationPct ?? '',
-    trailingClosePct: b.trailing.closePct ?? '',
-    trailingBasis: b.trailing.basis,
+    ...exitDraftFrom(b),
+    syncAdminExit: b.syncAdminExit,
     weekdays: [...b.weekdays],
     windowMode: b.tradingWindow ? 'HOURS' : 'ALL_DAY',
     windowStart: b.tradingWindow?.start ?? '',
@@ -183,7 +241,7 @@ export function draftFromBlock(b: OrderBlockDto): Draft {
 
 /** The settings payload sent to the API (PATCH body; POST adds instrumentId and mode). */
 export function settingsPayload(d: Draft) {
-  // The Take Profit / Trailing Take Profit split itself is Trailing Take Profit's "Position to close (%)".
+  // The custom exit plan is always sent (kept while "Sync Admin Setting" is on, restored when off).
   return {
     strategyVersionId: d.strategyVersionId,
     direction: d.direction,
@@ -191,16 +249,8 @@ export function settingsPayload(d: Draft) {
     leverage: d.leverage ?? 0,
     marginMode: d.marginMode,
     stop: { type: d.stopType, value: d.stopPct.trim(), basis: d.stopBasis },
-    takeProfitLong: sidePayload(d.tp.LONG),
-    takeProfitShort: sidePayload(d.tp.SHORT),
-    trailing: {
-      enabled: d.trailingEnabled,
-      activationPct: d.trailingEnabled && d.trailingActivationPct.trim() ? d.trailingActivationPct.trim() : null,
-      distancePct: d.trailingEnabled && d.trailingPct.trim() ? d.trailingPct.trim() : null,
-      // Empty stays null (reported as missing); "0" is sent as 0.
-      closePct: d.trailingEnabled && d.trailingClosePct.trim() !== '' ? d.trailingClosePct.trim() : null,
-      basis: d.trailingBasis
-    },
+    ...exitPlanPayload(d),
+    syncAdminExit: d.syncAdminExit,
     weekdays: d.weekdays,
     tradingWindow: d.windowMode === 'HOURS' ? { start: d.windowStart.trim(), end: d.windowEnd.trim() } : null,
     allowAdds: d.allowAdds,

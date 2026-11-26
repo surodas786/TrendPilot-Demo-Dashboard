@@ -19,7 +19,7 @@
  * - --reset-paper truncates ALL paper trading state in this database (dev only).
  */
 import { and, eq, sql } from 'drizzle-orm';
-import { ALL_WEEKDAYS, lastClosedBarOpen, localWeekday, orderBlockSettingsSchema, WEEKDAY_LABELS, type OrderBlockSettingsInput } from '@trendpilot/domain';
+import { ALL_WEEKDAYS, lastClosedBarOpen, liftLegacyExitPlan, localWeekday, orderBlockSettingsSchema, WEEKDAY_LABELS, type OrderBlockSettingsInput } from '@trendpilot/domain';
 import { createDb, type Db } from '../client';
 import { loadRootEnv, requireEnv } from '../env';
 import { FIXTURE_IDS, FIXTURE_STRATEGY, FIXTURE_USERS } from '../fixtures';
@@ -119,8 +119,10 @@ try {
         ? { ...bothSides({ mode: 'OFF' as const, levels: [] }), trailing: { enabled: true, activationPct: '1', distancePct: '1', closePct: '100', basis: 'LAST' as const } }
         : { ...bothSides(tp(exitsProfile ? '6' : '3')), trailing: off }
   };
-  await upsertBlock(db, ids.A!, { ...common, ...plans.A, orderCostUsdt: '100', leverage: 10, stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' }, weekdays: [...ALL_WEEKDAYS] });
-  await upsertBlock(db, ids.B!, {
+  // Plans are written in the shared-trailing form and converted per side (liftLegacyExitPlan).
+  const lift = (v: unknown) => liftLegacyExitPlan(v) as Parameters<typeof upsertBlock>[2];
+  await upsertBlock(db, ids.A!, lift({ ...common, ...plans.A, orderCostUsdt: '100', leverage: 10, stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' }, weekdays: [...ALL_WEEKDAYS] }));
+  await upsertBlock(db, ids.B!, lift({
     ...common,
     ...plans.B,
     direction: profile === 'reverse' ? 'LONG_ONLY' : 'BOTH',
@@ -128,7 +130,7 @@ try {
     leverage: 5,
     stop: { type: 'PERCENT', value: '2', basis: 'MARK' },
     weekdays: exitsProfile ? [...ALL_WEEKDAYS] : ALL_WEEKDAYS.filter((d) => d !== today)
-  });
+  }));
   await db.transaction(async (tx) => {
     await lockPaperAccount(tx, ids.A!);
     await lockPaperAccount(tx, ids.B!);

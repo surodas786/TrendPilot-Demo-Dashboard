@@ -260,6 +260,13 @@
       "when": 1795632000000,
       "tag": "0036_m26_intent_exchange_status",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1795718400000,
+      "tag": "0037_m27_exit_plan_per_side_admin",
+      "breakpoints": true
     }
   ]
 }

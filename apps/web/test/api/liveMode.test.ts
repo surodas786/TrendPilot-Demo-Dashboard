@@ -296,11 +296,16 @@ describe('Live entry, attached stop, partial fill, reduce-only close — next to
     expect(after!.status).toBe('OPEN');
     expect(D(after!.contracts).lt(lp!.contracts)).toBe(true);
     expect(after!.protectionStatus).toBe('PROTECTED');
+    // Never cancel-first: MEXC refuses a replacement while the old stop rests (closable quantity),
+    // so the original reduce-only stop stays at its price and covers the remainder (reported).
     const active = [...mx.stops.values()].filter((s) => s.state === 1);
     expect(active).toHaveLength(1);
-    expect(D(active[0]!.vol).eq(after!.contracts)).toBe(true);
+    expect(D(active[0]!.vol).eq(lp!.contracts)).toBe(true);
+    expect(mx.calls.filter((c) => c.path === '/api/v1/private/stoporder/cancel')).toHaveLength(0);
+    // The replacement that was attempted first had the safe close-only settings.
     const place = mx.calls.find((c) => c.path === '/api/v1/private/stoporder/place')!.body as Record<string, unknown>;
     expect(place).toMatchObject({ stopLossReverse: 2, takeProfitReverse: 2, stopLossType: 0 });
+    expect(D(String(place.vol)).eq(after!.contracts)).toBe(true); // for exactly the remainder
   });
 });
 

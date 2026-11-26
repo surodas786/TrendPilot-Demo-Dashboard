@@ -11,6 +11,7 @@ import {
   type Weekday
 } from '@trendpilot/domain';
 import type { Executor } from '../client';
+import { effectiveExitPlan, latestCommonExit, type CommonExitRevisionDto } from './commonExit';
 import { instruments, jobs, orderBlocks, orderIntents, paperAccounts, positions, signalDecisions } from '../schema';
 
 /** Order intent states that are not finished yet (same set the entry and exit paths use). */
@@ -21,7 +22,7 @@ export const isUuid = (v: string) => UUID_RE.test(v);
 
 type Row = typeof orderBlocks.$inferSelect;
 
-function toDto(r: Row, inst: { symbol: string; exchange: string }): OrderBlockDto {
+function toDto(r: Row, inst: { symbol: string; exchange: string }, admin: CommonExitRevisionDto | null): OrderBlockDto {
   return {
     id: r.id,
     instrumentId: r.instrumentId,
@@ -36,7 +37,10 @@ function toDto(r: Row, inst: { symbol: string; exchange: string }): OrderBlockDt
     stop: r.stop as OrderBlockDto['stop'],
     takeProfitLong: r.takeProfitLong as OrderBlockDto['takeProfitLong'],
     takeProfitShort: r.takeProfitShort as OrderBlockDto['takeProfitShort'],
-    trailing: r.trailing as OrderBlockDto['trailing'],
+    trailingLong: r.trailingLong as OrderBlockDto['trailingLong'],
+    trailingShort: r.trailingShort as OrderBlockDto['trailingShort'],
+    syncAdminExit: r.syncAdminExit,
+    effectiveExit: effectiveExitPlan(r, admin),
     weekdays: r.weekdays as Weekday[],
     timezone: r.timezone,
     tradingWindow: r.tradingWindowStart && r.tradingWindowEnd ? { start: r.tradingWindowStart, end: r.tradingWindowEnd } : null,
@@ -65,7 +69,10 @@ const settingsColumns = (s: OrderBlockSettings) => ({
   stop: s.stop,
   takeProfitLong: s.takeProfitLong,
   takeProfitShort: s.takeProfitShort,
-  trailing: s.trailing,
+  trailingLong: s.trailingLong,
+  trailingShort: s.trailingShort,
+  // Omitted (an older client) keeps the stored choice on update; create defaults to off.
+  ...(s.syncAdminExit !== undefined ? { syncAdminExit: s.syncAdminExit } : {}),
   weekdays: s.weekdays,
   // Omitted (an older client) keeps the stored window on update; create defaults to All day.
   ...(s.tradingWindow !== undefined ? { tradingWindowStart: s.tradingWindow?.start ?? null, tradingWindowEnd: s.tradingWindow?.end ?? null } : {}),
@@ -93,7 +100,7 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
   async function get(id: string): Promise<OrderBlockDto | undefined> {
     if (!isUuid(id)) return undefined;
     const [row] = await select().where(owned(id)).limit(1);
-    return row && toDto(row.b, row);
+    return row && toDto(row.b, row, row.b.syncAdminExit ? await latestCommonExit(db) : null);
   }
 
   /** Distinguishes a stale revision from "not yours / not there" after a guarded write missed. */
@@ -139,7 +146,8 @@ export function orderBlocksFor(db: Executor, ownerId: string) {
 
     async list(): Promise<OrderBlockDto[]> {
       const rows = await select().where(and(eq(orderBlocks.ownerId, ownerId), isNull(orderBlocks.archivedAt))).orderBy(asc(instruments.symbol), asc(orderBlocks.mode));
-      return rows.map((r) => toDto(r.b, r));
+      const admin = rows.some((r) => r.b.syncAdminExit) ? await latestCommonExit(db) : null;
+      return rows.map((r) => toDto(r.b, r, admin));
     },
 
     async create(input: OrderBlockCreate, timezone: string): Promise<OrderBlockDto> {

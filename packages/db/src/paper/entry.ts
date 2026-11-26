@@ -30,6 +30,8 @@ import type { SimResult, VenueDiagnostics } from './simulator';
 import { lighterLiveRefusalFor, liveEntryEligibility, resolveAccountVenue, type LiveEligibility } from '../live/liveMode';
 import type { ExecutionVenue } from '../venue/types';
 import { requestExit } from './exits';
+import { effectiveExitPlan, latestCommonExit } from '../repos/commonExit';
+import type { EffectiveExitPlanDto } from '@trendpilot/domain';
 import { newClientOrderId } from './clientOrderId';
 
 /**
@@ -60,10 +62,20 @@ export interface EntryOutcome {
 const UNRESOLVED = ['INTENT', 'SUBMITTING', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'UNKNOWN'] as const;
 
 /**
- * Exit rules saved with every new intent and position. V2: explicit Take Profit / Trailing Take
- * Profit allocation and arm-then-pullback targets. Snapshots without it keep the earlier rules.
+ * Exit rules saved with every new intent and position.
+ * V3 (current): per-side Take Profit with an overall allocation, per-side partial Trailing Take
+ * Profit (close share of the trailing pool per trigger, rearm on a new best, one-shot target close)
+ * and the exit plan's source (the block's own, or an admin Common Exit Definition version).
+ * V2: explicit Take Profit / Trailing Take Profit allocation (shared trailing) and arm-then-pullback
+ * targets. Snapshots without a version keep the earliest rules.
  */
-export const EXIT_RULES_VERSION = 'V2';
+export const EXIT_RULES_VERSION = 'V3';
+export const EXIT_RULES_V2 = 'V2';
+
+/** The exit plan an entry of this block uses now: its own, or the latest admin rule while synced. */
+export async function effectiveExitFor(tx: Executor, block: BlockRow): Promise<EffectiveExitPlanDto> {
+  return effectiveExitPlan(block, block.syncAdminExit ? await latestCommonExit(tx) : null);
+}
 
 export const windowOf = (b: Pick<BlockRow, 'tradingWindowStart' | 'tradingWindowEnd'>): TradingWindow | null =>
   b.tradingWindowStart && b.tradingWindowEnd ? { start: b.tradingWindowStart, end: b.tradingWindowEnd } : null;
@@ -73,10 +85,11 @@ export const windowOf = (b: Pick<BlockRow, 'tradingWindowStart' | 'tradingWindow
  * configuration of the ACTUAL side of this entry (Long or Short, set independently); the exit
  * engine reads only that. Both sides are kept for the record.
  */
-function snapshotOf(block: BlockRow, version: VersionRow, side: 'LONG' | 'SHORT') {
+function snapshotOf(block: BlockRow, version: VersionRow, side: 'LONG' | 'SHORT', exit: EffectiveExitPlanDto) {
   return {
     exitRules: EXIT_RULES_VERSION,
     takeProfitSide: side,
+    exitPlan: { source: exit.source, adminVersion: exit.adminVersion },
     block: {
       id: block.id,
       revision: block.revision,
@@ -85,10 +98,13 @@ function snapshotOf(block: BlockRow, version: VersionRow, side: 'LONG' | 'SHORT'
       leverage: block.leverage,
       marginMode: block.marginMode,
       stop: block.stop,
-      takeProfit: side === 'LONG' ? block.takeProfitLong : block.takeProfitShort,
-      takeProfitLong: block.takeProfitLong,
-      takeProfitShort: block.takeProfitShort,
-      trailing: block.trailing,
+      takeProfit: side === 'LONG' ? exit.takeProfitLong : exit.takeProfitShort,
+      takeProfitLong: exit.takeProfitLong,
+      takeProfitShort: exit.takeProfitShort,
+      /** The Trailing Take Profit of THIS entry's side (the exit engine reads only this one). */
+      trailingSide: side === 'LONG' ? exit.trailingLong : exit.trailingShort,
+      trailingLong: exit.trailingLong,
+      trailingShort: exit.trailingShort,
       weekdays: block.weekdays,
       tradingWindow: windowOf(block),
       timezone: block.timezone,
@@ -177,6 +193,7 @@ export async function assessEntry(
     referenceCurrency = primary?.quote ?? null;
   }
 
+  const exitPlan = await effectiveExitFor(tx, block);
   const result = evaluatePaperEntry({
     side,
     settings: {
@@ -184,9 +201,10 @@ export async function assessEntry(
       leverage: block.leverage,
       marginMode: block.marginMode,
       stop: block.stop as never,
-      takeProfitLong: block.takeProfitLong as never,
-      takeProfitShort: block.takeProfitShort as never,
-      trailing: block.trailing as never,
+      takeProfitLong: exitPlan.takeProfitLong,
+      takeProfitShort: exitPlan.takeProfitShort,
+      trailingLong: exitPlan.trailingLong,
+      trailingShort: exitPlan.trailingShort,
       risk: block.risk as never
     },
     version: { emaFilter: version.emaFilter, maxPriceDeviationPct: version.maxPriceDeviationPct },
@@ -332,7 +350,7 @@ export async function evaluateAndReserveEntry(
       marginMode: block.marginMode,
       reservedUsdt: result.requiredUsdt,
       sizing: { ...s, liquidationEstimate: result.liquidationPrice },
-      settingsSnapshot: snapshotOf(block, version, side)
+      settingsSnapshot: snapshotOf(block, version, side, await effectiveExitFor(tx, block))
     })
     .returning({ id: orderIntents.id });
   await book(tx, account, [{ kind: 'ORDER_RESERVE', bucket: 'ORDER_RESERVE', amount: result.requiredUsdt, refType: 'order_intent', refId: intent!.id, memo: `Margin and fee reserved for ${block.mode === 'LIVE' ? 'Live' : 'paper'} entry` }]);
@@ -368,6 +386,35 @@ export interface SubmitSummary {
 type IntentRow = typeof orderIntents.$inferSelect;
 type ExitPlanTp = { mode: 'FIXED' | 'SPLIT' | 'OFF'; levels: { id: string; movePct: string; closePct: string }[] };
 type ExitPlanTrailing = { enabled: boolean; activationPct: string | null; distancePct: string | null; closePct?: string | null; basis: string } | undefined;
+type ExitPlanTrailingSide = {
+  enabled: boolean;
+  activationPct: string | null;
+  distancePct: string | null;
+  closePct: string | null;
+  targetClose?: { enabled: boolean; movePct: string | null; closePct: string | null } | null;
+  basis: string;
+};
+
+/**
+ * V3 partial Trailing Take Profit columns for a new position: waits for the activation move; each
+ * trigger closes `closePct` of the trailing pool. The optional target close is one-shot. No
+ * trailing exit when it is off, has no activation value, or there is no pool and no target close.
+ */
+export function partialTrailingAtEntry(side: 'LONG' | 'SHORT', entry: string, tr: ExitPlanTrailingSide | undefined, tick: string, now: Date, poolContracts: string) {
+  if (!tr?.enabled || !tr.activationPct || !tr.distancePct || !tr.closePct) return {};
+  if (new Decimal(poolContracts).lte(0)) return {};
+  const tc = tr.targetClose?.enabled && tr.targetClose.movePct && tr.targetClose.closePct ? tr.targetClose : null;
+  return {
+    trailingKind: 'TAKE_PROFIT' as const,
+    trailingStatus: 'WAITING' as const,
+    trailingBasis: tr.basis,
+    trailingDistancePct: tr.distancePct,
+    trailingActivationPrice: trailingActivationPrice(side, entry, tr.activationPct, tick),
+    trailingClosePct: tr.closePct,
+    trailingUpdatedAt: now,
+    ...(tc ? { trailingTargetPrice: takeProfitPrice(side, entry, tc.movePct!, tick), trailingTargetClosePct: tc.closePct, trailingTargetStatus: 'PENDING' } : {})
+  };
+}
 
 /**
  * Trailing Take Profit columns for a new position. It always waits for the activation move,
@@ -388,6 +435,18 @@ export function trailingAtEntry(side: 'LONG' | 'SHORT', entry: string, tr: NonNu
     trailingActivationPrice: trailingActivationPrice(side, entry, tr.activationPct, tick),
     trailingUpdatedAt: now
   };
+}
+
+/**
+ * V2 intents (saved before per-side trailing): trailing's allocation is c% of the opening quantity
+ * rounded down to the step; Take Profit (when on) gets the exact rest, with Take Profit off the rest
+ * is unallocated. Kept exactly so intents in flight at deploy size as they were saved.
+ */
+function v2Plan(side: 'LONG' | 'SHORT', price: string, contracts: string, tp: ExitPlanTp, tr: ExitPlanTrailing, spec: { priceTick: string; qtyStep: string }) {
+  const c = tr?.enabled ? new Decimal(tr.closePct ?? 0) : new Decimal(0);
+  const trailingContracts = Decimal.min(contracts, new Decimal(contracts).times(c).div(100).div(spec.qtyStep).floor().times(spec.qtyStep));
+  if (tp.mode === 'OFF') return { targets: [], trailingContracts: trailingContracts.toFixed(), takeProfitContracts: '0' };
+  return planExits(side, price, contracts, { takeProfit: { ...tp, allocationPct: new Decimal(100).minus(c).toFixed() }, trailing: { enabled: Boolean(tr?.enabled) } }, spec);
 }
 
 /** Resolves an unfilled intent and releases its reservation (one ledger row per intent). Caller holds the intent lock. */
@@ -446,20 +505,35 @@ async function record(db: Db, job: JobRow | null, intent: IntentRow, sim: SimRes
     const qty = new Decimal(f.contracts).times(inst!.contractMultiplier);
     const margin = qty.times(f.price).div(cur!.leverage).toDecimalPlaces(8, Decimal.ROUND_UP);
     const sizing = cur!.sizing as { liquidationEstimate: string };
-    const snap = cur!.settingsSnapshot as { exitRules?: string; block: { takeProfit: ExitPlanTp; trailing: ExitPlanTrailing }; strategyVersion: { id: string } };
+    const snap = cur!.settingsSnapshot as {
+      exitRules?: string;
+      exitPlan?: { source: 'CUSTOM' | 'ADMIN'; adminVersion: number | null };
+      block: { takeProfit: ExitPlanTp & { allocationPct?: string }; trailing?: ExitPlanTrailing; trailingSide?: ExitPlanTrailingSide };
+      strategyVersion: { id: string };
+    };
     const side = cur!.side as 'LONG' | 'SHORT';
-    const tr = snap.block.trailing;
     const spec = { priceTick: inst!.priceTick, qtyStep: inst!.qtyStep };
-    // Exit allocation from the confirmed opening quantity (V2), or the rules an older intent was
-    // saved with: targets close their share of the whole position and trailing manages the rest.
-    const v2 = snap.exitRules === EXIT_RULES_VERSION;
-    const plan = v2
-      ? planExits(side, f.price, f.contracts, { takeProfit: snap.block.takeProfit, trailing: { enabled: Boolean(tr?.enabled), closePct: tr?.closePct ?? null } }, spec)
-      : { targets: planTargets(side, f.price, f.contracts, snap.block.takeProfit, spec), trailingContracts: null };
+    // V3: per-side allocation and partial trailing. V2: shared trailing with an allocation of the
+    // opening quantity. Older intents: targets close their share of the whole position and
+    // trailing manages the rest. Each keeps the rules it was saved with.
+    const v3 = snap.exitRules === EXIT_RULES_VERSION;
+    const v2 = snap.exitRules === EXIT_RULES_V2;
+    const tr = snap.block.trailing;
+    const trSide = snap.block.trailingSide;
+    const plan = v3
+      ? planExits(side, f.price, f.contracts, { takeProfit: snap.block.takeProfit, trailing: { enabled: Boolean(trSide?.enabled) } }, spec)
+      : v2
+        ? v2Plan(side, f.price, f.contracts, snap.block.takeProfit, tr, spec)
+        : { targets: planTargets(side, f.price, f.contracts, snap.block.takeProfit, spec), trailingContracts: null };
     const tpLevel = snap.block.takeProfit.mode === 'FIXED' && plan.targets.length ? snap.block.takeProfit.levels[0] : undefined;
     const tpPrice = tpLevel ? takeProfitPrice(side, f.price, tpLevel.movePct, inst!.priceTick) : null;
     // EXT-04: trailing state from the saved plan, persisted on the position.
-    const trailing = tr?.enabled && tr.distancePct ? trailingAtEntry(side, f.price, tr, inst!.priceTick, now, plan.trailingContracts) : {};
+    const trailing = v3
+      ? partialTrailingAtEntry(side, f.price, trSide, inst!.priceTick, now, plan.trailingContracts ?? '0')
+      : tr?.enabled && tr.distancePct
+        ? trailingAtEntry(side, f.price, tr, inst!.priceTick, now, plan.trailingContracts)
+        : {};
+    const exitPlanCols = v3 && snap.exitPlan ? { exitPlanSource: snap.exitPlan.source, exitPlanAdminVersion: snap.exitPlan.adminVersion } : {};
 
     // EXE-03: verify the venue's resting stop against the filled exposure. Never trust the ack alone.
     const prot = await venue.inspectProtection(sim.stop.orderId, cur!.instrumentId);
@@ -503,6 +577,7 @@ async function record(db: Db, job: JobRow | null, intent: IntentRow, sim: SimRes
         takeProfitPrice: tpPrice,
         takeProfitBasis: tpPrice ? sim.stop.basis : null,
         ...trailing,
+        ...exitPlanCols,
         feesUsdt: f.fee,
         openedAt: f.filledAt
       })
@@ -513,7 +588,7 @@ async function record(db: Db, job: JobRow | null, intent: IntentRow, sim: SimRes
       if (plan.targets.length) {
         await tx
           .insert(positionTargets)
-          .values(plan.targets.map((t) => ({ ownerId: cur!.ownerId, positionId: pos.id, ...t, triggerBasis: sim.stop.basis, triggerRule: v2 ? ('ARM_PULLBACK' as const) : ('TOUCH' as const) })));
+          .values(plan.targets.map((t) => ({ ownerId: cur!.ownerId, positionId: pos.id, ...t, triggerBasis: sim.stop.basis, triggerRule: v2 || v3 ? ('ARM_PULLBACK' as const) : ('TOUCH' as const) })));
       }
     }
 

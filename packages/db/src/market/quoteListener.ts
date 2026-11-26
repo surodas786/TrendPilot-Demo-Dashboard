@@ -1,12 +1,14 @@
 import pg from 'pg';
 import { QUOTE_NOTIFY_CHANNEL, type QuoteNotification } from '../paper/exits';
+import { EXIT_DEFINITION_NOTIFY_CHANNEL } from '../repos/commonExit';
 
 /**
  * One Postgres LISTEN connection per web process, fanned out to every live-quote subscriber
  * (each browser session's SSE stream). Browsers never reach MEXC; they receive what the feed
  * process stored, the moment its transaction commits.
  */
-export type QuoteHubEvent = { kind: 'quote'; note: QuoteNotification } | { kind: 'resync' };
+/** `exitDefinition`: an admin published a Common Exit Definition version (open investor screens refresh). */
+export type QuoteHubEvent = { kind: 'quote'; note: QuoteNotification } | { kind: 'resync' } | { kind: 'exitDefinition'; version: number };
 
 export interface QuoteListenerOptions {
   connectionString: string;
@@ -60,6 +62,14 @@ export class QuoteListener {
     this.connecting = true;
     const c = new pg.Client({ connectionString: this.o.connectionString });
     c.on('notification', (m) => {
+      if (m.channel === EXIT_DEFINITION_NOTIFY_CHANNEL && m.payload) {
+        try {
+          this.emit({ kind: 'exitDefinition', version: Number((JSON.parse(m.payload) as { version: number }).version) });
+        } catch {
+          /* ignore malformed payloads */
+        }
+        return;
+      }
       if (m.channel !== QUOTE_NOTIFY_CHANNEL || !m.payload) return;
       try {
         this.emit({ kind: 'quote', note: JSON.parse(m.payload) as QuoteNotification });
@@ -80,6 +90,7 @@ export class QuoteListener {
     try {
       await c.connect();
       await c.query(`LISTEN ${QUOTE_NOTIFY_CHANNEL}`);
+      await c.query(`LISTEN ${EXIT_DEFINITION_NOTIFY_CHANNEL}`);
       this.client = c;
       this.connectedSince = new Date();
       this.failures = 0;

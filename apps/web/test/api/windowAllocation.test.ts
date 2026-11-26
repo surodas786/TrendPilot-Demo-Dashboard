@@ -16,6 +16,7 @@ import * as trade from '@/app/v1/me/trades/[id]/route';
 import { setTestClock } from '@/server/clock';
 import { BTC, blockBody, call, direct, teardown, USERS } from '../helpers';
 import { ALL_DAYS, clock, cookies, D, deliver, drain, exitsOf, M15, n, openFromAlert, openPositionOf, plus, positionsOf, reconciled, stopOf, targetsOf, tick, work } from '../paperReplay';
+import { reapply0037 as reapplyExitConversion } from '../paperReplay';
 
 const A = USERS.investorA.email;
 const B = USERS.investorB.email;
@@ -124,7 +125,8 @@ describe('Position to close (%) on Trailing Take Profit: 0 %, 40 %, 100 % of the
   it('100 %: Trailing Take Profit manages the whole position; no take-profit target', async () => {
     await openFromAlert({ a: { takeProfit: FIXED_TP, trailing: TTP('100') }, b: null });
     const p = (await openPositionOf(A))!;
-    expect([p.trailingStatus, n(p.trailingPlannedContracts)]).toEqual(['WAITING', '153']);
+    // Take Profit allocation 0 %: trailing's pool is the whole position and it closes 100 % of it.
+    expect([p.trailingStatus, n(p.trailingClosePct)]).toEqual(['WAITING', '100']);
     expect(await targetsOf(p.id)).toHaveLength(0);
     expect(p.takeProfitPrice).toBeNull();
   });
@@ -132,7 +134,8 @@ describe('Position to close (%) on Trailing Take Profit: 0 %, 40 %, 100 % of the
   it('40 % Long: 61 trail, 92 Take Profit; first touch arms, the pullback closes exactly 92; stop follows the remainder', async () => {
     await openFromAlert({ a: { takeProfit: FIXED_TP, trailing: TTP('40') }, b: null });
     const p0 = (await openPositionOf(A))!;
-    expect(n(p0.trailingPlannedContracts)).toBe('61');
+    // Take Profit allocation 60 % → 92; trailing closes 100 % of the 61 left (its pool).
+    expect(n(p0.trailingClosePct)).toBe('100');
     const [t] = await targetsOf(p0.id);
     expect([n(t!.plannedContracts), n(t!.triggerPrice), t!.triggerRule]).toEqual(['92', '65650.5', 'ARM_PULLBACK']);
 
@@ -161,7 +164,7 @@ describe('Position to close (%) on Trailing Take Profit: 0 %, 40 %, 100 % of the
     await openFromAlert({ side: 'SHORT', a: { takeProfit: FIXED_TP, trailing: TTP('40') }, b: null });
     const p0 = (await openPositionOf(A))!;
     const [t] = await targetsOf(p0.id);
-    expect([p0.side, n(t!.plannedContracts), n(p0.trailingPlannedContracts)]).toEqual(['SHORT', '92', '61']);
+    expect([p0.side, n(t!.plannedContracts), n(p0.trailingClosePct)]).toEqual(['SHORT', '92', '100']);
     const target = D(t!.triggerPrice);
     await tick(target.minus(20).toFixed());
     expect((await drain()).find((r) => r.tick)?.tick).toMatchObject({ targetsArmed: 1, takeProfitsRequested: 0 });
@@ -174,15 +177,15 @@ describe('Position to close (%) on Trailing Take Profit: 0 %, 40 %, 100 % of the
     expect(await reconciled()).toBe(true);
   });
 
-  it('Take Profit off with 40 %: the other 60 % stays open under the stop loss', async () => {
+  it('Take Profit off with 40 %: the first trigger closes 40 % (61); the other 92 stays open under the stop loss and trailing rearms', async () => {
     await openFromAlert({ a: { takeProfit: { mode: 'OFF', levels: [] }, trailing: { ...TTP('40'), activationPct: '0.5', distancePct: '0.2' } }, b: null });
     const p0 = (await openPositionOf(A))!;
-    expect(n(p0.trailingPlannedContracts)).toBe('61');
+    expect(n(p0.trailingClosePct)).toBe('40');
     await tick('65400'); // activates (65325.6)
     await tick('65250'); // pullback ≥ 0.2 % from 65400
     await drain();
     const p = (await openPositionOf(A))!;
-    expect([n(p.contracts), p.trailingStatus, n(p.trailingFilledContracts)]).toEqual(['92', 'DONE', '61']);
+    expect([n(p.contracts), p.trailingStatus, p.trailingCycle]).toEqual(['92', 'REARM', 1]);
     expect(n((await stopOf(p)).contracts)).toBe('92');
   });
 });
@@ -252,9 +255,14 @@ describe('migration 0019 converts saved blocks without changing their effective 
     for (const stmt of dataSteps) await direct.pool.query(stmt);
     // Then 0021 (per-side Take Profit) starts both sides from the converted shared configuration.
     await direct.pool.query('UPDATE order_blocks SET take_profit_short = take_profit');
+    // Then 0037 (per-side trailing, Take Profit allocation).
+    await direct.pool.query(`UPDATE order_blocks SET take_profit = take_profit - 'allocationPct', take_profit_short = take_profit_short - 'allocationPct'`);
+    await reapplyExitConversion();
     const get = async (cookie: string, id: string) => (await call(block.GET, { path: '/x', cookie, params: { id } })).body;
-    expect(await get(cookies.a, fixed)).toMatchObject({ takeProfitLong: { levels: [{ closePct: '100' }] }, takeProfitShort: { levels: [{ closePct: '100' }] }, trailing: { closePct: '40' }, tradingWindow: null });
-    expect(await get(cookies.b, split)).toMatchObject({ takeProfitLong: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, takeProfitShort: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, trailing: { closePct: '20' } });
+    expect(await get(cookies.a, fixed)).toMatchObject({ takeProfitLong: { levels: [{ closePct: '100' }] }, takeProfitShort: { levels: [{ closePct: '100' }] }, trailingLong: { closePct: '100' }, trailingShort: { closePct: '100' }, tradingWindow: null });
+    expect((await get(cookies.a, fixed)).takeProfitLong.allocationPct).toBe('60');
+    expect(await get(cookies.b, split)).toMatchObject({ takeProfitLong: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, takeProfitShort: { levels: [{ closePct: '62.5' }, { closePct: '37.5' }] }, trailingLong: { closePct: '100' } });
+    expect((await get(cookies.b, split)).takeProfitLong.allocationPct).toBe('80');
     // Both now pass the current rules unchanged (an unrelated edit saves).
     for (const [cookie, id] of [[cookies.a, fixed], [cookies.b, split]] as const) {
       const b = await get(cookie, id);

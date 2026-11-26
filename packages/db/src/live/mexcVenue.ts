@@ -344,8 +344,10 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
       // Some venues shrink a position stop automatically: nothing to do then.
       if (D(s.vol).eq(contracts)) return stopOrderId;
       if (!verified('STOP_RESIZE_AFTER_PARTIAL_CLOSE')) throw new MexcPrivateError('stop resize is not verified on a live pilot; the position stays flagged until reviewed', 'REFUSED');
-      // Cancel, then re-place for exactly the remainder at the SAME trigger (never widened).
-      await o.requester.request('POST', '/api/v1/private/stoporder/cancel', { orders: [{ stopPlanOrderId: Number(s.stopId) }] });
+      // Place the replacement for exactly the remainder at the SAME trigger FIRST, then cancel the
+      // old stop: the remainder is never left without a stop. If MEXC refuses the replacement (e.g.
+      // "closable quantity" while the old stop rests), the old reduce-only stop stays and still
+      // covers the remainder; the caller verifies coverage and reports it. Never cancel-first.
       const id = await o.requester.request<string | number>('POST', '/api/v1/private/stoporder/place', {
         positionId: Number(s.positionId),
         vol: num(contracts),
@@ -360,6 +362,10 @@ export function mexcVenue(o: MexcVenueOptions): ExecutionVenue & { reconcileGrac
         takeProfitType: 0,
         takeProfitReverse: 2
       });
+      // The replacement rests; the old (larger, reduce-only) stop is removed. A failed cancel leaves
+      // an oversized reduce-only stop at the same price, which cannot open exposure; the new
+      // reference is returned either way so the position tracks the exact-size stop.
+      await o.requester.request('POST', '/api/v1/private/stoporder/cancel', { orders: [{ stopPlanOrderId: Number(s.stopId) }] }).catch(() => undefined);
       return stopRef(String(id));
     },
 

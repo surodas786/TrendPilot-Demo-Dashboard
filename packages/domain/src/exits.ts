@@ -154,22 +154,65 @@ export interface ExitPlan {
 }
 
 /**
- * Splits the confirmed opening quantity between Trailing Take Profit ("Position to close (%)")
- * and Take Profit (the rest, when on), then divides the Take Profit share between its targets.
- * Each split target closes its share of the Take Profit allocation; the last one gets the exact
- * remainder so the targets add up to it.
+ * Splits the confirmed opening quantity between Take Profit (its overall allocation, when on) and
+ * the trailing pool (the rest, when Trailing Take Profit is on), then divides the Take Profit
+ * share between its targets. Each split target closes its share of the Take Profit allocation; the
+ * last one gets the exact remainder so the targets add up to it.
  */
 export function planExits(
   side: Side,
   avgEntry: string,
   baseContracts: string,
-  s: { takeProfit: { mode: 'FIXED' | 'SPLIT' | 'OFF'; levels: { id: string; movePct: string; closePct: string }[] }; trailing: { enabled: boolean; closePct?: string | null } },
+  s: { takeProfit: { mode: 'FIXED' | 'SPLIT' | 'OFF'; levels: { id: string; movePct: string; closePct: string }[]; allocationPct?: string | null }; trailing: { enabled: boolean } },
   spec: { priceTick: string; qtyStep: string }
 ): ExitPlan {
   const a = allocateContracts(baseContracts, s, spec.qtyStep);
   const targets = D(a.takeProfitContracts).gt(0) ? planTargets(side, avgEntry, a.takeProfitContracts, s.takeProfit, spec).filter((t) => D(t.plannedContracts).gt(0)) : [];
   return { targets, trailingContracts: a.trailingContracts, takeProfitContracts: a.takeProfitContracts };
 }
+
+/* ───────────────────────── partial exits (1-100 %) ───────────────────────── */
+
+/**
+ * Contracts one trailing trigger or target close closes: `closePct` of `pool`, rounded DOWN to the
+ * contract step. 100% is the whole pool exactly (no rounding), so a full close never leaves dust.
+ */
+export function partialCloseContracts(pool: string, closePct: string, qtyStep: string): string {
+  const base = D(pool);
+  if (base.lte(0)) return '0';
+  if (D(closePct).gte(100)) return base.toFixed();
+  return Decimal.min(base, base.times(closePct).div(100).div(qtyStep).floor().times(qtyStep)).toFixed();
+}
+
+export type PartialExitIssueCode = 'EXIT_BELOW_STEP' | 'EXIT_BELOW_MINIMUM' | 'RESIDUAL_BELOW_MINIMUM' | 'NOT_STEP_MULTIPLE';
+
+export const PARTIAL_EXIT_ISSUE_TEXT: Record<PartialExitIssueCode, string> = {
+  EXIT_BELOW_STEP: 'The share rounds down to less than one contract step, so nothing can be closed.',
+  EXIT_BELOW_MINIMUM: 'The partial close is below the exchange minimum order quantity.',
+  RESIDUAL_BELOW_MINIMUM: 'The quantity left open would be below the exchange minimum order quantity.',
+  NOT_STEP_MULTIPLE: 'The quantity is not a whole number of contract steps.'
+};
+
+/**
+ * Whether closing `contracts` of `remaining` is a valid order at the exchange. A partial close is
+ * never widened into a full close: an invalid one is reported and not sent. Closing everything
+ * (`contracts` = `remaining`) is always valid (the exchange's close path accepts the whole leg).
+ */
+export function partialExitCheck(contracts: string, remaining: string, spec: { qtyStep: string; minQty: string }): { ok: true } | { ok: false; code: PartialExitIssueCode; message: string } {
+  const q = D(contracts);
+  const rem = D(remaining);
+  const fail = (code: PartialExitIssueCode) => ({ ok: false as const, code, message: PARTIAL_EXIT_ISSUE_TEXT[code] });
+  if (q.lte(0)) return fail('EXIT_BELOW_STEP');
+  if (q.gte(rem)) return { ok: true };
+  if (!q.div(spec.qtyStep).isInteger()) return fail('NOT_STEP_MULTIPLE');
+  if (q.lt(spec.minQty)) return fail('EXIT_BELOW_MINIMUM');
+  const left = rem.minus(q);
+  if (left.gt(0) && left.lt(spec.minQty)) return fail('RESIDUAL_BELOW_MINIMUM');
+  return { ok: true };
+}
+
+/** Price at which a trailing target close fires (rounded toward entry: never further than configured). */
+export const targetClosePrice = (side: Side, avgEntry: string, movePct: string, tick: string): string => takeProfitPrice(side, avgEntry, movePct, tick);
 
 /**
  * How a take-profit target fires.
@@ -229,11 +272,18 @@ export function trailingLevelFrom(side: Side, watermark: string, distancePct: st
   return toTick(raw, tick, side === 'LONG' ? Decimal.ROUND_DOWN : Decimal.ROUND_UP).toFixed();
 }
 
+/**
+ * WAITING: not yet activated. ACTIVE: tracking the best price; a pullback to `level` triggers.
+ * REARM (partial trailing): the current cycle's close is complete; nothing triggers until price
+ * makes a new best beyond `cycleExtreme` (the best price of the completed cycle), which starts a
+ * fresh retracement cycle from that new extreme.
+ */
 export interface TrailingState {
-  status: 'WAITING' | 'ACTIVE';
+  status: 'WAITING' | 'ACTIVE' | 'REARM';
   activationPrice: string | null;
   watermark: string | null;
   level: string | null;
+  cycleExtreme?: string | null;
 }
 
 export interface TrailingStep {
@@ -242,6 +292,8 @@ export interface TrailingStep {
   /** The level moved (only ever tighter). */
   tightened: boolean;
   triggered: boolean;
+  /** REARM → ACTIVE: a new best price beyond the completed cycle's extreme started a new cycle. */
+  rearmed?: boolean;
 }
 
 /**
@@ -251,6 +303,12 @@ export interface TrailingStep {
  */
 export function advanceTrailing(side: Side, s: TrailingState, price: string, cfg: { distancePct: string; tick: string }): TrailingStep {
   const long = side === 'LONG';
+  if (s.status === 'REARM') {
+    const beyond = s.cycleExtreme == null || (long ? D(price).gt(s.cycleExtreme) : D(price).lt(s.cycleExtreme));
+    if (!beyond) return { state: s, activated: false, tightened: false, triggered: false };
+    const level = trailingLevelFrom(side, price, cfg.distancePct, cfg.tick);
+    return { state: { ...s, status: 'ACTIVE', watermark: D(price).toFixed(), level }, activated: false, tightened: true, triggered: false, rearmed: true };
+  }
   if (s.status === 'WAITING') {
     const reached = s.activationPrice === null || (long ? D(price).gte(s.activationPrice) : D(price).lte(s.activationPrice));
     if (!reached) return { state: s, activated: false, tightened: false, triggered: false };

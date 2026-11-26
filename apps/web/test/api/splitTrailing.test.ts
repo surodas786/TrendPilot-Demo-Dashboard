@@ -60,8 +60,8 @@ describe('Long: Trailing Take Profit closes 20 %; split TP (62.5 % / 37.5 % of t
     const p = (await openPositionOf(A))!;
     expect(n(p.avgEntryPrice)).toBe('65000.5');
     expect(n(p.contracts)).toBe('153');
-    expect(n(p.trailingPlannedContracts)).toBe('30'); // floor(153 × 20 %)
-    expect(n(p.trailingFilledContracts)).toBe('0');
+    // Per side: Take Profit manages 80 % (123); trailing closes 100 % of its pool, floor(153 × 20 %) = 30.
+    expect([n(p.trailingClosePct), p.trailingCycle, p.trailingCycleContracts]).toEqual(['100', 0, null]);
     const t = await targetsOf(p.id);
     expect(t.map((x) => [x.levelId, n(x.triggerPrice), n(x.plannedContracts), x.status, x.triggerRule, x.armedAt])).toEqual([
       ['tp1', '66300.5', '76', 'PENDING', 'ARM_PULLBACK', null], // 65000.5 × 1.02, toward entry; floor(123 × 62.5 %)
@@ -191,7 +191,7 @@ describe('Long: Trailing Take Profit closes 20 %; split TP (62.5 % / 37.5 % of t
       ['TRAILING_TAKE_PROFIT', '30', '0']
     ]);
     expect(p).toMatchObject({ trailingStatus: 'DONE' });
-    expect(n(p!.trailingFilledContracts)).toBe('30');
+    expect(p!.trailingCycle).toBe(1); // one trigger closed its whole pool (30)
     expect((await stopOf(p!)).status).toBe('CANCELLED');
     expect(await venue()).toEqual([{ side: 'LONG', contracts: '0' }]);
     const released = (await exitsOf(id)).reduce((s, x) => s.plus(x.marginReleased), D(0));
@@ -207,7 +207,7 @@ describe('Long: Trailing Take Profit closes 20 %; split TP (62.5 % / 37.5 % of t
       ['tp2', 'DONE', '47', '47', '47']
     ]);
     expect(t.body.targets.every((x: any) => x.triggerRule === 'ARM_PULLBACK' && x.armedAt)).toBe(true);
-    expect(t.body.trailing).toMatchObject({ kind: 'TAKE_PROFIT', status: 'DONE', watermark: '67700', level: '67023', basis: 'MARK', distancePct: '1', plannedContracts: '30', filledContracts: '30' });
+    expect(t.body.trailing).toMatchObject({ kind: 'TAKE_PROFIT', status: 'DONE', watermark: '67700', level: '67023', basis: 'MARK', distancePct: '1', partial: { closePct: '100', cycles: 1, pendingContracts: null } });
     expect((await call(trade.GET, { path: '/x', cookie: cookies.b, params: { id: p!.id } })).status).toBe(404);
   });
 });

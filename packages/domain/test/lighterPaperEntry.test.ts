@@ -15,7 +15,7 @@ const base = (o: Partial<EntryInput> = {}): EntryInput => ({
     stop: { type: 'PERCENT', value: '1.5', basis: 'MARK' },
     takeProfitLong: { mode: 'OFF', levels: [] },
     takeProfitShort: { mode: 'OFF', levels: [] },
-    trailing: { enabled: false, activationPct: null, distancePct: null, basis: 'MARK' },
+    trailingLong: { enabled: false, activationPct: null, distancePct: null, closePct: null, basis: 'MARK' }, trailingShort: { enabled: false, activationPct: null, distancePct: null, closePct: null, basis: 'MARK' },
     risk: EMPTY_RISK
   },
   version: { emaFilter: 'OFF', maxPriceDeviationPct: '0.5' },

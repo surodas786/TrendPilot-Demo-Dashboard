@@ -26,6 +26,7 @@
     "live-preflight": "tsx src/cli/live-preflight.ts",
     "alert-trace": "tsx src/cli/alert-trace.ts",
     "live-position-check": "tsx src/cli/live-position-check.ts",
+    "trade-settings-check": "tsx src/cli/trade-settings-check.ts",
     "live-sync": "tsx src/cli/live-sync.ts",
     "lighter-sync": "tsx src/cli/lighter-sync.ts",
     "lighter-readiness": "tsx src/cli/lighter-readiness.ts",

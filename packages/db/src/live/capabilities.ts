@@ -146,7 +146,7 @@ export const MEXC_CAPABILITIES: Capability[] = [
   },
   {
     id: 'STOP_RESIZE_AFTER_PARTIAL_CLOSE',
-    summary: 'Keep stop coverage equal to the remaining contracts after a partial close (cancel + POST /api/v1/private/stoporder/place volType 1)',
+    summary: 'Keep stop coverage equal to the remaining contracts after a partial close (POST /api/v1/private/stoporder/place volType 1 for the remainder FIRST, then cancel the old stop; never cancel-first)',
     docs: `${DOC}place-tpsl-order-by-position`,
     documented: 'PARTIAL',
     mock: 'VERIFIED',
@@ -154,7 +154,7 @@ export const MEXC_CAPABILITIES: Capability[] = [
     livePilot: 'PENDING',
     gaps: [
       'Not documented whether an attached/position stop shrinks automatically after a partial close',
-      'Placing a replacement before cancelling can exceed "closable quantity"; cancel-then-place leaves a short unprotected gap',
+      'Placing a replacement before cancelling can exceed "closable quantity": TrendPilot then keeps the old reduce-only stop (it still covers the remainder) and reports the resize as unconfirmed; cancel-then-place is not used because it leaves the remainder unprotected',
       'Sample response conflicts with the text (array vs order ID)'
     ]
   },
@@ -384,4 +384,48 @@ export type CapabilityState = Partial<Record<CapabilityId, Evidence>>;
 export function livePilotVerified(id: CapabilityId, override?: CapabilityState): boolean {
   const v = override?.[id] ?? [...MEXC_CAPABILITIES, ...BITUNIX_CAPABILITIES, ...LIGHTER_CAPABILITIES].find((c) => c.id === id)?.livePilot;
   return v === 'VERIFIED';
+}
+
+/**
+ * Whether a partial exit on this exchange keeps the remainder covered by a stop resized to exactly
+ * the remainder, by an exchange-supported mechanism verified on a live pilot (never cancel-first).
+ * Paper resizes its simulated stop atomically. Where it is not verified, a partial exit still keeps
+ * the original reduce-only stop at its price (it covers the remainder), but the exact resize is
+ * unconfirmed: the workflow must not be presented as protected-and-verified.
+ */
+export interface PartialCloseProtection {
+  exchange: string;
+  verified: boolean;
+  capability: CapabilityId | null;
+  mechanism: string;
+  limitation: string | null;
+}
+
+const PARTIAL_PROTECTION: Record<string, { capability: CapabilityId; mechanism: string; limitation: string }> = {
+  MEXC: {
+    capability: 'STOP_RESIZE_AFTER_PARTIAL_CLOSE',
+    mechanism: 'Place a stop for exactly the remainder at the same price, then cancel the old stop (never cancel-first).',
+    limitation:
+      'MEXC stop resize after a partial close is not yet verified on a live pilot account (capability STOP_RESIZE_AFTER_PARTIAL_CLOSE). MEXC may refuse the replacement while the old stop rests ("closable quantity"); the original reduce-only stop then stays at its price and still covers the remainder, and the position shows the resize as unconfirmed.'
+  },
+  BITUNIX: {
+    capability: 'BITUNIX_TPSL_RESIZE',
+    mechanism: 'Modify the TP/SL order in place to the remaining quantity at the same price (a whole-position TP/SL follows the leg automatically).',
+    limitation:
+      'Bitunix TP/SL modify after a partial close is not yet verified on a live pilot account (capability BITUNIX_TPSL_RESIZE). A whole-position TP/SL follows the leg; a fixed-quantity one keeps its size and price until the modify is verified, and the position shows the resize as unconfirmed.'
+  },
+  LIGHTER: {
+    capability: 'LIGHTER_STOP_RESIZE',
+    mechanism: 'ModifyOrder of the reduce-only stop to the remaining size at the same trigger.',
+    limitation:
+      'Lighter stop ModifyOrder after a partial close is not yet verified on a live pilot account (capability LIGHTER_STOP_RESIZE). The original reduce-only stop stays at its price and covers the remainder; the exact resize is unconfirmed.'
+  }
+};
+
+export function partialCloseProtection(exchange: string, mode: 'PAPER' | 'LIVE', override?: CapabilityState): PartialCloseProtection {
+  if (mode === 'PAPER') return { exchange, verified: true, capability: null, mechanism: 'The paper simulator resizes the stop to the remainder atomically.', limitation: null };
+  const p = PARTIAL_PROTECTION[exchange];
+  if (!p) return { exchange, verified: false, capability: null, mechanism: 'None', limitation: `${exchange}: no verified stop-resize mechanism; partial exits are not offered as protected.` };
+  const verified = livePilotVerified(p.capability, override);
+  return { exchange, verified, capability: p.capability, mechanism: p.mechanism, limitation: verified ? null : p.limitation };
 }

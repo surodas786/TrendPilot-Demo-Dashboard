@@ -1,7 +1,7 @@
 import { Decimal } from './decimal';
-import { planExits, trailingActivationPrice } from './exits';
+import { partialCloseContracts, partialExitCheck, planExits, targetClosePrice, trailingActivationPrice } from './exits';
 import type { MarketSource } from './marketFeed';
-import { exitAllocation, takeProfitFor, type OrderBlockSettings, type PriceBasis, type TakeProfitMode } from './orderBlock';
+import { exitAllocation, takeProfitFor, trailingFor, type OrderBlockSettings, type PriceBasis, type TakeProfitMode } from './orderBlock';
 
 /**
  * EXE-01 order preview: sizing, stop, targets and fees from a quote, without placing
@@ -57,10 +57,26 @@ export interface SidePreview {
   /** Each target with the contracts it would close from this size (above entry for a Long, below for a Short). */
   takeProfits: { id: string; price: string; closePct: string; contracts: string }[];
   /**
-   * Trailing Take Profit: arms at `activationPrice` and manages `contracts` (`managesPct` of
-   * the position, its "Position to close (%)").
+   * This side's Trailing Take Profit: arms at `activationPrice`; its pool is `contracts`
+   * (`managesPct` of the position: what Take Profit does not reserve). Each trigger closes
+   * `closePct` of the pool left (`firstCloseContracts` on the first trigger). `targetClose`: the
+   * optional one-shot target inside trailing.
    */
-  trailing: { activationPrice: string | null; distancePct: string; managesPct: string; contracts: string } | null;
+  trailing: {
+    activationPrice: string | null;
+    distancePct: string;
+    managesPct: string;
+    contracts: string;
+    closePct: string | null;
+    firstCloseContracts: string;
+    targetClose: { price: string; closePct: string; contracts: string } | null;
+  } | null;
+  /**
+   * Exit quantities from this size that the exchange would refuse (below a step or the minimum, or
+   * leaving a remainder below the minimum). Advisory: such an exit is reported and skipped at
+   * runtime, never widened into a full close.
+   */
+  exitWarnings: { exit: string; code: string; message: string }[];
   reasons: { code: PreviewReason; message: string }[];
   ok: boolean;
 }
@@ -71,7 +87,7 @@ export interface OrderPreview {
   notes: string[];
 }
 
-type PreviewSettings = Pick<OrderBlockSettings, 'orderCostUsdt' | 'leverage' | 'direction' | 'stop' | 'takeProfitLong' | 'takeProfitShort' | 'trailing' | 'risk'>;
+type PreviewSettings = Pick<OrderBlockSettings, 'orderCostUsdt' | 'leverage' | 'direction' | 'stop' | 'takeProfitLong' | 'takeProfitShort' | 'trailingLong' | 'trailingShort' | 'risk'>;
 
 const D = (v: string | number | Decimal) => new Decimal(v);
 const fmt = (v: Decimal, dp = 8) => v.toDecimalPlaces(dp, Decimal.ROUND_HALF_UP).toFixed();
@@ -127,21 +143,50 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
     reasons.push({ code: 'RISK_LIMIT', message: `Loss to stop ${fmt(lossToStop, 2)} ${ccy} exceeds your cap of ${s.risk.maxStopRiskUsdt} ${ccy}.` });
   }
 
-  const exits = { takeProfit: takeProfitFor(s, dir), trailing: s.trailing };
+  const tr = trailingFor(s, dir);
+  const exits = { takeProfit: takeProfitFor(s, dir), trailing: tr };
   const plan = planExits(dir, fmt(p), fmt(contracts), exits, { priceTick: spec.priceTick, qtyStep: spec.qtyStep });
   const tps = plan.targets.map((t) => ({ id: t.levelId, price: t.triggerPrice, closePct: t.closePct, contracts: t.plannedContracts }));
   const allocation = exitAllocation(exits);
+  const limits = { qtyStep: spec.qtyStep, minQty: spec.minQty };
+  const exitWarnings: SidePreview['exitWarnings'] = [];
+  if (contracts.gt(0)) {
+    let left = contracts;
+    plan.targets.forEach((t, i) => {
+      const c = partialExitCheck(t.plannedContracts, left.toFixed(), limits);
+      if (!c.ok) exitWarnings.push({ exit: `Take profit target ${i + 1}`, code: c.code, message: c.message });
+      left = left.minus(t.plannedContracts);
+    });
+  }
 
   // Same activation rounding as the running position (never closer than configured).
-  const trailing =
-    s.trailing.enabled && s.trailing.distancePct
-      ? {
-          activationPrice: trailingActivationPrice(dir, fmt(p), s.trailing.activationPct, spec.priceTick),
-          distancePct: s.trailing.distancePct,
-          managesPct: allocation.trailingPct,
-          contracts: plan.trailingContracts
+  let trailing: SidePreview['trailing'] = null;
+  if (tr.enabled && tr.distancePct) {
+    const pool = plan.trailingContracts;
+    const first = tr.closePct ? partialCloseContracts(pool, tr.closePct, spec.qtyStep) : '0';
+    const tc = tr.targetClose?.enabled && tr.targetClose.movePct && tr.targetClose.closePct ? tr.targetClose : null;
+    const tcContracts = tc ? partialCloseContracts(pool, tc.closePct!, spec.qtyStep) : '0';
+    trailing = {
+      activationPrice: trailingActivationPrice(dir, fmt(p), tr.activationPct, spec.priceTick),
+      distancePct: tr.distancePct,
+      managesPct: allocation.trailingPct,
+      contracts: pool,
+      closePct: tr.closePct,
+      firstCloseContracts: first,
+      targetClose: tc ? { price: targetClosePrice(dir, fmt(p), tc.movePct!, spec.priceTick), closePct: tc.closePct!, contracts: tcContracts } : null
+    };
+    if (contracts.gt(0)) {
+      if (D(pool).lte(0)) exitWarnings.push({ exit: 'Trailing take profit', code: 'NO_TRAILING_POOL', message: 'Take profit reserves the whole position, so Trailing take profit has nothing to close. Lower the Take profit allocation or turn trailing off.' });
+      else {
+        const c = partialExitCheck(first, fmt(contracts), limits);
+        if (!c.ok) exitWarnings.push({ exit: 'Trailing take profit', code: c.code, message: c.message });
+        if (tc) {
+          const t = partialExitCheck(tcContracts, fmt(contracts), limits);
+          if (!t.ok) exitWarnings.push({ exit: 'Trailing target close', code: t.code, message: t.message });
         }
-      : null;
+      }
+    }
+  }
 
   return {
     side: dir,
@@ -162,6 +207,7 @@ function side(s: PreviewSettings, spec: ContractSpec, quote: Quote, dir: 'LONG' 
     takeProfitManagesPct: allocation.takeProfitPct,
     takeProfits: tps,
     trailing,
+    exitWarnings,
     reasons,
     ok: reasons.length === 0
   };

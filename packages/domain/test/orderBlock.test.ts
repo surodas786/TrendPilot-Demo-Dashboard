@@ -88,15 +88,47 @@ describe('order block schema', () => {
     expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels: over }, trailing: trail }))).toContain('takeProfitLong');
   });
 
-  it('Position to close (%) lives on Trailing Take Profit: 0 to 100 inclusive, decimals allowed, empty is not 0', () => {
+  it('a legacy shared trailing converts per side with the same first-trigger effect (Take Profit allocation = 100 - c, close 100% of the pool)', () => {
     const t = (closePct: unknown) => valid({ trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct, basis: 'MARK' } });
     for (const v of ['0', '40', '100', '12.5', '0.00000001']) expect(parse(t(v)).ok, v).toBe(true);
-    expect(parse(t('40')).ok && (parse(t('40')) as { value: { trailing: { closePct: string } } }).value.trailing.closePct).toBe('40');
-    for (const v of ['100.1', '-1', 'abc', '1.', '']) expect(paths(t(v)), v).toContain('trailing.closePct');
-    expect(issues(t(null))).toContainEqual({ path: 'trailing.closePct', message: 'Enter Position to close (%), from 0 to 100.' });
-    expect(issues(valid({ trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.closePct', message: 'Enter Position to close (%), from 0 to 100.' });
-    // Off: no allocation may be saved for it.
-    expect(paths(valid({ trailing: { enabled: false, activationPct: null, distancePct: null, closePct: '40', basis: 'MARK' } }))).toContain('trailing');
+    const r = parse(t('40'));
+    expect(r.ok && r.value.trailingLong).toEqual({ enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '100', targetClose: null, basis: 'MARK' });
+    expect(r.ok && r.value.trailingShort).toEqual(r.ok && r.value.trailingLong);
+    expect(r.ok && r.value.takeProfitLong.allocationPct).toBe('60');
+    // Take Profit off: trailing closes c% of the remaining quantity.
+    const off = parse(valid({ takeProfit: { mode: 'OFF', levels: [] }, trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '40', basis: 'MARK' } }));
+    expect(off.ok && off.value.trailingLong.closePct).toBe('40');
+    for (const v of ['100.1', '-1', 'abc', '1.']) expect(paths(t(v)), v).toContain('trailingLong.closePct');
+    // Off: no value may be saved for it.
+    expect(paths(valid({ trailing: { enabled: false, activationPct: null, distancePct: null, closePct: '40', basis: 'MARK' } }))).toContain('trailingLong');
+  });
+
+  it('per-side trailing: close on each trigger is 1-100 (decimals allowed); Long and Short are independent', () => {
+    const side = (closePct: unknown) => ({ enabled: true, activationPct: '0.5', distancePct: '0.2', closePct, targetClose: null, basis: 'MARK' });
+    const OFF = { enabled: false, activationPct: null, distancePct: null, closePct: null, targetClose: null, basis: 'MARK' };
+    const mk = (l: unknown, sh: unknown = OFF) => {
+      const { trailing: _t, ...rest } = valid();
+      void _t;
+      return { ...rest, trailingLong: l, trailingShort: sh };
+    };
+    for (const v of ['1', '40', '100', '12.5', '1.00000001']) expect(parse(mk(side(v))).ok, v).toBe(true);
+    for (const v of ['0', '0.5', '100.01', '', 'x']) expect(paths(mk(side(v))), v).toContain('trailingLong.closePct');
+    expect(issues(mk(side(null)))).toContainEqual({ path: 'trailingLong.closePct', message: 'Enter Close on each trigger (%), from 1 to 100.' });
+    const r = parse(mk(side('40'), { ...side('25'), activationPct: '1', distancePct: '0.4', basis: 'LAST' }));
+    expect(r.ok && [r.value.trailingLong.closePct, r.value.trailingShort.closePct, r.value.trailingShort.basis]).toEqual(['40', '25', 'LAST']);
+    // Target close: one-shot, both values required while on, cleared while off.
+    expect(parse(mk({ ...side('40'), targetClose: { enabled: true, movePct: '2', closePct: '50' } })).ok).toBe(true);
+    expect(paths(mk({ ...side('40'), targetClose: { enabled: true, movePct: null, closePct: '50' } }))).toContain('trailingLong.targetClose.movePct');
+    expect(paths(mk({ ...side('40'), targetClose: { enabled: true, movePct: '2', closePct: '0' } }))).toContain('trailingLong.targetClose.closePct');
+    expect(paths(mk({ ...side('40'), targetClose: { enabled: false, movePct: '2', closePct: null } }))).toContain('trailingLong.targetClose');
+  });
+
+  it('split take profit accepts up to five levels; six are refused', () => {
+    const lv = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `l${i}`, movePct: String(i + 1), closePct: String(100 / n) }));
+    expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels: [{ id: 'a', movePct: '1', closePct: '50' }, { id: 'b', movePct: '2', closePct: '50' }] } })).ok).toBe(true);
+    expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels: lv(4).map((l) => ({ ...l, closePct: '25' })) } })).ok).toBe(true);
+    expect(parse(valid({ takeProfit: { mode: 'SPLIT', levels: lv(5) } })).ok).toBe(true);
+    expect(paths(valid({ takeProfit: { mode: 'SPLIT', levels: [...lv(5), { id: 'l9', movePct: '9', closePct: '0' }] } }))).toContain('takeProfitLong.levels');
   });
 
   it('a fixed target manages the whole Take Profit share; OFF has no levels', () => {
@@ -108,22 +140,23 @@ describe('order block schema', () => {
     expect(paths(valid({ takeProfit: { mode: 'OFF', levels: [{ id: 'x', movePct: '3', closePct: '100' }] } }))).toContain('takeProfitLong.levels');
   });
 
-  it('exitAllocation / allocateContracts: 0 %, 40 %, 100 % with trailing on; trailing off; Take Profit off', () => {
-    const on = (closePct: string) => ({ enabled: true, closePct });
-    const FIXED = { mode: 'FIXED' as const };
-    expect(exitAllocation({ takeProfit: FIXED, trailing: on('0') })).toEqual({ takeProfitPct: '100', trailingPct: '0', unallocatedPct: '0' });
-    expect(exitAllocation({ takeProfit: FIXED, trailing: on('40') })).toEqual({ takeProfitPct: '60', trailingPct: '40', unallocatedPct: '0' });
-    expect(exitAllocation({ takeProfit: FIXED, trailing: on('100') })).toEqual({ takeProfitPct: '0', trailingPct: '100', unallocatedPct: '0' });
-    expect(exitAllocation({ takeProfit: FIXED, trailing: { enabled: false, closePct: null } })).toEqual({ takeProfitPct: '100', trailingPct: '0', unallocatedPct: '0' });
-    // Take Profit off: what Trailing Take Profit does not take stays under the other exit rules.
-    expect(exitAllocation({ takeProfit: { mode: 'OFF' }, trailing: on('40') })).toEqual({ takeProfitPct: '0', trailingPct: '40', unallocatedPct: '60' });
+  it('exitAllocation / allocateContracts: Take Profit allocation 100 / 60 / 0 with trailing on; trailing off; Take Profit off', () => {
+    const FIXED = (allocationPct?: string) => ({ mode: 'FIXED' as const, ...(allocationPct !== undefined ? { allocationPct } : {}) });
+    const on = { enabled: true };
+    expect(exitAllocation({ takeProfit: FIXED('100'), trailing: on })).toEqual({ takeProfitPct: '100', trailingPct: '0', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED('60'), trailing: on })).toEqual({ takeProfitPct: '60', trailingPct: '40', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED('0'), trailing: on })).toEqual({ takeProfitPct: '0', trailingPct: '100', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED(), trailing: { enabled: false } })).toEqual({ takeProfitPct: '100', trailingPct: '0', unallocatedPct: '0' });
+    expect(exitAllocation({ takeProfit: FIXED('60'), trailing: { enabled: false } })).toEqual({ takeProfitPct: '60', trailingPct: '0', unallocatedPct: '40' });
+    // Take Profit off: the whole position is the trailing pool (trailing on) or unallocated.
+    expect(exitAllocation({ takeProfit: { mode: 'OFF' }, trailing: on })).toEqual({ takeProfitPct: '0', trailingPct: '100', unallocatedPct: '0' });
     expect(exitAllocation({ takeProfit: { mode: 'OFF' }, trailing: { enabled: false } })).toEqual({ takeProfitPct: '0', trailingPct: '0', unallocatedPct: '100' });
-    // Contracts from the confirmed opening quantity: trailing rounds down to the step, Take Profit gets the exact rest.
-    expect(allocateContracts('153', { takeProfit: FIXED, trailing: on('0') }, '1')).toEqual({ trailingContracts: '0', takeProfitContracts: '153' });
-    expect(allocateContracts('153', { takeProfit: FIXED, trailing: on('40') }, '1')).toEqual({ trailingContracts: '61', takeProfitContracts: '92' });
-    expect(allocateContracts('153', { takeProfit: FIXED, trailing: on('100') }, '1')).toEqual({ trailingContracts: '153', takeProfitContracts: '0' });
-    expect(allocateContracts('153', { takeProfit: { mode: 'OFF' }, trailing: on('40') }, '1')).toEqual({ trailingContracts: '61', takeProfitContracts: '0' });
-    expect(allocateContracts('1.5', { takeProfit: FIXED, trailing: on('40') }, '0.001')).toEqual({ trailingContracts: '0.6', takeProfitContracts: '0.9' });
+    // Contracts: the non-Take-Profit share rounds down to the step, Take Profit gets the exact rest (identical to the old 40 % trailing split).
+    expect(allocateContracts('153', { takeProfit: FIXED('100'), trailing: on }, '1')).toEqual({ trailingContracts: '0', takeProfitContracts: '153' });
+    expect(allocateContracts('153', { takeProfit: FIXED('60'), trailing: on }, '1')).toEqual({ trailingContracts: '61', takeProfitContracts: '92' });
+    expect(allocateContracts('153', { takeProfit: FIXED('0'), trailing: on }, '1')).toEqual({ trailingContracts: '153', takeProfitContracts: '0' });
+    expect(allocateContracts('153', { takeProfit: { mode: 'OFF' }, trailing: on }, '1')).toEqual({ trailingContracts: '153', takeProfitContracts: '0' });
+    expect(allocateContracts('1.5', { takeProfit: FIXED('60'), trailing: on }, '0.001')).toEqual({ trailingContracts: '0.6', takeProfitContracts: '0.9' });
   });
 
   it('never throws while a field is cleared or half-typed (Backspace): it reports field issues instead', () => {
@@ -138,16 +171,16 @@ describe('order block schema', () => {
       expect(() => parse(c)).not.toThrow();
       expect(parse(c).ok).toBe(false);
     }
-    expect(paths(cases[0])).toEqual(expect.arrayContaining(['takeProfitLong.levels.0.movePct', 'trailing.closePct']));
+    expect(paths(cases[0])).toEqual(expect.arrayContaining(['takeProfitLong.levels.0.movePct', 'trailingLong.activationPct']));
   });
 
   it('Trailing Take Profit requires Activate after profit and Trail distance — activation is never assumed', () => {
     const off = { takeProfit: { mode: 'OFF', levels: [] } };
-    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: null, distancePct: '0.1', closePct: '100', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.activationPct', message: 'Enter Activate after profit (%).' });
-    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: null, closePct: '100', basis: 'MARK' } }))).toContainEqual({ path: 'trailing.distancePct', message: 'Enter Trail distance (%).' });
-    expect(paths(valid({ ...off, trailing: { enabled: true, activationPct: '0', distancePct: '0.1', closePct: '100', basis: 'MARK' } }))).toContain('trailing.activationPct');
+    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: null, distancePct: '0.1', closePct: '100', basis: 'MARK' } }))).toContainEqual({ path: 'trailingLong.activationPct', message: 'Enter Activate after profit (%).' });
+    expect(issues(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: null, closePct: '100', basis: 'MARK' } }))).toContainEqual({ path: 'trailingShort.distancePct', message: 'Enter Retracement (%).' });
+    expect(paths(valid({ ...off, trailing: { enabled: true, activationPct: '0', distancePct: '0.1', closePct: '100', basis: 'MARK' } }))).toContain('trailingLong.activationPct');
     expect(parse(valid({ ...off, trailing: { enabled: true, activationPct: '0.3', distancePct: '0.1', closePct: '100', basis: 'LAST' } })).ok).toBe(true);
-    expect(paths(valid({ trailing: { enabled: false, activationPct: '0.3', distancePct: null, basis: 'MARK' } }))).toContain('trailing');
+    expect(paths(valid({ trailing: { enabled: false, activationPct: '0.3', distancePct: null, basis: 'MARK' } }))).toContain('trailingLong');
   });
 
   it('trading window: optional HH:mm Start and End, never equal; omitted or null = All day', () => {
@@ -265,7 +298,8 @@ describe('per-side Take Profit (Long and Short independent)', () => {
     expect(paths(perSide({ direction: 'SHORT_ONLY', takeProfitLong: bad }))).toEqual(['takeProfitLong.levels']);
     expect(paths(perSide({ direction: 'LONG_ONLY', takeProfitLong: bad }))).toEqual(['takeProfitLong.levels']);
     const r = parse(perSide({ direction: 'LONG_ONLY' }));
-    expect(r.ok && r.value.takeProfitShort).toEqual(SHORT);
+    // Kept as saved, with the Take Profit allocation a legacy shared trailing (off) implies (100 %).
+    expect(r.ok && r.value.takeProfitShort).toEqual({ ...SHORT, allocationPct: '100' });
   });
 
   it('a percentage cleared with Backspace is a field message, never an exception', () => {

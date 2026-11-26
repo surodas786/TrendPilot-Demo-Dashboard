@@ -44,5 +44,6 @@ export const trailingName = (kind: string) => (kind === 'STOP' ? 'Trailing stop 
 export const TRAILING_STATUS_LABEL: Record<string, string> = {
   WAITING: 'Waiting for activation',
   ACTIVE: 'Active',
+  REARM: 'Cycle complete — waiting for a new best price',
   DONE: 'Done'
 };

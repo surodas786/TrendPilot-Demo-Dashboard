@@ -10,6 +10,8 @@ export * from './repos/audit';
 export * from './repos/catalog';
 export * from './repos/strategyAdmin';
 export * from './repos/orderBlocks';
+export * from './repos/commonExit';
+export * from './paper/exitPlanApply';
 export * from './repos/outbox';
 export * from './mail/delivery';
 export * from './mail/settings';
